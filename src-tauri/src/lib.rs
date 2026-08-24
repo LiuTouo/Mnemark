@@ -10,10 +10,12 @@ mod update;
 use favorites::FavoritesStore;
 use history::HistoryStore;
 use models::{
-    AppConfig, Clip, ClipKind, ClipLocator, ClipScope, ClipboardUpdate, CollectionSummary,
-    FavoriteItem, FavoritesUiState, PanelShortcut, PreviewPayload, CURRENT_TUTORIAL_VERSION,
+    AppConfig, BatchMutationResult, Clip, ClipKind, ClipLocator, ClipScope, ClipboardUpdate,
+    CollectionSummary, FavoriteItem, FavoritesUiState, PanelShortcut, PreviewPayload,
+    CURRENT_TUTORIAL_VERSION,
 };
 use persistence::Persistence;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
@@ -33,6 +35,7 @@ struct AppState {
     config: Arc<Mutex<AppConfig>>,
     monitor_running: Arc<Mutex<bool>>,
     last_deleted: Arc<Mutex<Option<Clip>>>,
+    last_deleted_batch: Arc<Mutex<Option<Vec<Clip>>>>,
     persistence: Arc<Mutex<Option<Persistence>>>,
     tray_items: Arc<Mutex<Option<TrayMenuItems>>>,
     /// Hotkey-registration failure that opened Settings at startup, shown
@@ -125,6 +128,8 @@ fn delete_clip_impl(state: &AppState, id: &str) -> Result<(), String> {
         persist_with(state, |p| p.delete(id))?;
         let removed = history.delete(id);
         debug_assert_eq!(removed.map(|c| c.id), Some(clip.id.clone()));
+        // A newer single-item deletion invalidates any older batch undo.
+        lock(&state.last_deleted_batch).take();
         clip
     };
     *lock(&state.last_deleted) = Some(deleted);
@@ -174,6 +179,76 @@ fn undo_delete_impl(state: &AppState, id: &str) -> Result<Clip, String> {
 #[tauri::command]
 fn undo_delete(id: String, state: tauri::State<AppState>) -> Result<Clip, String> {
     undo_delete_impl(&state, &id)
+}
+
+fn delete_clips_impl(state: &AppState, ids: &[String]) -> Result<(), String> {
+    if ids.is_empty() {
+        return Err("Batch must include at least one Clip".to_string());
+    }
+    let mut seen = HashSet::new();
+    if ids.iter().any(|id| !seen.insert(id.as_str())) {
+        return Err("Batch contains duplicate Clips".to_string());
+    }
+
+    let mut history = lock(&state.history);
+    let deleted = ids
+        .iter()
+        .map(|id| {
+            history
+                .get_clip(id)
+                .ok_or_else(|| "Clip not found".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    persist_with(state, |p| p.delete_many(ids))?;
+    for id in ids {
+        let removed = history.delete(id);
+        debug_assert!(removed.is_some());
+    }
+    *lock(&state.last_deleted_batch) = Some(deleted);
+    lock(&state.last_deleted).take();
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_clips(ids: Vec<String>, state: tauri::State<AppState>) -> Result<(), String> {
+    delete_clips_impl(&state, &ids)
+}
+
+fn undo_delete_batch_impl(state: &AppState, ids: &[String]) -> Result<(), String> {
+    if ids.is_empty() {
+        return Err("Nothing to undo".to_string());
+    }
+
+    // Keep History + the batch slot locked through planning, persistence, and
+    // apply so a concurrent deletion cannot make a stale undo current again.
+    let mut history = lock(&state.history);
+    let mut batch_slot = lock(&state.last_deleted_batch);
+    let deleted = match batch_slot.as_ref() {
+        Some(clips)
+            if clips.len() == ids.len()
+                && clips.iter().zip(ids).all(|(clip, id)| clip.id == *id) =>
+        {
+            clips.clone()
+        }
+        _ => return Err("Nothing to undo".to_string()),
+    };
+
+    let config = lock(&state.config);
+    let mut planned = HistoryStore::new();
+    planned.clips = history.clips.clone();
+    for clip in deleted {
+        planned.insert(clip, &config);
+    }
+    persist_with(state, |p| p.dump(&planned.clips))?;
+    history.clips = planned.clips;
+    batch_slot.take();
+    Ok(())
+}
+
+#[tauri::command]
+fn undo_delete_batch(ids: Vec<String>, state: tauri::State<AppState>) -> Result<(), String> {
+    undo_delete_batch_impl(&state, &ids)
 }
 
 fn set_pinned_impl(state: &AppState, id: &str, pinned: bool) -> Result<(), String> {
@@ -617,6 +692,25 @@ fn add_favorite(
 }
 
 #[tauri::command]
+fn add_favorites(
+    collection_id: String,
+    locators: Vec<ClipLocator>,
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<BatchMutationResult, String> {
+    if locators.is_empty() {
+        return Err("Batch must include at least one favorite".to_string());
+    }
+    let items = locators
+        .iter()
+        .map(|locator| resolve_favorite_item(&state, locator))
+        .collect::<Result<Vec<_>, _>>()?;
+    let result = with_favorites(&state, |f| f.add_favorites(&collection_id, &items))?;
+    let _ = app.emit("favorites-updated", ());
+    Ok(result)
+}
+
+#[tauri::command]
 fn remove_favorite(
     collection_id: String,
     item_id: String,
@@ -626,6 +720,18 @@ fn remove_favorite(
     with_favorites(&state, |f| f.remove_favorite(&collection_id, &item_id))?;
     let _ = app.emit("favorites-updated", ());
     Ok(())
+}
+
+#[tauri::command]
+fn remove_favorites(
+    collection_id: String,
+    item_ids: Vec<String>,
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<BatchMutationResult, String> {
+    let result = with_favorites(&state, |f| f.remove_favorites(&collection_id, &item_ids))?;
+    let _ = app.emit("favorites-updated", ());
+    Ok(result)
 }
 
 #[tauri::command]
@@ -1846,6 +1952,7 @@ pub fn run(_hidden: bool) {
     let config_store = Arc::new(Mutex::new(config.clone()));
     let monitor_running = Arc::new(Mutex::new(true));
     let last_deleted = Arc::new(Mutex::new(None));
+    let last_deleted_batch = Arc::new(Mutex::new(None));
     let persistence = Arc::new(Mutex::new(persistence));
     let favorites = Arc::new(Mutex::new(favorites));
     let favorites_ui = Arc::new(Mutex::new(FavoritesUiState::default()));
@@ -1863,6 +1970,7 @@ pub fn run(_hidden: bool) {
             config: config_store.clone(),
             monitor_running: monitor_running.clone(),
             last_deleted: last_deleted.clone(),
+            last_deleted_batch: last_deleted_batch.clone(),
             persistence: persistence.clone(),
             tray_items: tray_items.clone(),
             startup_error: startup_error.clone(),
@@ -2013,7 +2121,9 @@ pub fn run(_hidden: bool) {
         .invoke_handler(tauri::generate_handler![
             get_clips,
             delete_clip,
+            delete_clips,
             undo_delete,
+            undo_delete_batch,
             set_pinned,
             get_config,
             take_startup_error,
@@ -2034,7 +2144,9 @@ pub fn run(_hidden: bool) {
             delete_collection,
             reorder_collections,
             add_favorite,
+            add_favorites,
             remove_favorite,
+            remove_favorites,
             list_favorite_items,
             favorite_collection_ids,
             paste_favorite,
@@ -2739,6 +2851,7 @@ mod persistence_consistency_tests {
             config: Arc::new(Mutex::new(config)),
             monitor_running: Arc::new(Mutex::new(true)),
             last_deleted: Arc::new(Mutex::new(None)),
+            last_deleted_batch: Arc::new(Mutex::new(None)),
             persistence: Arc::new(Mutex::new(persistence)),
             tray_items: Arc::new(Mutex::new(None)),
             startup_error: Arc::new(Mutex::new(None)),
@@ -2819,6 +2932,140 @@ mod persistence_consistency_tests {
             "Clip not found"
         );
         assert!(lock(&state.last_deleted).is_none());
+    }
+
+    #[test]
+    fn batch_delete_and_undo_update_memory_db_and_batch_slot() {
+        let state = app_state(
+            Some(Persistence::in_memory_for_test()),
+            AppConfig::default(),
+        );
+        let cfg = AppConfig::default();
+        for (id, captured_at) in [("c1", 1), ("c2", 2), ("c3", 3)] {
+            let value = clip(id, captured_at);
+            lock(&state.history).insert(value.clone(), &cfg);
+            lock(&state.persistence)
+                .as_mut()
+                .unwrap()
+                .persist_capture_with_evictions(&value, &[])
+                .unwrap();
+        }
+        let ids = vec!["c3".to_string(), "c1".to_string()];
+
+        delete_clips_impl(&state, &ids).unwrap();
+        assert_eq!(memory_ids(&state), vec!["c2".to_string()]);
+        assert_eq!(db_ids(&state), vec!["c2".to_string()]);
+        assert!(lock(&state.last_deleted).is_none());
+        assert_eq!(
+            lock(&state.last_deleted_batch)
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|clip| clip.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c3", "c1"]
+        );
+
+        undo_delete_batch_impl(&state, &ids).unwrap();
+        assert_eq!(
+            memory_ids(&state),
+            vec!["c1".to_string(), "c2".to_string(), "c3".to_string()]
+        );
+        assert_eq!(db_ids(&state), memory_ids(&state));
+        assert!(lock(&state.last_deleted_batch).is_none());
+    }
+
+    #[test]
+    fn batch_delete_validation_or_db_failure_has_no_side_effects() {
+        let state = app_state(Some(Persistence::broken_for_test()), AppConfig::default());
+        let cfg = AppConfig::default();
+        lock(&state.history).insert(clip("c1", 1), &cfg);
+        lock(&state.history).insert(clip("c2", 2), &cfg);
+
+        assert!(delete_clips_impl(&state, &["c1".to_string(), "c2".to_string()]).is_err());
+        assert_eq!(memory_ids(&state), vec!["c1".to_string(), "c2".to_string()]);
+        assert!(lock(&state.last_deleted_batch).is_none());
+
+        *lock(&state.persistence) = None;
+        assert!(delete_clips_impl(&state, &["c1".to_string(), "missing".to_string()]).is_err());
+        assert!(delete_clips_impl(&state, &["c1".to_string(), "c1".to_string()]).is_err());
+        assert_eq!(memory_ids(&state), vec!["c1".to_string(), "c2".to_string()]);
+        assert!(lock(&state.last_deleted_batch).is_none());
+    }
+
+    #[test]
+    fn batch_undo_db_failure_preserves_deleted_batch_and_history() {
+        let state = app_state(None, AppConfig::default());
+        let cfg = AppConfig::default();
+        lock(&state.history).insert(clip("c1", 1), &cfg);
+        lock(&state.history).insert(clip("c2", 2), &cfg);
+        let ids = vec!["c1".to_string(), "c2".to_string()];
+        delete_clips_impl(&state, &ids).unwrap();
+        *lock(&state.persistence) = Some(Persistence::broken_for_test());
+
+        assert!(undo_delete_batch_impl(&state, &ids).is_err());
+        assert!(memory_ids(&state).is_empty());
+        assert!(lock(&state.last_deleted_batch).is_some());
+        assert_eq!(
+            undo_delete_batch_impl(&state, &["c2".to_string(), "c1".to_string()]).unwrap_err(),
+            "Nothing to undo"
+        );
+    }
+
+    #[test]
+    fn batch_undo_applies_capacity_limits_atomically() {
+        let state = app_state(
+            Some(Persistence::in_memory_for_test()),
+            AppConfig {
+                text_count_limit: 2,
+                ..AppConfig::default()
+            },
+        );
+        let cfg = lock(&state.config).clone();
+        for (id, captured_at) in [("c1", 4), ("c2", 3)] {
+            let value = clip(id, captured_at);
+            lock(&state.history).insert(value.clone(), &cfg);
+            lock(&state.persistence)
+                .as_mut()
+                .unwrap()
+                .persist_capture_with_evictions(&value, &[])
+                .unwrap();
+        }
+        let ids = vec!["c1".to_string(), "c2".to_string()];
+        delete_clips_impl(&state, &ids).unwrap();
+
+        for (id, captured_at) in [("c3", 2), ("c4", 1)] {
+            let value = clip(id, captured_at);
+            let evicted = lock(&state.history).preview_evictions(&value, &cfg);
+            lock(&state.persistence)
+                .as_mut()
+                .unwrap()
+                .persist_capture_with_evictions(&value, &evicted)
+                .unwrap();
+            lock(&state.history).insert(value, &cfg);
+        }
+
+        undo_delete_batch_impl(&state, &ids).unwrap();
+        assert_eq!(memory_ids(&state), vec!["c1".to_string(), "c2".to_string()]);
+        assert_eq!(db_ids(&state), memory_ids(&state));
+    }
+
+    #[test]
+    fn newer_single_delete_invalidates_batch_undo() {
+        let state = app_state(None, AppConfig::default());
+        let cfg = AppConfig::default();
+        for (id, captured_at) in [("c1", 1), ("c2", 2), ("c3", 3)] {
+            lock(&state.history).insert(clip(id, captured_at), &cfg);
+        }
+        let batch_ids = vec!["c1".to_string(), "c2".to_string()];
+        delete_clips_impl(&state, &batch_ids).unwrap();
+        delete_clip_impl(&state, "c3").unwrap();
+
+        assert!(lock(&state.last_deleted_batch).is_none());
+        assert_eq!(
+            undo_delete_batch_impl(&state, &batch_ids).unwrap_err(),
+            "Nothing to undo"
+        );
     }
 
     #[test]

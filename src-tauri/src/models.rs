@@ -168,6 +168,14 @@ pub struct CollectionSummary {
     pub item_count: u64,
 }
 
+/// Result shared by idempotent batch membership operations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BatchMutationResult {
+    pub requested: u64,
+    pub changed: u64,
+    pub unchanged: u64,
+}
+
 /// Identifies a clip by scope for cross-referencing ("favorite this history
 /// item" / "copy this favorite into another collection").
 #[derive(Debug, Clone, Serialize, Deserialize)]

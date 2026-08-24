@@ -202,6 +202,17 @@ impl Persistence {
         Ok(())
     }
 
+    /// Delete a validated group of history rows atomically.
+    pub fn delete_many(&mut self, ids: &[String]) -> Result<(), String> {
+        let tx = self.conn.transaction().map_err(|e| e.to_string())?;
+        for id in ids {
+            tx.execute("DELETE FROM clips WHERE id = ?1", params![id])
+                .map_err(|e| e.to_string())?;
+        }
+        tx.commit()
+            .map_err(|e| format!("Failed to commit batch delete: {}", e))
+    }
+
     pub fn set_pinned(&self, id: &str, pinned: bool) -> Result<(), String> {
         self.conn
             .execute(

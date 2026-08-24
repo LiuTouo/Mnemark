@@ -56,6 +56,13 @@ export interface CollectionSummary {
   item_count: number;
 }
 
+/** Outcome of an idempotent batch drawer membership mutation. */
+export interface BatchMutationResult {
+  requested: number;
+  changed: number;
+  unchanged: number;
+}
+
 export type ClipScope = "history" | "favorite";
 
 /** Identifies a clip by scope (see the backend `ClipLocator`). */

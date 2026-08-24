@@ -9,7 +9,7 @@ use std::collections::HashSet;
 
 use rusqlite::{params, Connection};
 
-use crate::models::{ClipKind, CollectionSummary, FavoriteItem};
+use crate::models::{BatchMutationResult, ClipKind, CollectionSummary, FavoriteItem};
 
 pub struct FavoritesStore {
     conn: Connection,
@@ -431,6 +431,51 @@ impl FavoritesStore {
         self.add_favorite_with_at(collection_id, item, crate::now_ms())
     }
 
+    /// Add multiple snapshots to one collection in a single transaction.
+    /// Existing memberships are idempotent no-ops and are reported as
+    /// `unchanged`; invalid input leaves every table untouched.
+    pub fn add_favorites(
+        &mut self,
+        collection_id: &str,
+        items: &[FavoriteItem],
+    ) -> Result<BatchMutationResult, String> {
+        if items.is_empty() {
+            return Err("Batch must include at least one favorite".to_string());
+        }
+        if !self.collection_exists(collection_id)? {
+            return Err("Collection not found".to_string());
+        }
+        let mut seen = HashSet::new();
+        if items
+            .iter()
+            .any(|item| !seen.insert(item.content_hash.as_str()))
+        {
+            return Err("Batch contains duplicate favorites".to_string());
+        }
+
+        let added_at = crate::now_ms() as i64;
+        let tx = self.conn.transaction().map_err(|e| e.to_string())?;
+        let mut changed = 0_u64;
+        for item in items {
+            upsert_favorite_item(&tx, item)?;
+            changed += tx
+                .execute(
+                    "INSERT INTO memberships (collection_id, item_id, added_at)
+                     VALUES (?1, ?2, ?3)
+                     ON CONFLICT(collection_id, item_id) DO NOTHING",
+                    params![collection_id, item.content_hash, added_at],
+                )
+                .map_err(|e| e.to_string())? as u64;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        let requested = items.len() as u64;
+        Ok(BatchMutationResult {
+            requested,
+            changed,
+            unchanged: requested - changed,
+        })
+    }
+
     /// Add a favorite with an explicit membership timestamp (production uses the
     /// current clock; tests pin it to make ordering deterministic).
     fn add_favorite_with_at(
@@ -476,6 +521,44 @@ impl FavoritesStore {
         delete_orphan_items(&tx)?;
         tx.commit().map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    /// Remove multiple memberships in one transaction, then collect orphaned
+    /// snapshots once after all membership changes have been applied.
+    pub fn remove_favorites(
+        &mut self,
+        collection_id: &str,
+        item_ids: &[String],
+    ) -> Result<BatchMutationResult, String> {
+        if item_ids.is_empty() {
+            return Err("Batch must include at least one favorite".to_string());
+        }
+        if !self.collection_exists(collection_id)? {
+            return Err("Collection not found".to_string());
+        }
+        let mut seen = HashSet::new();
+        if item_ids.iter().any(|id| !seen.insert(id.as_str())) {
+            return Err("Batch contains duplicate favorites".to_string());
+        }
+
+        let tx = self.conn.transaction().map_err(|e| e.to_string())?;
+        let mut changed = 0_u64;
+        for item_id in item_ids {
+            changed += tx
+                .execute(
+                    "DELETE FROM memberships WHERE collection_id = ?1 AND item_id = ?2",
+                    params![collection_id, item_id],
+                )
+                .map_err(|e| e.to_string())? as u64;
+        }
+        delete_orphan_items(&tx)?;
+        tx.commit().map_err(|e| e.to_string())?;
+        let requested = item_ids.len() as u64;
+        Ok(BatchMutationResult {
+            requested,
+            changed,
+            unchanged: requested - changed,
+        })
     }
 
     /// Items of one collection, newest membership first. Each item's `added_at`
@@ -685,6 +768,33 @@ mod tests {
     }
 
     #[test]
+    fn batch_add_is_atomic_idempotent_and_reports_counts() {
+        let mut store = test_store();
+        let c = store.create_collection("Batch").unwrap();
+        let first = FavoriteItem::from(clip("h1", ClipKind::Text, "first"));
+        let second = FavoriteItem::from(clip("h2", ClipKind::Text, "second"));
+        store.add_favorite(&c.id, &first).unwrap();
+
+        let result = store
+            .add_favorites(&c.id, &[first.clone(), second.clone()])
+            .unwrap();
+        assert_eq!(
+            result,
+            BatchMutationResult {
+                requested: 2,
+                changed: 1,
+                unchanged: 1,
+            }
+        );
+        assert_eq!(store.list_items(&c.id).unwrap().len(), 2);
+
+        assert!(store
+            .add_favorites(&c.id, &[second.clone(), second])
+            .is_err());
+        assert_eq!(store.list_items(&c.id).unwrap().len(), 2);
+    }
+
+    #[test]
     fn removing_last_membership_deletes_orphan_snapshot() {
         let mut store = test_store();
         let a = store.create_collection("A").unwrap();
@@ -701,6 +811,42 @@ mod tests {
         // Removing from B orphans the snapshot.
         store.remove_favorite(&b.id, "hash").unwrap();
         assert!(store.get_item("hash").unwrap().is_none());
+    }
+
+    #[test]
+    fn batch_remove_collects_only_true_orphans_and_reports_counts() {
+        let mut store = test_store();
+        let a = store.create_collection("A").unwrap();
+        let b = store.create_collection("B").unwrap();
+        let shared = FavoriteItem::from(clip("h1", ClipKind::Text, "shared"));
+        let exclusive = FavoriteItem::from(clip("h2", ClipKind::Text, "exclusive"));
+        store
+            .add_favorites(&a.id, &[shared.clone(), exclusive])
+            .unwrap();
+        store.add_favorite(&b.id, &shared).unwrap();
+
+        let result = store
+            .remove_favorites(
+                &a.id,
+                &[
+                    "shared".to_string(),
+                    "exclusive".to_string(),
+                    "missing".to_string(),
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            result,
+            BatchMutationResult {
+                requested: 3,
+                changed: 2,
+                unchanged: 1,
+            }
+        );
+        assert!(store.get_item("shared").unwrap().is_some());
+        assert!(store.get_item("exclusive").unwrap().is_none());
+        assert!(store.list_items(&a.id).unwrap().is_empty());
+        assert_eq!(store.list_items(&b.id).unwrap().len(), 1);
     }
 
     #[test]

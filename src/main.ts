@@ -10,7 +10,8 @@ import { DragController, itemDragStartPayload, physicalScreenPoint, isFavoriteIt
 import type { ItemDragPoint } from "./drag";
 import { filterItems, isLink } from "./dataset";
 import type { FilterKind } from "./dataset";
-import type { Clip, ClipboardUpdate, ClipLocator, CollectionSummary, FavoriteItem, FavoritesUiState } from "./types";
+import { MultiSelectState } from "./multi-select";
+import type { BatchMutationResult, Clip, ClipboardUpdate, ClipLocator, CollectionSummary, FavoriteItem, FavoritesUiState } from "./types";
 
 type DisplayItem = Clip | FavoriteItem;
 
@@ -46,6 +47,8 @@ let windowOrigin = { x: 0, y: 0 };
 let scaleFactor = 1;
 const chooserGate = new ChooserGate();
 let lastMenuPos = { anchorTop: 0, anchorBottom: 0, right: 0 };
+const multiSelect = new MultiSelectState();
+let batchChooserOpen = false;
 
 const PREVIEW_HINT_SEEN_KEY = "mnemark.previewHintSeen.v1";
 const LEGACY_PREVIEW_HINT_SEEN_KEY = "clipflow.previewHintSeen.v1";
@@ -62,6 +65,13 @@ const actionMenu = document.getElementById("clip-action-menu")!;
 const addMenu = document.getElementById("add-to-collection-menu")!;
 const previewHintStrip = document.getElementById("preview-hint-strip")!;
 const favoritesToggle = document.getElementById("favorites-toggle") as HTMLButtonElement;
+const selectionToggle = document.getElementById("selection-toggle") as HTMLButtonElement;
+const selectionToolbar = document.getElementById("selection-toolbar")!;
+const selectionAll = document.getElementById("selection-all") as HTMLButtonElement;
+const selectionCount = document.getElementById("selection-count")!;
+const selectionAdd = document.getElementById("selection-add") as HTMLButtonElement;
+const selectionDestructive = document.getElementById("selection-destructive") as HTMLButtonElement;
+const selectionCancel = document.getElementById("selection-cancel") as HTMLButtonElement;
 
 // === Init ===
 async function refreshConfig() {
@@ -99,12 +109,14 @@ function activeDataset(): DisplayItem[] {
 
 async function loadFavoritesContext() {
   try {
+    const previousCollection = selectedCollection;
     const [cols, state] = await Promise.all([
       invoke<CollectionSummary[]>("list_collections"),
       invoke<FavoritesUiState>("get_favorites_ui_state"),
     ]);
     collections = cols;
     selectedCollection = state.selected_collection;
+    if (previousCollection !== selectedCollection) multiSelect.exit();
     sidebarOpen = state.open;
     if (selectedCollection !== null) {
       favoriteItems = await invoke<FavoriteItem[]>("list_favorite_items", { collectionId: selectedCollection });
@@ -157,6 +169,7 @@ async function init() {
     refreshConfig().then(() => {
       applyI18n();
       updateFavoritesToggleA11y();
+      multiSelect.exit();
       searchInput.value = "";
       selectedIndex = 0;
       openMenuClipId = null;
@@ -200,6 +213,17 @@ async function init() {
   favoritesToggle.addEventListener("click", () => {
     void toggleSidebar();
   });
+  selectionToggle.addEventListener("click", () => {
+    if (multiSelect.active) exitMultiSelect();
+    else enterMultiSelect();
+  });
+  selectionAll.addEventListener("click", () => {
+    multiSelect.toggleAllVisible(visibleClips.map((item) => item.id));
+    render();
+  });
+  selectionAdd.addEventListener("click", openBatchAddChooser);
+  selectionDestructive.addEventListener("click", () => void runBatchDestructiveAction());
+  selectionCancel.addEventListener("click", () => exitMultiSelect());
 
   document.addEventListener("keydown", onFavoritesShortcutKeydown, true);
   document.addEventListener("keyup", onFavoritesShortcutKeyup, true);
@@ -230,6 +254,7 @@ function onFavoritesShortcutKeyup(e: KeyboardEvent) {
 // === Filter bar ===
 function setFilter(filter: FilterKind) {
   if (filter === activeFilter) return;
+  multiSelect.exit();
   activeFilter = filter;
   selectedIndex = 0;
   render();
@@ -326,12 +351,54 @@ function dragGripIcon(size = 14): SVGElement {
   return svg;
 }
 
+// === Multi-select ===
+function enterMultiSelect(): void {
+  hideActionMenu();
+  if (previewState.isOpen) hidePreview();
+  multiSelect.enter();
+  render();
+}
+
+function exitMultiSelect(renderNow = true): void {
+  multiSelect.exit();
+  hideAddChooser();
+  if (renderNow) render();
+}
+
+function selectedBatchItems(): DisplayItem[] {
+  const ids = multiSelect.idsInOrder(activeDataset().map((item) => item.id));
+  const selected = new Set(ids);
+  return activeDataset().filter((item) => selected.has(item.id));
+}
+
+function updateSelectionToolbar(): void {
+  selectionToolbar.classList.toggle("hidden", !multiSelect.active);
+  selectionToolbar.setAttribute("aria-label", t("selectionToolbarLabel"));
+  selectionToggle.classList.toggle("active", multiSelect.active);
+  selectionToggle.setAttribute("aria-pressed", String(multiSelect.active));
+  selectionToggle.setAttribute("aria-label", t(multiSelect.active ? "selectionExit" : "selectionEnter"));
+  selectionToggle.title = t(multiSelect.active ? "selectionExit" : "selectionEnter");
+  if (!multiSelect.active) return;
+
+  const visibleIds = visibleClips.map((item) => item.id);
+  const allVisibleSelected = multiSelect.allVisibleSelected(visibleIds);
+  selectionAll.textContent = t(allVisibleSelected ? "clearVisibleSelection" : "selectAllVisible");
+  selectionAll.disabled = visibleIds.length === 0;
+  selectionCount.textContent = t("selectedCount", { n: String(multiSelect.size) });
+  selectionAdd.textContent = t(selectedCollection === null ? "addToCollection" : "addToOtherCollection");
+  selectionDestructive.textContent = t(selectedCollection === null ? "deleteTitle" : "removeFromCollection");
+  const nothingSelected = multiSelect.size === 0;
+  selectionAdd.disabled = nothingSelected;
+  selectionDestructive.disabled = nothingSelected;
+}
+
 // === Render ===
 function render() {
   const query = searchInput.value.toLowerCase();
   const source = activeDataset();
   const filtered = filterItems(source, query, activeFilter);
   visibleClips = filtered;
+  multiSelect.prune(source.map((item) => item.id));
 
   if (visibleClips.length === 0) {
     selectedIndex = -1;
@@ -375,7 +442,9 @@ function render() {
   }
 
   updateFilterBar();
-  updatePreviewHintStrip();
+  if (multiSelect.active) previewHintStrip.classList.add("hidden");
+  else updatePreviewHintStrip();
+  updateSelectionToolbar();
 
   let hasPinned = false;
   let hasUnpinned = false;
@@ -395,10 +464,26 @@ function render() {
     }
 
     const el = document.createElement("div");
-    el.className = `clip-item${item.truncated ? " truncated" : ""}${index === selectedIndex ? " selected" : ""}`;
+    el.className = `clip-item${item.truncated ? " truncated" : ""}${index === selectedIndex ? " selected" : ""}${multiSelect.active ? " multi-select-mode" : ""}${multiSelect.has(item.id) ? " batch-selected" : ""}`;
     el.dataset.index = String(index);
     el.dataset.clipId = item.id;
     el.dataset.isFavorite = isFav ? "1" : "0";
+    el.setAttribute("aria-selected", String(multiSelect.has(item.id)));
+
+    if (multiSelect.active) {
+      const checkbox = document.createElement("button");
+      checkbox.type = "button";
+      checkbox.className = "selection-checkbox";
+      checkbox.setAttribute("role", "checkbox");
+      checkbox.setAttribute("aria-checked", String(multiSelect.has(item.id)));
+      checkbox.setAttribute("aria-label", t("selectItem"));
+      checkbox.addEventListener("click", (e) => {
+        e.stopPropagation();
+        multiSelect.toggle(item.id);
+        render();
+      });
+      el.appendChild(checkbox);
+    }
 
     const hint = document.createElement("div");
     hint.className = "clip-preview-hint";
@@ -411,12 +496,19 @@ function render() {
     hint.append(hintKeycap, hintLabel);
 
     el.addEventListener("click", () => {
-      pasteActive(item);
+      if (multiSelect.active) {
+        multiSelect.toggle(item.id);
+        render();
+      } else {
+        pasteActive(item);
+      }
     });
 
     el.addEventListener("pointerenter", () => {
-      if (previewState.isOpen) showPreviewFor(item);
-      scheduleRowHint(hint);
+      if (!multiSelect.active) {
+        if (previewState.isOpen) showPreviewFor(item);
+        scheduleRowHint(hint);
+      }
     });
     el.addEventListener("pointerleave", () => {
       clearRowHint(hint);
@@ -675,7 +767,94 @@ function renderAddChooser(locator: ClipLocator, existing: string[]) {
 
 function hideAddChooser() {
   chooserGate.close();
+  batchChooserOpen = false;
   addMenu.classList.add("hidden");
+}
+
+function openBatchAddChooser(): void {
+  const items = selectedBatchItems();
+  if (items.length === 0) return;
+  chooserGate.close();
+  batchChooserOpen = true;
+  actionMenu.classList.add("hidden");
+  addMenu.replaceChildren();
+
+  const targets = collections.filter((collection) => collection.id !== selectedCollection);
+  if (collections.length === 0) {
+    addMenu.appendChild(menuItem(t("createCollection"), () => {
+      exitMultiSelect();
+      void invoke("set_favorites_open", { open: true }).then(() => emit("favorites-create-request"));
+    }));
+  } else if (targets.length === 0) {
+    const none = menuItem(t("noOtherCollections"), () => {});
+    none.disabled = true;
+    addMenu.appendChild(none);
+  } else {
+    const locators = items.map((item) => clipLocator(item));
+    for (const collection of targets) {
+      addMenu.appendChild(menuItem(collection.name, () => {
+        hideAddChooser();
+        void invoke<BatchMutationResult>("add_favorites", {
+          collectionId: collection.id,
+          locators,
+        }).then((result) => {
+          exitMultiSelect();
+          showToast(t("batchAdded", {
+            changed: String(result.changed),
+            unchanged: String(result.unchanged),
+          }));
+          void loadFavoritesContext();
+        }).catch((err) => showToast(localizeBackendError(String(err))));
+      }));
+    }
+  }
+
+  const rect = selectionAdd.getBoundingClientRect();
+  const panelRect = document.getElementById("panel")!.getBoundingClientRect();
+  placeMenu(addMenu, rect, panelRect, panelRect.right - rect.right);
+}
+
+async function runBatchDestructiveAction(): Promise<void> {
+  const items = selectedBatchItems();
+  if (items.length === 0) return;
+
+  if (selectedCollection === null) {
+    const ids = items.map((item) => item.id);
+    try {
+      await invoke("delete_clips", { ids });
+      const deleted = new Set(ids);
+      clips = clips.filter((clip) => !deleted.has(clip.id));
+      exitMultiSelect();
+      showToast(t("batchDeleted", { n: String(ids.length) }), async () => {
+        try {
+          await invoke("undo_delete_batch", { ids });
+          clips = await invoke("get_clips");
+          render();
+        } catch (err) {
+          showToast(localizeBackendError(String(err)));
+        }
+      });
+    } catch (err) {
+      showToast(localizeBackendError(String(err)));
+    }
+    return;
+  }
+
+  const collectionId = selectedCollection;
+  const itemIds = items.map((item) => item.id);
+  try {
+    const result = await invoke<BatchMutationResult>("remove_favorites", {
+      collectionId,
+      itemIds,
+    });
+    const removed = new Set(itemIds);
+    favoriteItems = favoriteItems.filter((item) => !removed.has(item.id));
+    exitMultiSelect();
+    showToast(t("batchRemoved", { n: String(result.changed) }));
+    void loadFavoritesContext();
+  } catch (err) {
+    showToast(localizeBackendError(String(err)));
+  }
 }
 
 actionMenu.addEventListener("click", (e) => {
@@ -1047,8 +1226,17 @@ document.addEventListener("keydown", (e) => {
   const inSearch = document.activeElement === searchInput;
   const inFilter = document.activeElement instanceof HTMLElement && document.activeElement.closest("#filter-bar");
 
+  if (multiSelect.active && !inSearch && !inFilter && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
+    e.preventDefault();
+    multiSelect.toggleAllVisible(visibleClips.map((item) => item.id));
+    render();
+    return;
+  }
+
   if (e.key === "/" && !inSearch) {
     e.preventDefault();
+    multiSelect.exit();
+    render();
     searchInput.focus();
     return;
   }
@@ -1086,10 +1274,22 @@ document.addEventListener("keydown", (e) => {
         }
         return;
       }
-      pasteSelected();
+      if (multiSelect.active) {
+        const item = visibleClips[selectedIndex];
+        if (item) {
+          multiSelect.toggle(item.id);
+          render();
+        }
+      } else {
+        pasteSelected();
+      }
       return;
     case "Escape":
       e.preventDefault();
+      if (multiSelect.active) {
+        exitMultiSelect();
+        return;
+      }
       if (previewState.isOpen) {
         e.stopPropagation();
         hidePreview();
@@ -1118,6 +1318,18 @@ document.addEventListener("keydown", (e) => {
 
 window.addEventListener("keydown", (e) => {
   if (!isSpaceKey(e)) return;
+  if (multiSelect.active) {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (!e.repeat) {
+      const item = visibleClips[selectedIndex];
+      if (item) {
+        multiSelect.toggle(item.id);
+        render();
+      }
+    }
+    return;
+  }
   const action = previewState.decideSpaceKeydown(isEditableActive(), e.repeat, hoveredRowId(), selectedRowId());
   switch (action.type) {
     case "swallow":
@@ -1157,6 +1369,7 @@ window.addEventListener("blur", () => {
 });
 
 searchInput.addEventListener("input", () => {
+  multiSelect.exit();
   selectedIndex = 0;
   render();
 });
@@ -1171,7 +1384,7 @@ filterBar.addEventListener("click", (e) => {
 });
 
 document.addEventListener("click", (e) => {
-  if (!openMenuClipId && !chooserGate.isOpen) return;
+  if (!openMenuClipId && !chooserGate.isOpen && !batchChooserOpen) return;
   const target = e.target as HTMLElement;
   if (!target.closest(".more-btn") && !target.closest("#clip-action-menu") && !target.closest("#add-to-collection-menu")) {
     hideActionMenu();

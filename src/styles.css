@@ -315,6 +315,61 @@ html, body {
   font-weight: var(--font-weight-strong);
 }
 
+/* === Multi-select toolbar === */
+.selection-toolbar {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 5px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--divider);
+  background: var(--accent-subtle);
+  overflow-x: auto;
+}
+
+.selection-toolbar.hidden {
+  display: none;
+}
+
+.selection-count {
+  flex: 1;
+  min-width: 56px;
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+  white-space: nowrap;
+}
+
+.selection-toolbar-btn {
+  flex-shrink: 0;
+  padding: 5px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-family: var(--font-family);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.selection-toolbar-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.selection-toolbar-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.selection-toolbar-primary {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.selection-toolbar-danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
 /* === Clip List === */
 #clip-list {
   flex: 1;
@@ -341,6 +396,52 @@ html, body {
 
 .clip-item.selected {
   background: var(--accent-subtle);
+}
+
+.clip-item.multi-select-mode {
+  cursor: default;
+}
+
+.clip-item.batch-selected {
+  background: var(--accent-subtle);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.selection-checkbox {
+  position: relative;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--bg-surface);
+  color: transparent;
+  cursor: pointer;
+}
+
+.selection-checkbox[aria-checked="true"] {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: white;
+}
+
+.selection-checkbox[aria-checked="true"]::after {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 2px;
+  width: 5px;
+  height: 10px;
+  border: solid currentColor;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.clip-item.multi-select-mode .clip-drag-handle,
+.clip-item.multi-select-mode .clip-actions,
+.clip-item.multi-select-mode .clip-preview-hint {
+  display: none;
 }
 
 .clip-item.truncated {
@@ -1815,7 +1916,8 @@ textarea:focus-visible {
   margin: 0 8px;
 }
 
-/* Main-panel favorites toggle star button */
+/* Main-panel select/drawer toggle buttons */
+.panel-icon-btn,
 .favorites-toggle {
   flex-shrink: 0;
   width: 28px;
@@ -1831,11 +1933,13 @@ textarea:focus-visible {
   transition: color 0.1s, background 0.1s;
 }
 
+.panel-icon-btn:hover,
 .favorites-toggle:hover {
   background: var(--bg-hover);
   color: var(--text-secondary);
 }
 
+.panel-icon-btn.active,
 .favorites-toggle.active {
   color: var(--accent);
 }
