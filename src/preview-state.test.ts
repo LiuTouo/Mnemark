@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PreviewController } from "./preview-state";
+import { decidePreviewSync, PreviewController } from "./preview-state";
 
 function openController(id = "clip-a"): PreviewController {
   const c = new PreviewController();
@@ -31,64 +31,36 @@ describe("open / close", () => {
   });
 });
 
-describe("Space keydown decision", () => {
-  it("opens on a non-repeat Space over a hovered row", () => {
-    const c = new PreviewController();
-    expect(c.decideSpaceKeydown(false, false, "clip-a", null)).toEqual({ type: "open", id: "clip-a" });
+describe("automatic preview decision", () => {
+  it("shows the selected item when enabled and focused", () => {
+    expect(decidePreviewSync(true, true, "clip-a", null)).toEqual({
+      type: "show",
+      id: "clip-a",
+    });
   });
 
-  it("opens on the selected row when nothing is hovered", () => {
-    const c = new PreviewController();
-    expect(c.decideSpaceKeydown(false, false, null, "clip-selected")).toEqual({ type: "open", id: "clip-selected" });
+  it("does nothing when the selected item is already previewed", () => {
+    expect(decidePreviewSync(true, true, "clip-a", "clip-a")).toEqual({ type: "none" });
   });
 
-  it("prefers the hovered row over the selected row", () => {
-    const c = new PreviewController();
-    expect(c.decideSpaceKeydown(false, false, "clip-hover", "clip-selected")).toEqual({ type: "open", id: "clip-hover" });
+  it("waits while the panel is not focused", () => {
+    expect(decidePreviewSync(true, false, "clip-a", null)).toEqual({ type: "none" });
   });
 
-  it("closes on a non-repeat Space while open, even with no hover", () => {
-    const c = openController("clip-a");
-    expect(c.decideSpaceKeydown(false, false, null, null)).toEqual({ type: "close" });
+  it("hides an open preview when disabled", () => {
+    expect(decidePreviewSync(false, true, "clip-a", "clip-a")).toEqual({ type: "hide" });
   });
 
-  it("ignores a non-repeat Space with no hovered or selected row", () => {
-    const c = new PreviewController();
-    expect(c.decideSpaceKeydown(false, false, null, null)).toEqual({ type: "ignore" });
-  });
-
-  it("swallows the auto-repeat of a consumed Space press", () => {
-    const c = new PreviewController();
-    c.consumeSpace();
-    expect(c.decideSpaceKeydown(false, true, "clip-a", null)).toEqual({ type: "swallow" });
-  });
-
-  it("keyup re-arms: a repeat after release is ignored", () => {
-    const c = new PreviewController();
-    c.consumeSpace();
-    c.releaseSpace();
-    expect(c.decideSpaceKeydown(false, true, "clip-a", null)).toEqual({ type: "ignore" });
-  });
-
-  it("ignores Space while an editable holds focus, open preview included", () => {
-    const c = openController("clip-a");
-    c.consumeSpace();
-    expect(c.decideSpaceKeydown(true, false, null, null)).toEqual({ type: "ignore" });
-    expect(c.decideSpaceKeydown(true, true, "clip-a", null)).toEqual({ type: "ignore" });
-    expect(c.isOpen).toBe(true); // untouched: no open, no close, no swallow
-  });
-
-  it("ignores Space while an editable holds focus even with nothing open", () => {
-    const c = new PreviewController();
-    expect(c.decideSpaceKeydown(true, false, "clip-a", null)).toEqual({ type: "ignore" });
+  it("keeps an open preview with no selected item while enabled", () => {
+    expect(decidePreviewSync(true, true, null, "clip-a")).toEqual({ type: "none" });
   });
 });
 
 describe("races and stale completions", () => {
   it("a stale hide completion cannot clear a newer show", () => {
     const c = openController("clip-a");
-    const hideToken = c.beginHide(); // Space to close
-    c.beginShow("clip-b"); // hover B + Space before the hide resolved
+    const hideToken = c.beginHide();
+    c.beginShow("clip-b");
     c.resolveHide(hideToken); // stale
     expect(c.currentId).toBe("clip-b");
   });
@@ -155,11 +127,6 @@ describe("dataset/visibility changes and target switching", () => {
     expect(c.currentId).toBe("clip-a");
   });
 
-  it("a non-repeat Space while open closes regardless of the hovered id", () => {
-    const c = openController("clip-a");
-    expect(c.decideSpaceKeydown(false, false, "clip-b", null)).toEqual({ type: "close" });
-    expect(c.decideSpaceKeydown(false, false, null, "clip-b")).toEqual({ type: "close" });
-  });
 });
 
 describe("backend-authoritative resync", () => {

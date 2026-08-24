@@ -425,6 +425,9 @@ pub struct AppConfig {
     /// When true, check for updates automatically (installed builds update
     /// in the background; portable builds check when the About page opens).
     pub auto_update: bool,
+    /// When true, selecting or pointing at a history/drawer item opens the
+    /// attached preview window automatically.
+    pub preview_enabled: bool,
     /// When true, the Panel remembers the last-selected history filter across
     /// hide/show. When false (default), it resets to "All" each time the
     /// Panel opens. This does NOT persist the selected filter itself.
@@ -462,6 +465,7 @@ impl Default for AppConfig {
             language: "zh-TW".to_string(),
             paste_files_as_files: true,
             auto_update: true,
+            preview_enabled: true,
             remember_history_filter: false,
             favorites_toggle_shortcut: PanelShortcut::default(),
             tutorial_version: 0,
@@ -623,8 +627,8 @@ mod backward_compat_tests {
 
     #[test]
     fn old_json_without_favorites_fields_defaults_safely() {
-        // Pre-favorites config files have neither favorites_toggle_shortcut nor
-        // tutorial_version — both must fall back to sane defaults via serde(default).
+        // Older config files have neither preview_enabled nor the favorites
+        // fields — all must fall back to sane defaults via serde(default).
         let json = r#"{
             "hotkey": "Ctrl+Shift+V",
             "language": "en"
@@ -635,6 +639,19 @@ mod backward_compat_tests {
             vec!["AltLeft".to_string()]
         );
         assert_eq!(cfg.tutorial_version, 0);
+        assert!(cfg.preview_enabled);
+    }
+
+    #[test]
+    fn preview_defaults_on_and_explicit_off_round_trips() {
+        assert!(AppConfig::default().preview_enabled);
+        let cfg = AppConfig {
+            preview_enabled: false,
+            ..AppConfig::default()
+        };
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        let round: AppConfig = serde_json::from_str(&json).expect("deserialize");
+        assert!(!round.preview_enabled);
     }
 
     #[test]

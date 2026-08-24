@@ -36,10 +36,11 @@ describe("TutorialNav", () => {
 });
 
 describe("pages", () => {
-  it("declares seven pages in order", () => {
-    expect(TUTORIAL_PAGES).toHaveLength(7);
+  it("declares six pages in order without a preview tutorial", () => {
+    expect(TUTORIAL_PAGES).toHaveLength(6);
     expect(TUTORIAL_PAGES[0].id).toBe("background");
-    expect(TUTORIAL_PAGES[6].id).toBe("settings");
+    expect(TUTORIAL_PAGES.map((page) => page.id)).not.toContain("preview");
+    expect(TUTORIAL_PAGES[5].id).toBe("settings");
   });
 });
 

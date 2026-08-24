@@ -1,6 +1,6 @@
 //! Update support. One binary serves both channels:
 //! - installed (NSIS): full auto update via tauri-plugin-updater (check →
-//!   download → verify signature → install → confirm restart). The updater
+//!   download → verify signature → close → install → relaunch). The updater
 //!   must NEVER run on portable — it would run the NSIS installer over a
 //!   portable exe.
 //! - portable (raw exe anywhere else): the About page checks GitHub for a
@@ -326,7 +326,8 @@ pub async fn check_for_updates(app: tauri::AppHandle) -> Result<UpdateCheck, Str
     })
 }
 
-/// Download and install the pending update. Returns the new version.
+/// Download and install the pending update. On Windows, the updater exits this
+/// process before installation and the passive NSIS installer relaunches it.
 #[tauri::command]
 pub async fn install_update(app: tauri::AppHandle) -> Result<String, String> {
     use tauri_plugin_updater::UpdaterExt;

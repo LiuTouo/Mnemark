@@ -30,11 +30,6 @@ export const TUTORIAL_PAGES: TutorialPage[] = [
     bodyKeys: ["tutorialBodyActions"],
   },
   {
-    id: "preview",
-    titleKey: "tutorialTitlePreview",
-    bodyKeys: ["tutorialBodyPreview"],
-  },
-  {
     id: "favorites",
     titleKey: "tutorialTitleFavorites",
     bodyKeys: [

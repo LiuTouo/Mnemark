@@ -55,6 +55,7 @@ The global shortcut can be changed in Settings. If another application already o
 - Pause monitoring from the system tray
 - Traditional Chinese and English interface
 - Adjustable theme and transparency
+- Preview is enabled by default and can be disabled in Settings
 
 ## Everyday controls
 
@@ -63,7 +64,6 @@ The global shortcut can be changed in Settings. If another application already o
 | `Ctrl+Shift+V` | Open or close the history panel |
 | Arrow keys or `j` / `k` | Move through clips (`j` / `k` must be enabled in Settings) |
 | `Enter` or click a clip | Paste the selected clip and close the panel |
-| `Space` | Toggle the preview of the selected clip |
 | `Esc` or click outside | Close the panel |
 | Pin | Keep a clip at the top, protected from automatic eviction |
 | Copy | Put a clip on the clipboard without closing the panel |

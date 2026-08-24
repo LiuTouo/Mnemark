@@ -4,6 +4,20 @@
 
 格式參考 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)，版本號遵循[語意化版本](https://semver.org/lang/zh-TW/)。
 
+## [0.6.9] - 2026-08-24
+
+### Added
+
+- 新增預覽功能設定，預設開啟；關閉時會立即隱藏預覽並阻止後端再次開啟
+
+### Changed
+
+- 預覽改為自動跟隨鍵盤聚焦或滑鼠指向的項目，並在多選模式中保持啟用；移除 `Space` 預覽快捷鍵、操作提示與教學頁面
+
+### Fixed
+
+- 修正 Windows 安裝版更新時仍可能顯示程式尚未關閉警告；安裝器現在會等待 Mnemark 完全結束，更新完成後自動重新啟動
+
 ## [0.6.8] - 2026-08-24
 
 ### Added
@@ -351,6 +365,7 @@
 
 - 初始版本：剪貼簿監聽（文字／圖片／檔案路徑）、SHA-256 內容去重、容量限制與淘汰、釘選（上限 10 則、永不淘汰）、即時搜尋、Raycast 風格浮動面板（`Ctrl+Shift+V`）、貼上模擬、刪除復原、系統匣常駐、排除清單、深淺色主題跟隨系統、免安裝可攜（設定存於 exe 旁）
 
+[0.6.9]: https://github.com/LiuTouo/Mnemark/compare/v0.6.8...v0.6.9
 [0.6.8]: https://github.com/LiuTouo/Mnemark/compare/v0.6.7...v0.6.8
 [0.6.7]: https://github.com/LiuTouo/Mnemark/compare/v0.6.6...v0.6.7
 [0.6.6]: https://github.com/LiuTouo/Mnemark/compare/v0.6.5...v0.6.6

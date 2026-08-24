@@ -22,6 +22,7 @@ interface AppConfig {
   language: string;
   paste_files_as_files: boolean;
   auto_update: boolean;
+  preview_enabled: boolean;
   remember_history_filter: boolean;
   favorites_toggle_shortcut: { codes: string[] };
   tutorial_version: number;
@@ -75,6 +76,7 @@ function readForm(): AppConfig {
     vim_mode: textInput("setting-vim-mode").checked,
     paste_files_as_files: textInput("setting-paste-files-as-files").checked,
     auto_update: textInput("setting-auto-update").checked,
+    preview_enabled: textInput("setting-preview-enabled").checked,
     remember_history_filter: textInput("setting-remember-history-filter").checked,
     debounce_ms: Number(textInput("setting-debounce").value),
     theme: selectInput("setting-theme").value,
@@ -106,6 +108,7 @@ function configsEqual(a: AppConfig, b: AppConfig): boolean {
     && a.vim_mode === b.vim_mode
     && a.paste_files_as_files === b.paste_files_as_files
     && a.auto_update === b.auto_update
+    && a.preview_enabled === b.preview_enabled
     && a.remember_history_filter === b.remember_history_filter
     && a.debounce_ms === b.debounce_ms
     && a.theme === b.theme
@@ -265,6 +268,7 @@ function populateForm() {
   textInput("setting-vim-mode").checked = config.vim_mode;
   textInput("setting-paste-files-as-files").checked = config.paste_files_as_files;
   textInput("setting-auto-update").checked = config.auto_update;
+  textInput("setting-preview-enabled").checked = config.preview_enabled !== false;
   textInput("setting-remember-history-filter").checked = config.remember_history_filter;
   textInput("setting-debounce").value = String(config.debounce_ms);
   selectInput("setting-theme").value = config.theme;

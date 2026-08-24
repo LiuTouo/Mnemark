@@ -55,6 +55,7 @@ Mnemark 需要 Microsoft Edge WebView2 Runtime。Windows 11 與多數已更新�
 - 從系統匣暫停記錄
 - 介面支援繁體中文與英文
 - 主題與透明度可調整
+- 預覽預設開啟，可在設定中關閉
 
 ## 核心操作
 
@@ -63,7 +64,6 @@ Mnemark 需要 Microsoft Edge WebView2 Runtime。Windows 11 與多數已更新�
 | `Ctrl+Shift+V` | 開啟或關閉歷史面板 |
 | 方向鍵或 `j`／`k` | 在項目間移動（`j`／`k` 需先在設定中啟用） |
 | `Enter` 或點擊項目 | 貼上選取內容並關閉面板 |
-| `Space` | 切換所選項目的預覽 |
 | `Esc` 或點擊面板外 | 關閉面板 |
 | 釘選 | 將項目保留在頂部，避免被自動淘汰 |
 | 複製 | 將項目放入剪貼簿，但不關閉面板 |

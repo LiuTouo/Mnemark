@@ -36,7 +36,7 @@ function show(id: string, visible: boolean) {
   document.getElementById(id)!.classList.toggle("hidden", !visible);
 }
 
-/** Installed build: check → install → restart, all via the updater plugin. */
+/** Installed build: check → install → automatic relaunch via the updater plugin. */
 async function installedCheck() {
   setStatus(t("checkingUpdate"));
   try {
@@ -58,6 +58,8 @@ async function installedInstall() {
   setStatus(t("installing"));
   try {
     await invoke<string>("install_update");
+    // Windows exits during install; this is only a fallback if the platform's
+    // updater returns without relaunching.
     show("btn-restart", true);
   } catch (err) {
     console.error("Install failed:", err);

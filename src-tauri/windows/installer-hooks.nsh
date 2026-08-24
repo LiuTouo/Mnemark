@@ -46,11 +46,41 @@ Var MnemarkRebrandAbort
 !macroend
 
 !macro NSIS_HOOK_PREINSTALL
-  ; Close any running Mnemark or legacy ClipFlow before touching files.
+  ; Close Mnemark before touching its executable. The updater launches this
+  ; installer and exits immediately, so wait until Windows has actually
+  ; removed the process. Using taskkill /T here can also terminate the newly
+  ; launched installer when Windows keeps it in the app's process tree.
   DetailPrint "Closing running Mnemark..."
-  nsExec::ExecToStack 'taskkill.exe /F /T /IM ${MAINBINARYNAME}.exe'
-  Pop $0 ; exit code (ignored — non-zero just means nothing was running)
-  Pop $1 ; stdout
+  !if "${INSTALLMODE}" == "currentUser"
+    nsis_tauri_utils::KillProcessCurrentUser "${MAINBINARYNAME}.exe"
+  !else
+    nsis_tauri_utils::KillProcess "${MAINBINARYNAME}.exe"
+  !endif
+  Pop $0 ; 0/2 = killed or not running; other values are verified below
+
+  StrCpy $R8 0
+  mnemark_wait_for_exit:
+    !if "${INSTALLMODE}" == "currentUser"
+      nsis_tauri_utils::FindProcessCurrentUser "${MAINBINARYNAME}.exe"
+    !else
+      nsis_tauri_utils::FindProcess "${MAINBINARYNAME}.exe"
+    !endif
+    Pop $0
+    ${If} $0 != 0
+      Goto mnemark_closed
+    ${EndIf}
+
+    IntOp $R8 $R8 + 1
+    ${If} $R8 >= 20
+      Abort "Mnemark could not be closed. The update was not installed; quit Mnemark and try again."
+    ${EndIf}
+    Sleep 250
+    Goto mnemark_wait_for_exit
+
+  mnemark_closed:
+
+  ; Legacy compatibility cleanup. ClipFlow is not the process that launched
+  ; this installer, so terminating its process tree is safe.
   DetailPrint "Closing running ClipFlow..."
   nsExec::ExecToStack 'taskkill.exe /F /T /IM ${LEGACY_EXE}'
   Pop $0

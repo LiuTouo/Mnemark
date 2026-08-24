@@ -1,15 +1,27 @@
-// Pure state machine for the press-Space preview toggle. No DOM, no Tauri:
-// main.ts feeds it key decisions and backend results; tests drive it directly.
+// Pure state for automatic preview synchronization. No DOM, no Tauri:
+// main.ts feeds it UI decisions and backend results; tests drive it directly.
 
-/** Outcome of a Space keydown, decided purely from toggle state + hover. */
-export type SpaceAction =
-  | { type: "open"; id: string }
-  | { type: "close" }
-  | { type: "swallow" }
-  | { type: "ignore" };
+export type PreviewSyncAction =
+  | { type: "show"; id: string }
+  | { type: "hide" }
+  | { type: "none" };
+
+/** Decide how automatic preview should follow the keyboard-selected row. */
+export function decidePreviewSync(
+  enabled: boolean,
+  panelFocused: boolean,
+  selectedId: string | null,
+  currentId: string | null,
+): PreviewSyncAction {
+  if (!enabled) {
+    return currentId === null ? { type: "none" } : { type: "hide" };
+  }
+  if (!panelFocused || selectedId === null || selectedId === currentId) return { type: "none" };
+  return { type: "show", id: selectedId };
+}
 
 /**
- * Owns three things:
+ * Owns two things:
  *  1. The visibility flag (`previewId`): which clip the UI believes is shown,
  *     or null when closed. Backend `get_active_clip_preview` is the authority;
  *     this flag is only ever a mirror of it (optimistic on show, confirmed on
@@ -19,13 +31,10 @@ export type SpaceAction =
  *     captures the token and applies its result only if no newer mutation
  *     superseded the read. This is what lets a backend show commit that lands
  *     after an earlier resync-null still re-open the preview.
- *  3. The physical-Space consumption flag: a consumed press swallows its own
- *     auto-repeat keydowns until keyup.
  */
 export class PreviewController {
   private previewId: string | null = null;
   private mutation = 0;
-  private spaceHeld = false;
 
   get currentId(): string | null {
     return this.previewId;
@@ -35,39 +44,9 @@ export class PreviewController {
     return this.previewId !== null;
   }
 
-  get spaceConsumed(): boolean {
-    return this.spaceHeld;
-  }
-
-  /** Decide what a Space keydown should do. `editableActive` is whether an
-   * INPUT/TEXTAREA/SELECT/contenteditable holds focus — an editable always
-   * wins, open preview included: the key must reach it untouched. `hoveredId`
-   * is the clip id of the live row under the pointer (or null); `selectedId`
-   * is the keyboard-selected row's id (or null), fallback when nothing is
-   * hovered. */
-  decideSpaceKeydown(editableActive: boolean, repeat: boolean, hoveredId: string | null, selectedId: string | null): SpaceAction {
-    if (editableActive) return { type: "ignore" };
-    if (repeat) return this.spaceHeld ? { type: "swallow" } : { type: "ignore" };
-    if (this.isOpen) return { type: "close" };
-    const target = hoveredId ?? selectedId;
-    if (target === null) return { type: "ignore" };
-    return { type: "open", id: target };
-  }
-
-  /** A non-repeat Space press (open or close) is consumed: suppress its
-   * auto-repeat until the matching keyup. */
-  consumeSpace(): void {
-    this.spaceHeld = true;
-  }
-
-  /** Keyup re-arms ordinary Space input. Releasing must not close the preview. */
-  releaseSpace(): void {
-    this.spaceHeld = false;
-  }
-
-  /** Begin a show intent. Optimistically marks the preview open — the toggle
-   * must reflect the press immediately so key-repeat suppression and
-   * hover-to-update behave. Returns the mutation token guarding this intent. */
+  /** Begin a show intent. Optimistically marks the preview open so rapid row
+   * changes immediately target the latest item. Returns the mutation token
+   * guarding this intent. */
   beginShow(id: string): number {
     this.mutation += 1;
     this.previewId = id;

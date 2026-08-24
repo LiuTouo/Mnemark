@@ -113,13 +113,13 @@ async function init() {
 
   await listen<PreviewPayload>("clip-preview-updated", (event) => render(event.payload));
 
-  // Space or Escape in this window closes the preview and tells the main panel
-  // to reset its toggle state. Space is handled on keydown so a press — not a
-  // release — closes the preview, matching the panel's press-to-toggle gesture.
+  // Escape closes the preview and tells the main panel to reset its mirrored
+  // backend state. The main panel will reopen it when automatic preview is
+  // enabled and the selection changes.
   // clip-preview-closed is emitted only after hide_clip_preview resolves, so
   // the main panel never treats an optimistic close as backend-confirmed.
   document.addEventListener("keydown", (e) => {
-    if (e.key !== " " && e.key !== "Escape") return;
+    if (e.key !== "Escape") return;
     if (e.repeat) return;
     e.preventDefault();
     invoke("hide_clip_preview")

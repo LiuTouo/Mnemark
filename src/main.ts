@@ -3,7 +3,7 @@ import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { setLanguage, applyI18n, t, localizeBackendError } from "./i18n";
 import { applyTheme } from "./theme";
-import { PreviewController } from "./preview-state";
+import { decidePreviewSync, PreviewController } from "./preview-state";
 import { ShortcutMatcher, FAVORITES_DEFAULT_CODES } from "./shortcut";
 import { ChooserGate, computeMenuPlacement } from "./menu";
 import { DragController, itemDragStartPayload, physicalScreenPoint, isFavoriteItem, clipLocator } from "./drag";
@@ -26,13 +26,12 @@ let visibleClips: DisplayItem[] = [];
 let selectedIndex = -1;
 let vimMode = false;
 let pasteFilesAsFiles = true;
+let previewEnabled = true;
 let rememberHistoryFilter = false;
 let activeFilter: FilterKind = "all";
 let openMenuClipId: string | null = null;
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 const previewState = new PreviewController();
-let previewHintSeen = false;
-let previewHintTimer: ReturnType<typeof setTimeout> | null = null;
 let shortcutMatcher = new ShortcutMatcher(FAVORITES_DEFAULT_CODES);
 // The history row currently being dragged toward the drawer, so a mid-drag
 // re-render can clear its source feedback and broadcast a cancel.
@@ -50,10 +49,6 @@ let lastMenuPos = { anchorTop: 0, anchorBottom: 0, right: 0 };
 const multiSelect = new MultiSelectState();
 let batchChooserOpen = false;
 
-const PREVIEW_HINT_SEEN_KEY = "mnemark.previewHintSeen.v1";
-const LEGACY_PREVIEW_HINT_SEEN_KEY = "clipflow.previewHintSeen.v1";
-const PREVIEW_HINT_DELAY = 400;
-
 const searchInput = document.getElementById("search-input") as HTMLInputElement;
 const filterBar = document.getElementById("filter-bar")!;
 const clipList = document.getElementById("clip-list")!;
@@ -63,7 +58,6 @@ const emptyHint = document.getElementById("empty-hint")!;
 const toast = document.getElementById("toast")!;
 const actionMenu = document.getElementById("clip-action-menu")!;
 const addMenu = document.getElementById("add-to-collection-menu")!;
-const previewHintStrip = document.getElementById("preview-hint-strip")!;
 const favoritesToggle = document.getElementById("favorites-toggle") as HTMLButtonElement;
 const selectionToggle = document.getElementById("selection-toggle") as HTMLButtonElement;
 const selectionToolbar = document.getElementById("selection-toolbar")!;
@@ -82,12 +76,14 @@ async function refreshConfig() {
       theme?: string;
       ui_opacity_percent?: number;
       paste_files_as_files?: boolean;
+      preview_enabled?: boolean;
       remember_history_filter?: boolean;
       favorites_toggle_shortcut?: { codes: string[] };
     }>("get_config");
     setLanguage(config.language || "zh-TW");
     vimMode = !!config.vim_mode;
     pasteFilesAsFiles = config.paste_files_as_files !== false;
+    previewEnabled = config.preview_enabled !== false;
     rememberHistoryFilter = !!config.remember_history_filter;
     applyTheme(config.theme || "system");
     const opacity = Math.min(100, Math.max(50, config.ui_opacity_percent ?? 99));
@@ -154,7 +150,6 @@ async function cacheWindowGeometry(): Promise<void> {
 async function init() {
   await refreshConfig();
   applyI18n();
-  previewHintSeen = readPreviewHintSeen();
   await cacheWindowGeometry();
 
   clips = await invoke("get_clips");
@@ -354,7 +349,6 @@ function dragGripIcon(size = 14): SVGElement {
 // === Multi-select ===
 function enterMultiSelect(): void {
   hideActionMenu();
-  if (previewState.isOpen) hidePreview();
   multiSelect.enter();
   render();
 }
@@ -411,10 +405,6 @@ function render() {
   hideActionMenu();
 
   const scrollTop = clipList.scrollTop;
-  if (previewHintTimer) {
-    clearTimeout(previewHintTimer);
-    previewHintTimer = null;
-  }
   if (activeDragSource) {
     releaseDragSource(activeDragSource, activeDragSessionId !== null);
   }
@@ -442,8 +432,6 @@ function render() {
   }
 
   updateFilterBar();
-  if (multiSelect.active) previewHintStrip.classList.add("hidden");
-  else updatePreviewHintStrip();
   updateSelectionToolbar();
 
   let hasPinned = false;
@@ -485,16 +473,6 @@ function render() {
       el.appendChild(checkbox);
     }
 
-    const hint = document.createElement("div");
-    hint.className = "clip-preview-hint";
-    const hintKeycap = document.createElement("kbd");
-    hintKeycap.className = "keycap";
-    hintKeycap.setAttribute("aria-hidden", "true");
-    hintKeycap.textContent = "Space";
-    const hintLabel = document.createElement("span");
-    hintLabel.textContent = t("pressToPreview");
-    hint.append(hintKeycap, hintLabel);
-
     el.addEventListener("click", () => {
       if (multiSelect.active) {
         multiSelect.toggle(item.id);
@@ -505,13 +483,7 @@ function render() {
     });
 
     el.addEventListener("pointerenter", () => {
-      if (!multiSelect.active) {
-        if (previewState.isOpen) showPreviewFor(item);
-        scheduleRowHint(hint);
-      }
-    });
-    el.addEventListener("pointerleave", () => {
-      clearRowHint(hint);
+      if (previewEnabled) showPreviewFor(item);
     });
 
     const dragHandle = document.createElement("button");
@@ -570,8 +542,6 @@ function render() {
     contentDiv.appendChild(meta);
     el.appendChild(contentDiv);
 
-    el.appendChild(hint);
-
     const time = document.createElement("span");
     time.className = "clip-time";
     time.textContent = formatTime(isFav ? item.added_at ?? item.captured_at : item.captured_at);
@@ -621,6 +591,7 @@ function render() {
     const selected = clipList.querySelector(".clip-item.selected");
     selected?.scrollIntoView({ block: "nearest" });
   }
+  syncPreviewToSelection();
 }
 
 // === Action Menu ===
@@ -982,15 +953,14 @@ async function closePanel() {
   await invoke("hide_panel_command");
 }
 
-// === Press-Space Preview ===
+// === Automatic Preview ===
 function showPreviewFor(item: DisplayItem) {
-  hideAllRowHints();
+  if (!previewEnabled || previewState.currentId === item.id) return;
   const token = previewState.beginShow(item.id);
   const cmd = isFavoriteItem(item) ? "show_favorite_preview" : "show_clip_preview";
   invoke(cmd, { id: item.id })
     .then(() => {
       previewState.resolveShow(token, item.id);
-      markPreviewHintSeen();
     })
     .catch((err) => {
       console.error("Failed to show preview:", err);
@@ -998,64 +968,16 @@ function showPreviewFor(item: DisplayItem) {
     });
 }
 
-function readPreviewHintSeen(): boolean {
-  try {
-    const current = localStorage.getItem(PREVIEW_HINT_SEEN_KEY);
-    if (current !== null) return current === "1";
-    const legacy = localStorage.getItem(LEGACY_PREVIEW_HINT_SEEN_KEY);
-    if (legacy !== null) {
-      localStorage.setItem(PREVIEW_HINT_SEEN_KEY, legacy);
-      localStorage.removeItem(LEGACY_PREVIEW_HINT_SEEN_KEY);
-      return legacy === "1";
-    }
-    return false;
-  } catch (err) {
-    console.error("Failed to read preview hint state:", err);
-    return false;
-  }
-}
-
-function updatePreviewHintStrip() {
-  const show = !previewHintSeen && visibleClips.length > 0;
-  previewHintStrip.classList.toggle("hidden", !show);
-}
-
-function markPreviewHintSeen() {
-  if (previewHintSeen) return;
-  previewHintSeen = true;
-  try {
-    localStorage.setItem(PREVIEW_HINT_SEEN_KEY, "1");
-  } catch (err) {
-    console.error("Failed to persist preview hint state:", err);
-  }
-  updatePreviewHintStrip();
-}
-
-function scheduleRowHint(hint: HTMLElement) {
-  clearRowHint(hint);
-  if (previewState.isOpen) return;
-  previewHintTimer = setTimeout(() => {
-    previewHintTimer = null;
-    hint.classList.add("visible");
-  }, PREVIEW_HINT_DELAY);
-}
-
-function clearRowHint(hint: HTMLElement) {
-  if (previewHintTimer) {
-    clearTimeout(previewHintTimer);
-    previewHintTimer = null;
-  }
-  hint.classList.remove("visible");
-}
-
-function hideAllRowHints() {
-  if (previewHintTimer) {
-    clearTimeout(previewHintTimer);
-    previewHintTimer = null;
-  }
-  clipList.querySelectorAll(".clip-preview-hint.visible").forEach((el) => {
-    el.classList.remove("visible");
-  });
+function syncPreviewToSelection() {
+  const selected = visibleClips[selectedIndex] ?? null;
+  const action = decidePreviewSync(
+    previewEnabled,
+    document.hasFocus(),
+    selected?.id ?? null,
+    previewState.currentId,
+  );
+  if (action.type === "hide") hidePreview();
+  else if (action.type === "show" && selected) showPreviewFor(selected);
 }
 
 function hidePreview() {
@@ -1077,21 +999,6 @@ function resyncPreviewState() {
 
 function isSpaceKey(e: KeyboardEvent): boolean {
   return e.code === "Space" || e.key === " ";
-}
-
-function hoveredRowId(): string | null {
-  const row = clipList.querySelector<HTMLElement>(".clip-item:hover");
-  return row?.dataset.clipId ?? null;
-}
-
-function selectedRowId(): string | null {
-  return visibleClips[selectedIndex]?.id ?? null;
-}
-
-function isEditableActive(): boolean {
-  const el = document.activeElement;
-  if (!(el instanceof HTMLElement)) return false;
-  return el.isContentEditable || el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT";
 }
 
 // === Item drag source (to the sidebar) ===
@@ -1290,11 +1197,6 @@ document.addEventListener("keydown", (e) => {
         exitMultiSelect();
         return;
       }
-      if (previewState.isOpen) {
-        e.stopPropagation();
-        hidePreview();
-        return;
-      }
       if (openMenuClipId) {
         hideActionMenu();
         return;
@@ -1317,49 +1219,16 @@ document.addEventListener("keydown", (e) => {
 });
 
 window.addEventListener("keydown", (e) => {
-  if (!isSpaceKey(e)) return;
-  if (multiSelect.active) {
-    e.preventDefault();
-    e.stopImmediatePropagation();
-    if (!e.repeat) {
-      const item = visibleClips[selectedIndex];
-      if (item) {
-        multiSelect.toggle(item.id);
-        render();
-      }
+  if (!isSpaceKey(e) || !multiSelect.active) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  if (!e.repeat) {
+    const item = visibleClips[selectedIndex];
+    if (item) {
+      multiSelect.toggle(item.id);
+      render();
     }
-    return;
   }
-  const action = previewState.decideSpaceKeydown(isEditableActive(), e.repeat, hoveredRowId(), selectedRowId());
-  switch (action.type) {
-    case "swallow":
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      return;
-    case "close":
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      previewState.consumeSpace();
-      hidePreview();
-      return;
-    case "open":
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      previewState.consumeSpace();
-      showPreviewForById(action.id);
-      return;
-    case "ignore":
-      return;
-  }
-}, true);
-
-function showPreviewForById(id: string) {
-  const item = activeDataset().find((c) => c.id === id);
-  if (item) showPreviewFor(item);
-}
-
-window.addEventListener("keyup", (e) => {
-  if (isSpaceKey(e)) previewState.releaseSpace();
 }, true);
 
 // Focus loss (alt-tab, minimize) aborts an in-flight handle drag so the row

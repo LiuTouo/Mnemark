@@ -341,7 +341,7 @@ fn update_config(
     {
         return Err("Drawer shortcut conflicts with the panel hotkey".to_string());
     }
-    let (old_hotkey, old_startup, old_persist, old_language, old_auto_update) = {
+    let (old_hotkey, old_startup, old_persist, old_language, old_auto_update, old_preview_enabled) = {
         let config = lock(&state.config);
         (
             config.hotkey.clone(),
@@ -349,6 +349,7 @@ fn update_config(
             config.persist,
             config.language.clone(),
             config.auto_update,
+            config.preview_enabled,
         )
     };
     let mut swapped_hotkey = false;
@@ -446,11 +447,15 @@ fn update_config(
     // Toggling auto_update on takes effect without an app restart: run one
     // check now (installed builds only — spawn_auto_update_check re-verifies).
     let auto_update_turned_on = !old_auto_update && new_config.auto_update;
+    let preview_turned_off = old_preview_enabled && !new_config.preview_enabled;
 
     let mut config = lock(&state.config);
     *config = new_config;
     drop(config);
 
+    if preview_turned_off {
+        hide_preview_window(&app);
+    }
     if auto_update_turned_on {
         update::spawn_auto_update_check(app.clone(), state.config.clone());
     }
@@ -817,6 +822,9 @@ async fn show_favorite_preview(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    if !lock(&state.config).preview_enabled {
+        return Err("Preview is disabled".to_string());
+    }
     let generation = state.preview_generation.fetch_add(1, Ordering::SeqCst) + 1;
     let clip = favorite_as_clip(&state, &id)?;
     let payload = build_preview_payload(clip)?;
@@ -908,6 +916,9 @@ async fn show_clip_preview(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    if !lock(&state.config).preview_enabled {
+        return Err("Preview is disabled".to_string());
+    }
     // Claim a fresh generation before any work. Heavy DIB/JPEG/base64 work
     // below runs on the async runtime (off the UI main thread); a later show
     // or hide bumps the generation and supersedes us. SeqCst gives one total
