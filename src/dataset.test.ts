@@ -32,6 +32,17 @@ describe("classifyClip", () => {
     expect(classifyClip(clip({ text_content: "https://x.dev" }))).toBe("links");
     expect(classifyClip(clip({ text_content: "plain" }))).toBe("text");
   });
+  it("classifies path-like text as files", () => {
+    expect(classifyClip(clip({ text_content: "C:\\Program Files\\Common Files\\VST3\\kilohearts.vst3" }))).toBe("files");
+    expect(classifyClip(clip({ text_content: "D:/fwd/slash/config.toml" }))).toBe("files");
+    expect(classifyClip(clip({ text_content: "\\\\server\\share\\lib.dll" }))).toBe("files");
+    expect(classifyClip(clip({ text_content: "C:\\a\\b.txt\r\nD:\\c\\d.log" }))).toBe("files");
+  });
+  it("keeps non-path text as text", () => {
+    expect(classifyClip(clip({ text_content: "A7AB1651007244CC00E35A8D00748379" }))).toBe("text");
+    expect(classifyClip(clip({ text_content: "run C:\\x\\y now" }))).toBe("text");
+    expect(classifyClip(clip({ text_content: '"ui_opacity_percent": 99,' }))).toBe("text");
+  });
 });
 
 describe("matchesFilter", () => {

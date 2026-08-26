@@ -27,11 +27,25 @@ export function isLink(text: string | null): boolean {
   }
 }
 
+/** True when every non-empty line is an absolute Windows path (drive or UNC).
+ * Path strings copied from terminals/logs are Text kind, but users read them
+ * as files — classify them with the real file drops. */
+export function looksLikeFilePaths(text: string | null): boolean {
+  if (!text) return false;
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return false;
+  return lines.every((line) => /^[A-Za-z]:[\\/]/.test(line) || line.startsWith("\\\\"));
+}
+
 /** Classify a clip for filter matching. */
 export function classifyClip(clip: SearchableClip): FilterKind {
   if (clip.kind === "Image") return "image";
   if (clip.kind === "FilePaths") return "files";
   if (isLink(clip.text_content)) return "links";
+  if (looksLikeFilePaths(clip.text_content)) return "files";
   return "text";
 }
 

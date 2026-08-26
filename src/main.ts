@@ -8,7 +8,7 @@ import { ShortcutMatcher, FAVORITES_DEFAULT_CODES } from "./shortcut";
 import { ChooserGate, computeMenuPlacement } from "./menu";
 import { DragController, itemDragStartPayload, physicalScreenPoint, isFavoriteItem, clipLocator } from "./drag";
 import type { ItemDragPoint } from "./drag";
-import { filterItems, isLink } from "./dataset";
+import { classifyClip, filterItems } from "./dataset";
 import type { FilterKind } from "./dataset";
 import { MultiSelectState } from "./multi-select";
 import type { BatchMutationResult, Clip, ClipboardUpdate, ClipLocator, CollectionSummary, FavoriteItem, FavoritesUiState } from "./types";
@@ -244,8 +244,8 @@ function onFavoritesShortcutKeyup(e: KeyboardEvent) {
 }
 
 // === Link classification ===
-// (isLink/classifyClip/matchesFilter live in dataset.ts; isLink is re-exported
-//  for icon selection below.)
+// (isLink/classifyClip/matchesFilter live in dataset.ts; classifyClip drives
+//  both filter matching and icon selection below.)
 
 // === Filter bar ===
 function setFilter(filter: FilterKind) {
@@ -297,6 +297,28 @@ function copyIcon(size: number): SVGElement {
   svg.append(
     svgEl("rect", { x: "9", y: "9", width: "13", height: "13", rx: "2" }),
     svgEl("path", { d: "M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" }),
+  );
+  return svg;
+}
+
+/** Text glyph matching the filter bar's 文字 icon. */
+function textIcon(): SVGElement {
+  const svg = iconRoot(16, "none", "currentColor");
+  svg.append(
+    svgEl("polyline", { points: "4 7 4 4 20 4 20 7" }),
+    svgEl("line", { x1: "9", y1: "20", x2: "15", y2: "20" }),
+    svgEl("line", { x1: "12", y1: "4", x2: "12", y2: "20" }),
+  );
+  return svg;
+}
+
+/** Image glyph matching the filter bar's 圖片 icon (no-thumbnail fallback). */
+function imageIcon(): SVGElement {
+  const svg = iconRoot(16, "none", "currentColor");
+  svg.append(
+    svgEl("rect", { x: "3", y: "3", width: "18", height: "18", rx: "2", ry: "2" }),
+    svgEl("circle", { cx: "8.5", cy: "8.5", r: "1.5" }),
+    svgEl("polyline", { points: "21 15 16 10 5 21" }),
   );
   return svg;
 }
@@ -497,21 +519,24 @@ function render() {
     attachRowDrag(el, dragHandle, item);
 
     const iconDiv = document.createElement("div");
-    if (item.kind === "Image" && item.thumbnail_base64) {
+    const category = classifyClip(item);
+    if (category === "image" && item.thumbnail_base64) {
       iconDiv.className = "thumbnail-container";
       const img = document.createElement("img");
       img.src = item.thumbnail_base64;
       img.alt = "Image";
       iconDiv.appendChild(img);
-    } else if (item.kind === "FilePaths") {
-      iconDiv.className = "clip-icon text-icon";
-      iconDiv.appendChild(fileIcon());
-    } else if (isLink(item.text_content)) {
-      iconDiv.className = "clip-icon text-icon";
-      iconDiv.appendChild(linkIcon());
     } else {
       iconDiv.className = "clip-icon text-icon";
-      iconDiv.appendChild(copyIcon(16));
+      iconDiv.appendChild(
+        category === "files"
+          ? fileIcon()
+          : category === "links"
+            ? linkIcon()
+            : category === "image"
+              ? imageIcon()
+              : textIcon(),
+      );
     }
     el.appendChild(iconDiv);
 
