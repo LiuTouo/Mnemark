@@ -341,7 +341,7 @@ fn update_config(
     {
         return Err("Drawer shortcut conflicts with the panel hotkey".to_string());
     }
-    let (old_hotkey, old_startup, old_persist, old_language, old_auto_update, old_preview_enabled) = {
+    let (old_hotkey, old_startup, old_persist, old_language, old_auto_update, old_preview_enabled, old_ui_scale) = {
         let config = lock(&state.config);
         (
             config.hotkey.clone(),
@@ -350,6 +350,7 @@ fn update_config(
             config.language.clone(),
             config.auto_update,
             config.preview_enabled,
+            config.ui_scale_percent,
         )
     };
     let mut swapped_hotkey = false;
@@ -448,6 +449,7 @@ fn update_config(
     // check now (installed builds only — spawn_auto_update_check re-verifies).
     let auto_update_turned_on = !old_auto_update && new_config.auto_update;
     let preview_turned_off = old_preview_enabled && !new_config.preview_enabled;
+    let ui_scale_changed = new_config.ui_scale_percent != old_ui_scale;
 
     let mut config = lock(&state.config);
     *config = new_config;
@@ -458,6 +460,11 @@ fn update_config(
     }
     if auto_update_turned_on {
         update::spawn_auto_update_check(app.clone(), state.config.clone());
+    }
+    if ui_scale_changed {
+        // Cosmetic best-effort: the config is already on disk, so a failed
+        // zoom call only leaves this session at the old scale.
+        apply_ui_scale(&app);
     }
     Ok(())
 }
@@ -1248,10 +1255,11 @@ struct PreviewPlacement {
 }
 
 /// Pure positioning math for the clip-preview window. Inputs: the main
-/// window's physical outer position, its scale factor, and the current
-/// monitor's physical work area; plus the logical panel offset/width, the
-/// logical gap, and the logical preferred preview size. Output is the preview
-/// window's physical (x, y) and size.
+/// window's physical outer position, its effective scale factor (OS DPI × UI
+/// zoom, mapping CSS px to physical px), and the current monitor's physical
+/// work area; plus the logical panel offset/width, the logical gap, and the
+/// logical preferred preview size. Output is the preview window's physical
+/// (x, y) and size.
 ///
 /// Rules: right of the panel preferred, left fallback; width clamped to the
 /// available side space; fully clamped into the work area; top aligned with
@@ -1386,11 +1394,12 @@ fn show_panel(app: &tauri::AppHandle) {
         restore_sidebar_if_open(app);
     } else {
         log("[Mnemark] creating new panel window");
+        let (panel_w, panel_h) = zoomed_builder_size(app, 480, 620);
         match WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
             .title("Mnemark")
             // Window is larger than the panel (420x540) so the rounded
             // corners and CSS drop shadow have room inside a transparent frame.
-            .inner_size(480.0, 620.0)
+            .inner_size(panel_w, panel_h)
             .decorations(false)
             .transparent(true)
             // Disable the DWM undecorated shadow: tao defaults it on, which
@@ -1407,6 +1416,7 @@ fn show_panel(app: &tauri::AppHandle) {
         {
             Ok(w) => {
                 log(&format!("[Mnemark] panel created: {:?}", w.label()));
+                let _ = w.set_zoom(ui_zoom_of(&lock(&app.state::<AppState>().config)));
                 center_on_cursor_monitor(app, &w);
                 // Click outside (focus loss) dismisses the Panel. The handler
                 // is armed only after the window has gained focus once (with a
@@ -1545,6 +1555,7 @@ fn get_or_create_preview_window(app: &tauri::AppHandle) -> Result<tauri::Webview
         return Ok(w);
     }
 
+    let (preview_w, preview_h) = zoomed_builder_size(app, PREVIEW_WINDOW_W, PREVIEW_WINDOW_H);
     let w = WebviewWindowBuilder::new(app, "clip-preview", WebviewUrl::App("preview.html".into()))
         .title("Mnemark Preview")
         .decorations(false)
@@ -1553,11 +1564,12 @@ fn get_or_create_preview_window(app: &tauri::AppHandle) -> Result<tauri::Webview
         .skip_taskbar(true)
         .always_on_top(true)
         .resizable(false)
-        .inner_size(PREVIEW_WINDOW_W as f64, PREVIEW_WINDOW_H as f64)
+        .inner_size(preview_w, preview_h)
         .visible(false)
         .focused(false)
         .build()
         .map_err(|e| format!("preview window creation failed: {:?}", e))?;
+    let _ = w.set_zoom(ui_zoom_of(&lock(&app.state::<AppState>().config)));
     // Preview owns focus only through explicit pointer interaction; losing it
     // must not dismiss the pair while main still has focus, so route through
     // the same composite re-check.
@@ -1579,7 +1591,8 @@ fn position_preview(app: &tauri::AppHandle, window: &tauri::WebviewWindow) -> Re
     let main_pos = main
         .outer_position()
         .map_err(|e| format!("main outer_position failed: {:?}", e))?;
-    let scale = main.scale_factor().unwrap_or(1.0);
+    let scale = main.scale_factor().unwrap_or(1.0)
+        * ui_zoom_of(&lock(&app.state::<AppState>().config));
     let monitor = main
         .current_monitor()
         .map_err(|e| format!("current_monitor failed: {:?}", e))?
@@ -1611,6 +1624,99 @@ const SIDEBAR_WINDOW_H: u32 = 540;
 const DRAG_OVERLAY_WINDOW_W: u32 = 288;
 const DRAG_OVERLAY_WINDOW_H: u32 = 112;
 
+/// UI zoom factor derived from the config percentage.
+fn ui_zoom_of(config: &AppConfig) -> f64 {
+    config.ui_scale_percent as f64 / 100.0
+}
+
+/// Base logical window size at zoom = 100% for each scalable window. The
+/// drag-overlay is deliberately absent: it participates in a cross-window
+/// physical-coordinate protocol (drag & drop) and must stay unzoomed.
+fn base_window_size(label: &str) -> Option<(u32, u32)> {
+    match label {
+        "main" => Some((480, 620)),
+        "settings" => Some((500, 700)),
+        "about" => Some((440, 540)),
+        "tutorial" => Some((500, 600)),
+        "clip-preview" => Some((PREVIEW_WINDOW_W, PREVIEW_WINDOW_H)),
+        "favorites-sidebar" => Some((SIDEBAR_WINDOW_W, SIDEBAR_WINDOW_H)),
+        _ => None,
+    }
+}
+
+/// Pure math: base logical size × zoom, clamped to a logical upper bound
+/// with a 1px floor. Unit-testable.
+fn zoomed_logical_size(w: u32, h: u32, zoom: f64, max_w: u32, max_h: u32) -> (f64, f64) {
+    let w = (w as f64 * zoom).min(max_w as f64).max(1.0);
+    let h = (h as f64 * zoom).min(max_h as f64).max(1.0);
+    (w, h)
+}
+
+/// Logical work-area size of a monitor (physical size / scale factor).
+fn logical_work_area(monitor: &tauri::Monitor) -> (u32, u32) {
+    let wa = monitor.work_area();
+    let s = monitor.scale_factor();
+    (
+        (wa.size.width as f64 / s) as u32,
+        (wa.size.height as f64 / s) as u32,
+    )
+}
+
+/// Builder-stage size for a new window: base size scaled by the configured
+/// zoom, clamped to the primary monitor's work area (the window does not
+/// exist yet, so its own monitor is unknown).
+fn zoomed_builder_size(app: &tauri::AppHandle, w: u32, h: u32) -> (f64, f64) {
+    let zoom = ui_zoom_of(&lock(&app.state::<AppState>().config));
+    let (max_w, max_h) = app
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .map(|m| logical_work_area(&m))
+        .unwrap_or((u32::MAX, u32::MAX));
+    zoomed_logical_size(w, h, zoom, max_w, max_h)
+}
+
+/// Apply the webview zoom and matching logical size to one window. Both the
+/// CSS content and the window scale together, so the transparent-frame
+/// margins (e.g. main's 30px shadow gutter) stay proportional.
+fn apply_window_zoom(window: &tauri::WebviewWindow, zoom: f64) {
+    let Some((w, h)) = base_window_size(window.label()) else {
+        return;
+    };
+    let (max_w, max_h) = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .map(|m| logical_work_area(&m))
+        .unwrap_or((u32::MAX, u32::MAX));
+    let (zw, zh) = zoomed_logical_size(w, h, zoom, max_w, max_h);
+    let _ = window.set_zoom(zoom);
+    let _ = window.set_size(tauri::LogicalSize::new(zw, zh));
+}
+
+/// Re-apply the configured UI scale to every live scalable window. Visible
+/// attached windows are repositioned so they stay glued to the panel; hidden
+/// ones are resized silently (safe on hidden windows) and repositioned the
+/// next time they are shown.
+fn apply_ui_scale(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    let zoom = ui_zoom_of(&lock(&state.config));
+    drop(state);
+    for (label, window) in app.webview_windows() {
+        if base_window_size(&label).is_none() {
+            continue; // drag-overlay and any unknown window stay unzoomed
+        }
+        apply_window_zoom(&window, zoom);
+        if window.is_visible().unwrap_or(false) {
+            if label == "clip-preview" {
+                let _ = position_preview(app, &window);
+            } else if label == "favorites-sidebar" {
+                let _ = position_sidebar(app, &window);
+            }
+        }
+    }
+}
+
 /// Pure UI-state transitions (session-only), kept free of window/DB effects so
 /// the selection / return-to-history rules are unit-testable.
 fn apply_sidebar_toggle(ui: &mut FavoritesUiState, open: bool) {
@@ -1640,6 +1746,7 @@ fn get_or_create_sidebar_window(app: &tauri::AppHandle) -> Result<tauri::Webview
         return Ok(w);
     }
 
+    let (sidebar_w, sidebar_h) = zoomed_builder_size(app, SIDEBAR_WINDOW_W, SIDEBAR_WINDOW_H);
     let mut builder = WebviewWindowBuilder::new(
         app,
         "favorites-sidebar",
@@ -1652,7 +1759,7 @@ fn get_or_create_sidebar_window(app: &tauri::AppHandle) -> Result<tauri::Webview
     .skip_taskbar(true)
     .always_on_top(true)
     .resizable(false)
-    .inner_size(SIDEBAR_WINDOW_W as f64, SIDEBAR_WINDOW_H as f64)
+    .inner_size(sidebar_w, sidebar_h)
     .visible(false)
     .focused(false);
     // Own the sidebar to main so Windows keeps it above the panel in Z-order.
@@ -1668,6 +1775,7 @@ fn get_or_create_sidebar_window(app: &tauri::AppHandle) -> Result<tauri::Webview
     let w = builder
         .build()
         .map_err(|e| format!("sidebar window creation failed: {:?}", e))?;
+    let _ = w.set_zoom(ui_zoom_of(&lock(&app.state::<AppState>().config)));
     // Focus loss routes through the same composite re-check as main/preview.
     let app_handle = app.clone();
     w.on_window_event(move |event| {
@@ -1727,7 +1835,8 @@ fn get_or_create_drag_overlay_window(
 }
 
 /// Pure left-side placement math: the sidebar sits immediately left of the
-/// visual panel, top-aligned, clamped into the monitor work area.
+/// visual panel, top-aligned, clamped into the monitor work area. The scale
+/// argument is the effective CSS→physical ratio (OS DPI × UI zoom).
 #[allow(clippy::too_many_arguments)]
 fn place_sidebar(
     main_pos: (i32, i32),
@@ -1775,7 +1884,8 @@ fn position_sidebar(app: &tauri::AppHandle, window: &tauri::WebviewWindow) -> Re
     let main_pos = main
         .outer_position()
         .map_err(|e| format!("main outer_position failed: {:?}", e))?;
-    let scale = main.scale_factor().unwrap_or(1.0);
+    let scale = main.scale_factor().unwrap_or(1.0)
+        * ui_zoom_of(&lock(&app.state::<AppState>().config));
     let monitor = main
         .current_monitor()
         .map_err(|e| format!("current_monitor failed: {:?}", e))?
@@ -2210,13 +2320,15 @@ fn open_settings_window(app: &tauri::AppHandle) -> Result<(), tauri::Error> {
     }
 
     log("[Mnemark] creating settings window");
+    let (settings_w, settings_h) = zoomed_builder_size(app, 500, 700);
     let w = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
         .title("Mnemark Settings")
-        .inner_size(500.0, 700.0)
+        .inner_size(settings_w, settings_h)
         .resizable(false)
         .visible(true)
         .center()
         .build()?;
+    let _ = w.set_zoom(ui_zoom_of(&lock(&app.state::<AppState>().config)));
 
     let app_handle = app.clone();
     w.on_window_event(move |event| {
@@ -2244,12 +2356,14 @@ fn open_about_dialog(app: &tauri::AppHandle) -> Result<(), tauri::Error> {
         return Ok(());
     }
 
-    let _ = WebviewWindowBuilder::new(app, "about", WebviewUrl::App("about.html".into()))
+    let (about_w, about_h) = zoomed_builder_size(app, 440, 540);
+    let w = WebviewWindowBuilder::new(app, "about", WebviewUrl::App("about.html".into()))
         .title("About Mnemark")
-        .inner_size(440.0, 540.0)
+        .inner_size(about_w, about_h)
         .resizable(false)
         .center()
         .build()?;
+    let _ = w.set_zoom(ui_zoom_of(&lock(&app.state::<AppState>().config)));
 
     Ok(())
 }
@@ -2307,12 +2421,14 @@ fn open_tutorial_window(app: &tauri::AppHandle) -> Result<(), tauri::Error> {
         return Ok(());
     }
 
+    let (tutorial_w, tutorial_h) = zoomed_builder_size(app, 500, 600);
     let w = WebviewWindowBuilder::new(app, "tutorial", WebviewUrl::App("tutorial.html".into()))
         .title("Mnemark Tutorial")
-        .inner_size(500.0, 600.0)
+        .inner_size(tutorial_w, tutorial_h)
         .resizable(false)
         .center()
         .build()?;
+    let _ = w.set_zoom(ui_zoom_of(&lock(&app.state::<AppState>().config)));
 
     let app_handle = app.clone();
     w.on_window_event(move |event| {
@@ -2510,6 +2626,32 @@ mod monitor_debounce_tests {
         // kill the monitor thread. On any real test machine this is ~2026.
         let now = super::now_ms();
         assert!(now > 1_000_000_000_000, "now_ms should be post-2001 ms");
+    }
+}
+
+#[cfg(test)]
+mod ui_scale_tests {
+    use super::zoomed_logical_size;
+
+    #[test]
+    fn zoom_multiplies_base_size() {
+        let (w, h) = zoomed_logical_size(480, 620, 1.5, u32::MAX, u32::MAX);
+        assert_eq!(w, 720.0);
+        assert_eq!(h, 930.0);
+    }
+
+    #[test]
+    fn zoom_clamps_to_work_area() {
+        let (w, h) = zoomed_logical_size(500, 700, 1.5, 600, 800);
+        assert_eq!(w, 600.0);
+        assert_eq!(h, 800.0);
+    }
+
+    #[test]
+    fn zoom_floors_at_one_pixel() {
+        let (w, h) = zoomed_logical_size(0, 0, 1.0, 100, 100);
+        assert_eq!(w, 1.0);
+        assert_eq!(h, 1.0);
     }
 }
 

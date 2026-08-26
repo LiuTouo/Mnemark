@@ -41,7 +41,8 @@ let activeDragSource: HTMLElement | null = null;
 let dragSessionSeq = 0;
 let activeDragSessionId: number | null = null;
 // Cached main-window geometry for converting client CSS points to physical
-// screen coordinates (screenX/Y lie at non-100% DPI).
+// screen coordinates (screenX/Y lie at non-100% DPI; scaleFactor is the
+// devicePixelRatio, which also covers the UI zoom).
 let windowOrigin = { x: 0, y: 0 };
 let scaleFactor = 1;
 const chooserGate = new ChooserGate();
@@ -136,11 +137,11 @@ function updateFavoritesToggleA11y() {
 
 async function cacheWindowGeometry(): Promise<void> {
   try {
-    const win = getCurrentWindow();
-    const pos = await win.outerPosition();
-    const scale = await win.scaleFactor();
+    const pos = await getCurrentWindow().outerPosition();
     windowOrigin = { x: pos.x, y: pos.y };
-    scaleFactor = scale || 1;
+    // devicePixelRatio = OS DPI × webview zoom (WebView2 ZoomFactor is page
+    // zoom), so client CSS px × DPR = physical px even when the UI is scaled.
+    scaleFactor = window.devicePixelRatio || 1;
   } catch {
     windowOrigin = { x: 0, y: 0 };
     scaleFactor = 1;

@@ -416,6 +416,8 @@ pub struct AppConfig {
     pub theme: String,
     /// Main panel opacity as a percentage (50-100, 100 = fully opaque).
     pub ui_opacity_percent: u8,
+    /// UI zoom as a percentage (75-150, 100 = default).
+    pub ui_scale_percent: u8,
     /// UI language: "zh-TW" (default) or "en"
     pub language: String,
     /// When true, pasting a FilePaths entry writes a real CF_HDROP (the
@@ -462,6 +464,7 @@ impl Default for AppConfig {
             debounce_ms: 200,
             theme: "system".to_string(),
             ui_opacity_percent: 99,
+            ui_scale_percent: 100,
             language: "zh-TW".to_string(),
             paste_files_as_files: true,
             auto_update: true,
@@ -497,6 +500,7 @@ impl AppConfig {
         self.image_size_limit_mb = self.image_size_limit_mb.clamp(1, 256);
         self.debounce_ms = self.debounce_ms.min(10_000);
         self.ui_opacity_percent = self.ui_opacity_percent.clamp(50, 100);
+        self.ui_scale_percent = self.ui_scale_percent.clamp(75, 150);
         self
     }
 }
@@ -601,6 +605,7 @@ mod backward_compat_tests {
         let cfg: AppConfig = serde_json::from_str(json).expect("deserialize old config");
         assert!(!cfg.remember_history_filter);
         assert_eq!(cfg.ui_opacity_percent, 99);
+        assert_eq!(cfg.ui_scale_percent, 100);
     }
 
     #[test]
@@ -823,6 +828,7 @@ mod sanitize_tests {
             image_size_limit_mb: u64::MAX,
             debounce_ms: u64::MAX,
             ui_opacity_percent: u8::MAX,
+            ui_scale_percent: u8::MAX,
             ..AppConfig::default()
         }
         .sanitized();
@@ -833,6 +839,7 @@ mod sanitize_tests {
         assert_eq!(cfg.image_size_limit_mb, 256);
         assert_eq!(cfg.debounce_ms, 10_000);
         assert_eq!(cfg.ui_opacity_percent, 100);
+        assert_eq!(cfg.ui_scale_percent, 150);
     }
 
     #[test]
@@ -846,11 +853,44 @@ mod sanitize_tests {
         assert_eq!(cfg.image_size_limit_mb, d.image_size_limit_mb);
         assert_eq!(cfg.debounce_ms, d.debounce_ms);
         assert_eq!(cfg.ui_opacity_percent, d.ui_opacity_percent);
+        assert_eq!(cfg.ui_scale_percent, d.ui_scale_percent);
     }
 
     #[test]
     fn opacity_defaults_to_99() {
         assert_eq!(AppConfig::default().ui_opacity_percent, 99);
+    }
+
+    #[test]
+    fn scale_defaults_to_100() {
+        assert_eq!(AppConfig::default().ui_scale_percent, 100);
+    }
+
+    #[test]
+    fn scale_below_minimum_is_raised_to_75() {
+        let cfg = AppConfig {
+            ui_scale_percent: 10,
+            ..AppConfig::default()
+        }
+        .sanitized();
+        assert_eq!(cfg.ui_scale_percent, 75);
+    }
+
+    #[test]
+    fn scale_boundaries_pass_through_unchanged() {
+        let seventy_five = AppConfig {
+            ui_scale_percent: 75,
+            ..AppConfig::default()
+        }
+        .sanitized();
+        assert_eq!(seventy_five.ui_scale_percent, 75);
+
+        let hundred_fifty = AppConfig {
+            ui_scale_percent: 150,
+            ..AppConfig::default()
+        }
+        .sanitized();
+        assert_eq!(hundred_fifty.ui_scale_percent, 150);
     }
 
     #[test]
@@ -965,7 +1005,8 @@ mod atomic_config_tests {
             "image_memory_budget_mb": 999999999,
             "image_size_limit_mb": 9999,
             "debounce_ms": 999999,
-            "ui_opacity_percent": 1
+            "ui_opacity_percent": 1,
+            "ui_scale_percent": 10
         }"#;
         std::fs::write(&path, json).unwrap();
         let cfg = load_from(&path);
@@ -976,6 +1017,7 @@ mod atomic_config_tests {
         assert_eq!(cfg.image_size_limit_mb, 256);
         assert_eq!(cfg.debounce_ms, 10_000);
         assert_eq!(cfg.ui_opacity_percent, 50);
+        assert_eq!(cfg.ui_scale_percent, 75);
         cleanup(&path);
     }
 

@@ -4,6 +4,20 @@
 
 格式參考 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)，版本號遵循[語意化版本](https://semver.org/lang/zh-TW/)。
 
+## [0.7.0] - 2026-08-26
+
+### Added
+
+- 新增 UI 縮放設定（75%–150%），所有視窗與介面等比縮放，儲存後立即套用
+
+### Changed
+
+- 移除透明視窗面板的背景模糊與陰影，玻璃質感改由半透明背景呈現
+
+### Fixed
+
+- 修正 UI 縮放為非整數倍時，面板圓角邊緣出現半透明尖端
+
 ## [0.6.9] - 2026-08-24
 
 ### Added
@@ -365,6 +379,7 @@
 
 - 初始版本：剪貼簿監聽（文字／圖片／檔案路徑）、SHA-256 內容去重、容量限制與淘汰、釘選（上限 10 則、永不淘汰）、即時搜尋、Raycast 風格浮動面板（`Ctrl+Shift+V`）、貼上模擬、刪除復原、系統匣常駐、排除清單、深淺色主題跟隨系統、免安裝可攜（設定存於 exe 旁）
 
+[0.7.0]: https://github.com/LiuTouo/Mnemark/compare/v0.6.9...v0.7.0
 [0.6.9]: https://github.com/LiuTouo/Mnemark/compare/v0.6.8...v0.6.9
 [0.6.8]: https://github.com/LiuTouo/Mnemark/compare/v0.6.7...v0.6.8
 [0.6.7]: https://github.com/LiuTouo/Mnemark/compare/v0.6.6...v0.6.7

@@ -19,6 +19,7 @@ interface AppConfig {
   debounce_ms: number;
   theme: string;
   ui_opacity_percent: number;
+  ui_scale_percent: number;
   language: string;
   paste_files_as_files: boolean;
   auto_update: boolean;
@@ -81,6 +82,7 @@ function readForm(): AppConfig {
     debounce_ms: Number(textInput("setting-debounce").value),
     theme: selectInput("setting-theme").value,
     ui_opacity_percent: Number(textInput("setting-ui-opacity").value),
+    ui_scale_percent: Number(textInput("setting-ui-scale").value),
     language: selectInput("setting-language").value,
     exclusion_list: parseExclusions((document.getElementById("setting-exclusions") as HTMLTextAreaElement).value),
     favorites_toggle_shortcut: { codes: [...favoritesShortcutCodes] },
@@ -113,6 +115,7 @@ function configsEqual(a: AppConfig, b: AppConfig): boolean {
     && a.debounce_ms === b.debounce_ms
     && a.theme === b.theme
     && a.ui_opacity_percent === b.ui_opacity_percent
+    && a.ui_scale_percent === b.ui_scale_percent
     && a.language === b.language
     && exclusionListsEqual(a.exclusion_list, b.exclusion_list)
     && favoritesCodesEqual(a.favorites_toggle_shortcut.codes, b.favorites_toggle_shortcut.codes)
@@ -273,6 +276,7 @@ function populateForm() {
   textInput("setting-debounce").value = String(config.debounce_ms);
   selectInput("setting-theme").value = config.theme;
   updateOpacityDisplay(config.ui_opacity_percent);
+  updateScaleDisplay(config.ui_scale_percent);
   selectInput("setting-language").value = config.language || "zh-TW";
   (document.getElementById("setting-exclusions") as HTMLTextAreaElement).value =
     config.exclusion_list.join("\n");
@@ -284,6 +288,12 @@ function updateOpacityDisplay(value: number) {
   const opacity = Math.min(100, Math.max(50, Number.isFinite(value) ? value : 99));
   textInput("setting-ui-opacity").value = String(opacity);
   (document.getElementById("setting-ui-opacity-value") as HTMLOutputElement).value = `${opacity}%`;
+}
+
+function updateScaleDisplay(value: number) {
+  const scale = Math.min(150, Math.max(75, Number.isFinite(value) ? value : 100));
+  textInput("setting-ui-scale").value = String(scale);
+  (document.getElementById("setting-ui-scale-value") as HTMLOutputElement).value = `${scale}%`;
 }
 
 async function onSubmit(e: Event) {
@@ -507,6 +517,11 @@ function bindFormEvents() {
   // Live opacity readout
   textInput("setting-ui-opacity").addEventListener("input", (e) => {
     updateOpacityDisplay(Number((e.target as HTMLInputElement).value));
+  });
+
+  // Live scale readout (the zoom itself applies on save, not live)
+  textInput("setting-ui-scale").addEventListener("input", (e) => {
+    updateScaleDisplay(Number((e.target as HTMLInputElement).value));
   });
 
   // Dirty tracking: `input` covers text/number/range/textarea, `change`

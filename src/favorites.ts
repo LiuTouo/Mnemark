@@ -101,11 +101,11 @@ async function refreshConfig(): Promise<void> {
 
 async function cacheWindowGeometry(): Promise<void> {
   try {
-    const win = getCurrentWindow();
-    const pos = await win.outerPosition();
-    const scale = await win.scaleFactor();
+    const pos = await getCurrentWindow().outerPosition();
     windowOffset = { x: pos.x, y: pos.y };
-    scaleFactor = scale || 1;
+    // devicePixelRatio = OS DPI × webview zoom (WebView2 ZoomFactor is page
+    // zoom), so client CSS px × DPR = physical px even when the UI is scaled.
+    scaleFactor = window.devicePixelRatio || 1;
   } catch {
     windowOffset = { x: 0, y: 0 };
     scaleFactor = 1;
