@@ -16,9 +16,14 @@ use models::{
 };
 use persistence::Persistence;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
+
+/// While an in-workspace modal is open, focus may legitimately move to
+/// another application without dismissing Mnemark. The main window is reused,
+/// so this flag is explicitly cleared whenever the panel hides or reopens.
+static MAIN_MODAL_OPEN: AtomicBool = AtomicBool::new(false);
 
 /// Lock a shared-state mutex, recovering from poisoning instead of
 /// panicking. Clipboard state is best-effort: every mutation is a simple
@@ -1450,8 +1455,10 @@ fn show_panel(app: &tauri::AppHandle) {
     use tauri::{webview::PageLoadEvent, WebviewUrl, WebviewWindowBuilder};
 
     log("[Mnemark] show_panel() called");
+    MAIN_MODAL_OPEN.store(false, Ordering::SeqCst);
     if let Some(window) = app.get_webview_window("main") {
         log("[Mnemark] panel exists, showing");
+        let _ = window.emit("main-panel-reset", ());
         center_on_cursor_monitor(app, &window);
         let _ = window.show();
         let _ = window.set_focus();
@@ -1537,9 +1544,31 @@ fn show_panel(app: &tauri::AppHandle) {
 }
 
 fn hide_panel(app: &tauri::AppHandle) {
+    MAIN_MODAL_OPEN.store(false, Ordering::SeqCst);
     if let Some(window) = app.get_webview_window("main") {
+        let _ = window.emit("main-panel-reset", ());
         let _ = window.hide();
     }
+}
+
+#[tauri::command]
+fn set_main_modal_open(open: bool, app: tauri::AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "Main window not found".to_string())?;
+
+    // Reassert topmost when editing begins. Windows can otherwise reorder a
+    // long-lived tool window after activation changes from other applications.
+    window
+        .set_always_on_top(true)
+        .map_err(|e| format!("set_always_on_top failed: {e:?}"))?;
+    MAIN_MODAL_OPEN.store(open, Ordering::SeqCst);
+    if open {
+        window
+            .set_focus()
+            .map_err(|e| format!("set_focus failed: {e:?}"))?;
+    }
+    Ok(())
 }
 
 /// Clear the inline preview payload and supersede any in-flight show.
@@ -1561,13 +1590,18 @@ fn schedule_focus_group_check(app: &tauri::AppHandle) {
                 .get_webview_window("main")
                 .and_then(|w| w.is_focused().ok())
                 .unwrap_or(false);
-            if !focused {
+            let modal_open = MAIN_MODAL_OPEN.load(Ordering::SeqCst);
+            if should_hide_panel_after_focus_loss(focused, modal_open) {
                 hide_panel(&handle);
             }
         }) {
             log(&format!("[Mnemark] run_on_main_thread failed: {:?}", e));
         }
     });
+}
+
+fn should_hide_panel_after_focus_loss(focused: bool, modal_open: bool) -> bool {
+    !focused && !modal_open
 }
 
 /// UI zoom factor derived from the config percentage.
@@ -1983,6 +2017,7 @@ pub fn run(_hidden: bool) {
             show_clip_preview,
             hide_clip_preview,
             hide_panel_command,
+            set_main_modal_open,
             get_active_clip_preview,
             list_collections,
             create_collection,
@@ -3079,5 +3114,26 @@ mod persistence_consistency_tests {
         assert_eq!(memory_ids(&state), vec!["c1".to_string()]);
         set_pinned_impl(&state, "c1", true).unwrap();
         assert!(lock(&state.history).get_clip("c1").unwrap().pinned);
+    }
+}
+
+#[cfg(test)]
+mod main_modal_focus_tests {
+    use super::should_hide_panel_after_focus_loss;
+
+    #[test]
+    fn focus_loss_keeps_panel_visible_while_modal_is_open() {
+        assert!(!should_hide_panel_after_focus_loss(false, true));
+    }
+
+    #[test]
+    fn ordinary_focus_loss_still_hides_panel() {
+        assert!(should_hide_panel_after_focus_loss(false, false));
+    }
+
+    #[test]
+    fn focused_panel_never_hides() {
+        assert!(!should_hide_panel_after_focus_loss(true, false));
+        assert!(!should_hide_panel_after_focus_loss(true, true));
     }
 }

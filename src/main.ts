@@ -247,6 +247,11 @@ async function init() {
   await listen<FavoritesUiState>("favorites-ui-state-changed", () => {
     void loadFavoritesContext();
   });
+  await listen<void>("main-panel-reset", () => {
+    closeNoteModal();
+    exitMultiSelect(false);
+    hideActionMenu();
+  });
 
   selectionToggle.addEventListener("click", () => {
     if (multiSelect.active) exitMultiSelect();
@@ -778,15 +783,27 @@ function openNoteModal(item: DisplayItem): void {
   hideActionMenu();
   noteTarget = clipLocator(item);
   noteInput.value = item.note ?? "";
+  workspace.classList.add("note-editing");
   noteModal.classList.remove("hidden");
   noteInput.focus();
   noteInput.setSelectionRange(noteInput.value.length, noteInput.value.length);
+  void invoke("set_main_modal_open", { open: true }).catch((err) => {
+    console.error("Failed to protect note editor focus:", err);
+  });
 }
 
 function closeNoteModal(): void {
+  const wasOpen = noteTarget !== null || !noteModal.classList.contains("hidden");
   noteTarget = null;
+  noteInput.value = "";
+  workspace.classList.remove("note-editing");
   noteModal.classList.add("hidden");
   noteSave.disabled = false;
+  if (wasOpen) {
+    void invoke("set_main_modal_open", { open: false }).catch((err) => {
+      console.error("Failed to release note editor focus:", err);
+    });
+  }
 }
 
 async function saveNote(): Promise<void> {

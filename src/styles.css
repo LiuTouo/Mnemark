@@ -1506,6 +1506,7 @@ textarea:focus-visible {
 }
 
 #preview-panel {
+  position: relative;
   display: flex;
   flex-direction: column;
   width: 100%;
@@ -2036,6 +2037,26 @@ textarea:focus-visible {
   align-items: center;
   justify-content: center;
   background: rgba(0, 0, 0, 0.4);
+}
+
+/* The main window is transparent and wider than its visible panes. A fixed
+ * note overlay must not darken those transparent gaps (or the desktop behind
+ * them), so each visible surface receives its own scrim instead. */
+#note-modal {
+  background: transparent;
+}
+
+#workspace.note-editing #panel::after,
+#workspace.note-editing #favorites-panel::after,
+#workspace.note-editing #preview-panel::after,
+#workspace.note-editing .workspace-tabs:not(.hidden)::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 90;
+  border-radius: inherit;
+  background: rgba(0, 0, 0, 0.4);
+  pointer-events: none;
 }
 
 .modal-overlay.hidden {
