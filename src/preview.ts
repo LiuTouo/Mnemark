@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { emit, listen } from "@tauri-apps/api/event";
+import { listen } from "@tauri-apps/api/event";
 import { applyI18n, setLanguage, t } from "./i18n";
 import { applyTheme } from "./theme";
 
@@ -8,6 +8,7 @@ interface PreviewPayload {
   kind: "Text" | "Image" | "FilePaths";
   text_content: string | null;
   image_preview_base64: string | null;
+  note: string | null;
   truncated: boolean;
   byte_size: number;
   captured_at: number;
@@ -18,6 +19,8 @@ interface PreviewPayload {
 const kindEl = document.getElementById("preview-kind")!;
 const warningEl = document.getElementById("preview-warning")!;
 const contentEl = document.getElementById("preview-content")!;
+const noteEl = document.getElementById("preview-note")!;
+const noteTextEl = document.getElementById("preview-note-text")!;
 const sourceEl = document.getElementById("preview-source")!;
 const capturedEl = document.getElementById("preview-captured")!;
 const sizeEl = document.getElementById("preview-size")!;
@@ -64,6 +67,8 @@ function render(payload: PreviewPayload) {
   sourceEl.title = source;
   capturedEl.textContent = formatCapturedAt(payload.captured_at);
   sizeEl.textContent = formatBytes(payload.byte_size);
+  noteTextEl.textContent = payload.note || "";
+  noteEl.classList.toggle("hidden", !payload.note);
 
   if (payload.truncated) {
     const saved = formatBytes(savedBytes(payload.text_content));
@@ -111,21 +116,7 @@ async function init() {
   }
   applyI18n();
 
-  await listen<PreviewPayload>("clip-preview-updated", (event) => render(event.payload));
-
-  // Escape closes the preview and tells the main panel to reset its mirrored
-  // backend state. The main panel will reopen it when automatic preview is
-  // enabled and the selection changes.
-  // clip-preview-closed is emitted only after hide_clip_preview resolves, so
-  // the main panel never treats an optimistic close as backend-confirmed.
-  document.addEventListener("keydown", (e) => {
-    if (e.key !== "Escape") return;
-    if (e.repeat) return;
-    e.preventDefault();
-    invoke("hide_clip_preview")
-      .then(() => { void emit("clip-preview-closed"); })
-      .catch(() => {});
-  });
+  await listen<PreviewPayload>("preview-payload-updated", (event) => render(event.payload));
 
   // Cover the first-load race: the backend may already hold an active preview
   // (window created before these listeners attached) — render it now.

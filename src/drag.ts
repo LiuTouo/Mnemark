@@ -105,30 +105,7 @@ export function rectContains(
   return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
 }
 
-/** Physical (device-pixel) screen coordinates — the space the sidebar
- * hit-tests in. Pointer `screenX/Y` are CSS pixels and lie at non-100% DPI, so
- * the source window converts a client CSS point through this helper before
- * emitting, and the receiver's rects are already in this space. */
-export interface PhysicalPoint {
-  x: number;
-  y: number;
-}
-
-/** Convert a window-relative CSS-pixel point into physical screen pixels. */
-export function physicalScreenPoint(
-  windowPhysicalOrigin: { x: number; y: number },
-  clientCssPoint: { x: number; y: number },
-  scale: number,
-): PhysicalPoint {
-  return {
-    x: windowPhysicalOrigin.x + clientCssPoint.x * scale,
-    y: windowPhysicalOrigin.y + clientCssPoint.y * scale,
-  };
-}
-
-/** A move/end point for a cross-window item drop. `sessionId` is a monotonic
- * counter from the source window, and `locator` is carried so the receiver can
- * resolve the drop without any prior start event. */
+/** A move/end point for an inline item drop in main-window CSS coordinates. */
 export interface ItemDragPoint {
   sessionId: number;
   locator: { scope: "history" | "favorite"; id: string };
@@ -153,11 +130,11 @@ export interface ItemDragStart {
   y: number;
 }
 
-/** Build the one-shot cross-window drag-start payload. */
+/** Build the one-shot inline drag-start payload. */
 export function itemDragStartPayload(
   sessionId: number,
   item: Clip | FavoriteItem,
-  point: PhysicalPoint,
+  point: { x: number; y: number },
 ): ItemDragStart {
   return {
     sessionId,
@@ -179,34 +156,7 @@ export function isAvailableDropTarget(collectionId: string, membershipIds: reado
   return !membershipIds.includes(collectionId);
 }
 
-export interface PhysicalRect {
-  left: number;
-  top: number;
-  right: number;
-  bottom: number;
-}
-
-/** Place the standalone drag-overlay window beside the cursor, flipping to the
- * opposite side at work-area edges. Every value is in physical pixels. */
-export function placeDragOverlay(
-  point: PhysicalPoint,
-  size: { width: number; height: number },
-  workArea: PhysicalRect,
-  offset: number,
-): PhysicalPoint {
-  const maxX = Math.max(workArea.left, workArea.right - size.width);
-  const maxY = Math.max(workArea.top, workArea.bottom - size.height);
-  let x = point.x + offset;
-  let y = point.y + offset;
-  if (x + size.width > workArea.right) x = point.x - size.width - offset;
-  if (y + size.height > workArea.bottom) y = point.y - size.height - offset;
-  return {
-    x: Math.min(maxX, Math.max(workArea.left, x)),
-    y: Math.min(maxY, Math.max(workArea.top, y)),
-  };
-}
-
-/** Receiver-side gate for a cross-window drop point. Rejects a cancelled
+/** Receiver-side gate for an inline drop point. Rejects a cancelled
  * session and any session older than the newest already seen, so a stale `end`
  * after a cancel or a newer drag cannot commit a bogus drop. */
 export function acceptDropSession(

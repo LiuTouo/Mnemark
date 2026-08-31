@@ -51,6 +51,10 @@ struct AppState {
     favorites: Arc<Mutex<Option<FavoritesStore>>>,
     /// Session-only sidebar UI state (open + selected collection).
     favorites_ui: Arc<Mutex<FavoritesUiState>>,
+    /// Logical width inserted to the left of the history panel in the single
+    /// main workspace. Used to keep the history panel anchored while resizing.
+    workspace_left_extent: Arc<Mutex<u32>>,
+    workspace_right_extent: Arc<Mutex<u32>>,
 }
 
 /// Handles to the tray menu items, kept so their labels can be re-localized
@@ -273,6 +277,34 @@ fn set_pinned(id: String, pinned: bool, state: tauri::State<AppState>) -> Result
     set_pinned_impl(&state, &id, pinned)
 }
 
+fn normalize_note(note: String) -> Option<String> {
+    if note.trim().is_empty() {
+        None
+    } else {
+        Some(note)
+    }
+}
+
+fn set_clip_note_impl(state: &AppState, id: &str, note: Option<String>) -> Result<(), String> {
+    let mut history = lock(&state.history);
+    if history.get_clip(id).is_none() {
+        return Err("Clip not found".to_string());
+    }
+    persist_with(state, |p| p.set_note(id, note.as_deref()))?;
+    history.set_note(id, note)
+}
+
+#[tauri::command]
+fn set_clip_note(
+    id: String,
+    note: String,
+    state: tauri::State<AppState>,
+) -> Result<Option<String>, String> {
+    let note = normalize_note(note);
+    set_clip_note_impl(&state, &id, note.clone())?;
+    Ok(note)
+}
+
 #[tauri::command]
 fn get_config(state: tauri::State<AppState>) -> AppConfig {
     let config = lock(&state.config);
@@ -341,7 +373,15 @@ fn update_config(
     {
         return Err("Drawer shortcut conflicts with the panel hotkey".to_string());
     }
-    let (old_hotkey, old_startup, old_persist, old_language, old_auto_update, old_preview_enabled, old_ui_scale) = {
+    let (
+        old_hotkey,
+        old_startup,
+        old_persist,
+        old_language,
+        old_auto_update,
+        old_preview_enabled,
+        old_ui_scale,
+    ) = {
         let config = lock(&state.config);
         (
             config.hotkey.clone(),
@@ -766,6 +806,19 @@ fn favorite_collection_ids(
     with_favorites(&state, |f| f.collection_ids_for_item(&hash))
 }
 
+#[tauri::command]
+fn set_favorite_note(
+    id: String,
+    note: String,
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<Option<String>, String> {
+    let note = normalize_note(note);
+    with_favorites(&state, |f| f.set_note(&id, note.as_deref()))?;
+    let _ = app.emit("favorites-updated", ());
+    Ok(note)
+}
+
 /// Outcome string mirrors the history `paste_files` contract: `""` for a plain
 /// text/image paste (or files-as-text), `"files"` for a real CF_HDROP paste,
 /// `"text"` when the source files are gone and the path text was pasted instead.
@@ -845,10 +898,9 @@ fn get_favorites_ui_state(state: tauri::State<AppState>) -> FavoritesUiState {
     lock(&state.favorites_ui).clone()
 }
 
-/// Open/close the sidebar. Closing clears the selection (returns to history);
-/// opening shows the sidebar window when the panel is visible.
+/// Open/close the inline drawer pane. Closing clears the selection.
 #[tauri::command]
-async fn set_favorites_open(
+fn set_favorites_open(
     open: bool,
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -856,13 +908,23 @@ async fn set_favorites_open(
     apply_sidebar_toggle(&mut lock(&state.favorites_ui), open);
     let ui_state = lock(&state.favorites_ui).clone();
     let _ = app.emit("favorites-ui-state-changed", &ui_state);
-    let handle = app.clone();
-    app.run_on_main_thread(move || {
-        let state = handle.state::<AppState>();
-        apply_sidebar_visibility(&handle, &state);
-    })
-    .map_err(|e| format!("run_on_main_thread failed: {:?}", e))?;
     Ok(())
+}
+
+/// Toggle the inline drawer pane from its authoritative session state.
+#[tauri::command]
+fn toggle_favorites_sidebar(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<FavoritesUiState, String> {
+    let ui_state = {
+        let mut ui = lock(&state.favorites_ui);
+        let open = !ui.open;
+        apply_sidebar_toggle(&mut ui, open);
+        ui.clone()
+    };
+    let _ = app.emit("favorites-ui-state-changed", &ui_state);
+    Ok(ui_state)
 }
 
 /// Select a collection (or `None` for history). Never changes `open`.
@@ -902,6 +964,7 @@ fn build_preview_payload(clip: Clip) -> Result<PreviewPayload, String> {
         kind: clip.kind,
         text_content: clip.text_content,
         image_preview_base64,
+        note: clip.note,
         truncated: clip.truncated,
         byte_size: clip.byte_size,
         captured_at: clip.captured_at,
@@ -972,43 +1035,16 @@ async fn commit_preview_on_main_thread(
         .map_err(|_| "preview commit channel closed".to_string())?
 }
 
-/// Perform the current-generation preview commit on the main thread: create or
-/// reuse the window, position it, set the active payload, emit the update
-/// event, then show it. Must only run on the main thread — its position
-/// getters resolve inline there, so it never blocks on the main loop.
+/// Commit the current preview payload to the inline pane in the main WebView.
 fn commit_preview_window(
     app: &tauri::AppHandle,
     generation: u64,
     payload: &PreviewPayload,
 ) -> Result<(), String> {
-    let window = get_or_create_preview_window(app)?;
-    position_preview(app, &window)?;
-
     let state = app.state::<AppState>();
     *lock(&state.preview) = Some(payload.clone());
-    // Event emission is best-effort: the active payload covers a listener that
-    // races page load.
-    let _ = app.emit("clip-preview-updated", payload);
-
-    // A show that finishes while the panel is hidden (paste/toggle/focus loss
-    // suspended it) must save the payload but never surface the preview alone.
-    // show_panel restores it from the saved payload on the next reopen.
-    let panel_visible = app
-        .get_webview_window("main")
-        .map(|w| w.is_visible().unwrap_or(false))
-        .unwrap_or(false);
-    if !panel_visible {
-        return Ok(());
-    }
-
-    if let Err(e) = window.show() {
-        // Clear the stale active payload only if we are still current, so a
-        // concurrent hide/new show that already cleared or overwrote it wins.
-        if show_is_current(state.preview_generation.load(Ordering::SeqCst), generation) {
-            *lock(&state.preview) = None;
-        }
-        return Err(format!("preview window show failed: {:?}", e));
-    }
+    let _ = app.emit("preview-payload-updated", payload);
+    let _ = generation;
     Ok(())
 }
 
@@ -1239,87 +1275,95 @@ fn log(msg: &str) {
 /// window is a 480x620 transparent host whose visual panel sits at logical
 /// offset (30, 30) with width 420; the preview attaches beside that panel.
 const PANEL_OFFSET: i32 = 30;
-const PANEL_WIDTH: i32 = 420;
-const PREVIEW_GAP: i32 = 8;
-/// Preferred logical size of the preview UI window. Distinct from the image
-/// preview JPEG bound (720x480), which lives inside generate_preview_data_url.
-const PREVIEW_WINDOW_W: u32 = 360;
-const PREVIEW_WINDOW_H: u32 = 540;
 
-/// Computed preview window placement, all in physical pixels.
-struct PreviewPlacement {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorkspaceGeometry {
     x: i32,
     y: i32,
-    width: u32,
-    height: u32,
+    physical_width: u32,
+    physical_height: u32,
 }
 
-/// Pure positioning math for the clip-preview window. Inputs: the main
-/// window's physical outer position, its effective scale factor (OS DPI × UI
-/// zoom, mapping CSS px to physical px), and the current monitor's physical
-/// work area; plus the logical panel offset/width, the logical gap, and the
-/// logical preferred preview size. Output is the preview window's physical
-/// (x, y) and size.
-///
-/// Rules: right of the panel preferred, left fallback; width clamped to the
-/// available side space; fully clamped into the work area; top aligned with
-/// the panel top; never overlaps the panel.
-// The full physical placement context (position, scale, work area, logical
-// panel geometry, preferred size) is one cohesive input set; bundling it into
-// a struct would relocate, not reduce, the call-site verbosity.
-#[allow(clippy::too_many_arguments)]
-fn place_preview(
-    main_pos: (i32, i32),
+fn place_workspace_window(
+    current_pos: (i32, i32),
+    current_left_extent: u32,
+    next_left_extent: u32,
+    next_right_extent: u32,
     scale: f64,
+    zoom: f64,
     work_area: (i32, i32, u32, u32),
-    panel_offset: i32,
-    panel_width: i32,
-    gap: i32,
-    content_width: u32,
-    content_height: u32,
-) -> PreviewPlacement {
-    let to_phys = |v: i32| -> i32 { ((v as f64) * scale).round() as i32 };
-
-    let (mx, my) = main_pos;
+) -> WorkspaceGeometry {
     let (wx, wy, ww, wh) = work_area;
-    let work_right = wx + ww as i32;
-    let work_bottom = wy + wh as i32;
-
-    let panel_left = mx + to_phys(panel_offset);
-    let panel_right = panel_left + to_phys(panel_width);
-    let panel_top = my + to_phys(panel_offset);
-
-    let pref_w = to_phys(content_width as i32).max(1) as u32;
-    let pref_h = to_phys(content_height as i32).max(1) as u32;
-    let gap_px = to_phys(gap);
-
-    // Available horizontal space on each side (physical), never negative.
-    let right_avail = (work_right - panel_right - gap_px).max(0) as u32;
-    let left_avail = (panel_left - wx - gap_px).max(0) as u32;
-
-    // Right preferred; left fallback; if neither fits, the side with more room
-    // (ties to the right) and the width is clamped.
-    let use_right = right_avail >= pref_w || right_avail >= left_avail;
-    let avail = if use_right { right_avail } else { left_avail };
-    let width = pref_w.min(avail).max(1);
-
-    // Height clamped to what fits below the panel top within the work area.
-    let max_h = (work_bottom - panel_top).max(0) as u32;
-    let height = pref_h.min(max_h).max(1);
-
-    let x = if use_right {
-        panel_right + gap_px
-    } else {
-        panel_left - gap_px - width as i32
-    };
-    let y = panel_top.clamp(wy, (work_bottom - height as i32).max(wy));
-
-    PreviewPlacement {
-        x,
-        y,
-        width,
-        height,
+    let factor = scale * zoom;
+    let history_x = current_pos.0
+        + (((PANEL_OFFSET as u32 + current_left_extent) as f64) * factor).round() as i32;
+    let physical_width = (((480 + next_left_extent + next_right_extent) as f64) * factor)
+        .round()
+        .max(1.0) as u32;
+    let physical_height = (620.0 * factor).round().max(1.0) as u32;
+    let desired_x =
+        history_x - (((PANEL_OFFSET as u32 + next_left_extent) as f64) * factor).round() as i32;
+    let max_x = wx + ww.saturating_sub(physical_width) as i32;
+    let max_y = wy + wh.saturating_sub(physical_height) as i32;
+    WorkspaceGeometry {
+        x: desired_x.clamp(wx, max_x.max(wx)),
+        y: current_pos.1.clamp(wy, max_y.max(wy)),
+        physical_width: physical_width.min(ww.max(1)),
+        physical_height: physical_height.min(wh.max(1)),
     }
+}
+
+fn apply_main_workspace_layout(
+    left_extent: u32,
+    right_extent: u32,
+    app: &tauri::AppHandle,
+    state: &AppState,
+) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
+    let monitor = window
+        .current_monitor()
+        .map_err(|e| format!("current_monitor failed: {:?}", e))?
+        .ok_or_else(|| "no monitor".to_string())?;
+    let position = window
+        .outer_position()
+        .map_err(|e| format!("main outer_position failed: {:?}", e))?;
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let zoom = ui_zoom_of(&lock(&state.config));
+    let current_left = *lock(&state.workspace_left_extent);
+    let wa = monitor.work_area();
+    let geometry = place_workspace_window(
+        (position.x, position.y),
+        current_left,
+        left_extent,
+        right_extent,
+        scale,
+        zoom,
+        (wa.position.x, wa.position.y, wa.size.width, wa.size.height),
+    );
+    window
+        .set_size(tauri::LogicalSize::new(
+            geometry.physical_width as f64 / scale,
+            geometry.physical_height as f64 / scale,
+        ))
+        .map_err(|e| format!("main workspace set_size failed: {:?}", e))?;
+    window
+        .set_position(tauri::PhysicalPosition::new(geometry.x, geometry.y))
+        .map_err(|e| format!("main workspace set_position failed: {:?}", e))?;
+    *lock(&state.workspace_left_extent) = left_extent;
+    *lock(&state.workspace_right_extent) = right_extent;
+    Ok(())
+}
+
+#[tauri::command]
+fn set_main_workspace_layout(
+    left_extent: u32,
+    right_extent: u32,
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<(), String> {
+    apply_main_workspace_layout(left_extent, right_extent, &app, &state)
 }
 
 /// Pure coordinate math: compute the i32 (x, y) that centers window of
@@ -1335,6 +1379,23 @@ fn center_coords(mon_pos: (i32, i32), mon_size: (u32, u32), win_size: (u32, u32)
     let cx = cx.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
     let cy = cy.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
     (cx.max(mon_pos.0), cy.max(mon_pos.1))
+}
+
+fn center_history_coords(
+    mon_pos: (i32, i32),
+    mon_size: (u32, u32),
+    win_size: (u32, u32),
+    left_extent: u32,
+    factor: f64,
+) -> (i32, i32) {
+    let history_offset = (((PANEL_OFFSET as u32 + left_extent) as f64) * factor).round() as i64;
+    let history_width = (420.0 * factor).round() as i64;
+    let monitor_center = mon_pos.0 as i64 + mon_size.0 as i64 / 2;
+    let desired_x = monitor_center - history_width / 2 - history_offset;
+    let max_x = mon_pos.0 as i64 + mon_size.0.saturating_sub(win_size.0) as i64;
+    let x = desired_x.clamp(mon_pos.0 as i64, max_x.max(mon_pos.0 as i64));
+    let (_, y) = center_coords(mon_pos, mon_size, win_size);
+    (x.clamp(i32::MIN as i64, i32::MAX as i64) as i32, y)
 }
 
 /// Position `window` centered on the monitor that currently contains the
@@ -1369,10 +1430,15 @@ fn center_on_cursor_monitor(app: &tauri::AppHandle, window: &tauri::WebviewWindo
     let mon_pos = monitor.position();
     let mon_size = monitor.size();
 
-    let (x, y) = center_coords(
+    let state = app.state::<AppState>();
+    let left_extent = *lock(&state.workspace_left_extent);
+    let factor = monitor.scale_factor() * ui_zoom_of(&lock(&state.config));
+    let (x, y) = center_history_coords(
         (mon_pos.x, mon_pos.y),
         (mon_size.width, mon_size.height),
         (window_size.width, window_size.height),
+        left_extent,
+        factor,
     );
 
     if let Err(e) = window.set_position(tauri::PhysicalPosition::new(x, y)) {
@@ -1381,8 +1447,7 @@ fn center_on_cursor_monitor(app: &tauri::AppHandle, window: &tauri::WebviewWindo
 }
 
 fn show_panel(app: &tauri::AppHandle) {
-    use tauri::WebviewUrl;
-    use tauri::WebviewWindowBuilder;
+    use tauri::{webview::PageLoadEvent, WebviewUrl, WebviewWindowBuilder};
 
     log("[Mnemark] show_panel() called");
     if let Some(window) = app.get_webview_window("main") {
@@ -1390,11 +1455,11 @@ fn show_panel(app: &tauri::AppHandle) {
         center_on_cursor_monitor(app, &window);
         let _ = window.show();
         let _ = window.set_focus();
-        restore_preview_if_saved(app);
-        restore_sidebar_if_open(app);
     } else {
         log("[Mnemark] creating new panel window");
         let (panel_w, panel_h) = zoomed_builder_size(app, 480, 620);
+        let first_page_load = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let first_page_load_for_callback = first_page_load.clone();
         match WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
             .title("Mnemark")
             // Window is larger than the panel (420x540) so the rounded
@@ -1410,6 +1475,21 @@ fn show_panel(app: &tauri::AppHandle) {
             .resizable(false)
             .skip_taskbar(true)
             .always_on_top(true)
+            // Keep the first main window hidden until its document and deferred
+            // module script have loaded. Showing it immediately after build()
+            // exposes clickable UI before main.ts has registered its listeners,
+            // which drops a fast first click. The one-shot guard prevents a
+            // later navigation/HMR reload from resurfacing a hidden panel.
+            .on_page_load(move |window, payload| {
+                if matches!(payload.event(), PageLoadEvent::Finished)
+                    && first_page_load_for_callback.swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    let app = window.app_handle();
+                    center_on_cursor_monitor(app, &window);
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            })
             .visible(false)
             .focused(false)
             .build()
@@ -1431,10 +1511,6 @@ fn show_panel(app: &tauri::AppHandle) {
                             armed_for_event.store(true, std::sync::atomic::Ordering::Relaxed);
                         }
                         tauri::WindowEvent::Focused(false) => {
-                            // Focus may have moved to the attached preview, not
-                            // away from the composite group: defer to a delayed
-                            // re-check that dismisses only when NEITHER window
-                            // owns focus.
                             if armed_for_event.load(std::sync::atomic::Ordering::Relaxed) {
                                 schedule_focus_group_check(&app_handle);
                             }
@@ -1452,10 +1528,6 @@ fn show_panel(app: &tauri::AppHandle) {
                     std::thread::sleep(std::time::Duration::from_millis(500));
                     armed.store(true, std::sync::atomic::Ordering::Relaxed);
                 });
-                let _ = w.show();
-                let _ = w.set_focus();
-                restore_preview_if_saved(app);
-                restore_sidebar_if_open(app);
             }
             Err(e) => {
                 log(&format!("[Mnemark] panel creation failed: {:?}", e));
@@ -1468,75 +1540,28 @@ fn hide_panel(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
     }
-    // The preview is an attached part of the panel: hiding the panel (paste,
-    // toggle, focus loss) must never leave the preview visible. But this is a
-    // temporary suspend, not an explicit close — hide the preview window while
-    // keeping the saved payload (so show_panel can restore the still-open
-    // preview) and do NOT bump the generation (the still-desired show intent
-    // remains current, so an in-flight show commits its payload on schedule).
-    if let Some(window) = app.get_webview_window("clip-preview") {
-        let _ = window.hide();
-    }
-    // The favorites sidebar is attached too: hiding the panel hides it WITHOUT
-    // clearing its session state (show_panel restores it when still open).
-    if let Some(window) = app.get_webview_window("favorites-sidebar") {
-        let _ = window.hide();
-    }
-    // The drag overlay is purely transient and must never outlive the panel.
-    if let Some(window) = app.get_webview_window("drag-overlay") {
-        let _ = window.hide();
-    }
 }
 
-/// Re-surface a previously suspended preview (payload saved but panel hidden)
-/// on panel reopen: reposition beside the freshly shown panel and show it.
-/// Only touches an existing preview window — a saved payload always implies the
-/// window was created by its original show commit, so no creation happens here
-/// (and thus no main-thread build is required).
-fn restore_preview_if_saved(app: &tauri::AppHandle) {
-    let state = app.state::<AppState>();
-    if lock(&state.preview).is_none() {
-        return;
-    }
-    if let Some(window) = app.get_webview_window("clip-preview") {
-        if position_preview(app, &window).is_ok() {
-            let _ = window.show();
-        }
-    }
-}
-
-/// Hide only the clip-preview window and clear its active payload. Never
-/// touches the main panel. Bumps the generation first so any in-flight show
-/// that has not yet committed sees a stale generation and no-ops. No operation
-/// lock: the show commit is serialized on the main thread, so a hide intent
-/// either lands before it (making it stale) or after it (and hides it).
+/// Clear the inline preview payload and supersede any in-flight show.
 fn hide_preview_window(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
     state.preview_generation.fetch_add(1, Ordering::SeqCst);
-    if let Some(window) = app.get_webview_window("clip-preview") {
-        let _ = window.hide();
-    }
     *lock(&state.preview) = None;
 }
 
-/// Main + preview are one composite focus group. On focus loss, sleep briefly
-/// off-thread (the OS focus transition to/from the preview is not
-/// instantaneous), then run the actual focus queries and hide decision on the
-/// Tauri main thread. The delay closes the race where the main window's
-/// Focused(false) fired because the preview just took focus.
+/// Delay the main-window focus check so transient Windows activation changes
+/// do not dismiss the panel during the same event turn.
 fn schedule_focus_group_check(app: &tauri::AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(150));
         let handle = app.clone();
         if let Err(e) = app.run_on_main_thread(move || {
-            let focused = |label: &str| {
-                handle
-                    .get_webview_window(label)
-                    .and_then(|w| w.is_focused().ok())
-                    .unwrap_or(false)
-            };
-            if !focused("main") && !focused("clip-preview") && !focused("favorites-sidebar") {
+            let focused = handle
+                .get_webview_window("main")
+                .and_then(|w| w.is_focused().ok())
+                .unwrap_or(false);
+            if !focused {
                 hide_panel(&handle);
             }
         }) {
@@ -1545,101 +1570,18 @@ fn schedule_focus_group_check(app: &tauri::AppHandle) {
     });
 }
 
-/// Lazily create (or reuse) the attached clip-preview window. The window is
-/// created hidden and unfocused so hover alone never steals focus; explicit
-/// pointer interaction may focus it. Returns Err when creation fails.
-fn get_or_create_preview_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, String> {
-    use tauri::{WebviewUrl, WebviewWindowBuilder};
-
-    if let Some(w) = app.get_webview_window("clip-preview") {
-        return Ok(w);
-    }
-
-    let (preview_w, preview_h) = zoomed_builder_size(app, PREVIEW_WINDOW_W, PREVIEW_WINDOW_H);
-    let w = WebviewWindowBuilder::new(app, "clip-preview", WebviewUrl::App("preview.html".into()))
-        .title("Mnemark Preview")
-        .decorations(false)
-        .transparent(true)
-        .shadow(false)
-        .skip_taskbar(true)
-        .always_on_top(true)
-        .resizable(false)
-        .inner_size(preview_w, preview_h)
-        .visible(false)
-        .focused(false)
-        .build()
-        .map_err(|e| format!("preview window creation failed: {:?}", e))?;
-    let _ = w.set_zoom(ui_zoom_of(&lock(&app.state::<AppState>().config)));
-    // Preview owns focus only through explicit pointer interaction; losing it
-    // must not dismiss the pair while main still has focus, so route through
-    // the same composite re-check.
-    let app_handle = app.clone();
-    w.on_window_event(move |event| {
-        if let tauri::WindowEvent::Focused(false) = event {
-            schedule_focus_group_check(&app_handle);
-        }
-    });
-    Ok(w)
-}
-
-/// Position the preview window beside the visual main panel (main outer
-/// position + panel offset), and size it to the available side space.
-fn position_preview(app: &tauri::AppHandle, window: &tauri::WebviewWindow) -> Result<(), String> {
-    let main = app
-        .get_webview_window("main")
-        .ok_or_else(|| "main window not found".to_string())?;
-    let main_pos = main
-        .outer_position()
-        .map_err(|e| format!("main outer_position failed: {:?}", e))?;
-    let scale = main.scale_factor().unwrap_or(1.0)
-        * ui_zoom_of(&lock(&app.state::<AppState>().config));
-    let monitor = main
-        .current_monitor()
-        .map_err(|e| format!("current_monitor failed: {:?}", e))?
-        .ok_or_else(|| "no monitor".to_string())?;
-    let wa = monitor.work_area();
-    let placement = place_preview(
-        (main_pos.x, main_pos.y),
-        scale,
-        (wa.position.x, wa.position.y, wa.size.width, wa.size.height),
-        PANEL_OFFSET,
-        PANEL_WIDTH,
-        PREVIEW_GAP,
-        PREVIEW_WINDOW_W,
-        PREVIEW_WINDOW_H,
-    );
-    window
-        .set_size(tauri::PhysicalSize::new(placement.width, placement.height))
-        .map_err(|e| format!("preview set_size failed: {:?}", e))?;
-    window
-        .set_position(tauri::PhysicalPosition::new(placement.x, placement.y))
-        .map_err(|e| format!("preview set_position failed: {:?}", e))?;
-    Ok(())
-}
-
-/// Preferred logical size of the favorites sidebar window. Height matches the
-/// visual panel (540); width is clamped to the left-side space.
-const SIDEBAR_WINDOW_W: u32 = 360;
-const SIDEBAR_WINDOW_H: u32 = 540;
-const DRAG_OVERLAY_WINDOW_W: u32 = 288;
-const DRAG_OVERLAY_WINDOW_H: u32 = 112;
-
 /// UI zoom factor derived from the config percentage.
 fn ui_zoom_of(config: &AppConfig) -> f64 {
     config.ui_scale_percent as f64 / 100.0
 }
 
-/// Base logical window size at zoom = 100% for each scalable window. The
-/// drag-overlay is deliberately absent: it participates in a cross-window
-/// physical-coordinate protocol (drag & drop) and must stay unzoomed.
+/// Base logical window size at zoom = 100% for each scalable window.
 fn base_window_size(label: &str) -> Option<(u32, u32)> {
     match label {
         "main" => Some((480, 620)),
         "settings" => Some((500, 700)),
         "about" => Some((440, 540)),
         "tutorial" => Some((500, 600)),
-        "clip-preview" => Some((PREVIEW_WINDOW_W, PREVIEW_WINDOW_H)),
-        "favorites-sidebar" => Some((SIDEBAR_WINDOW_W, SIDEBAR_WINDOW_H)),
         _ => None,
     }
 }
@@ -1694,26 +1636,24 @@ fn apply_window_zoom(window: &tauri::WebviewWindow, zoom: f64) {
     let _ = window.set_size(tauri::LogicalSize::new(zw, zh));
 }
 
-/// Re-apply the configured UI scale to every live scalable window. Visible
-/// attached windows are repositioned so they stay glued to the panel; hidden
-/// ones are resized silently (safe on hidden windows) and repositioned the
-/// next time they are shown.
+/// Re-apply the configured UI scale to every live scalable window.
 fn apply_ui_scale(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
     let zoom = ui_zoom_of(&lock(&state.config));
     drop(state);
     for (label, window) in app.webview_windows() {
+        if label == "main" {
+            let _ = window.set_zoom(zoom);
+            let state = app.state::<AppState>();
+            let left = *lock(&state.workspace_left_extent);
+            let right = *lock(&state.workspace_right_extent);
+            let _ = apply_main_workspace_layout(left, right, app, &state);
+            continue;
+        }
         if base_window_size(&label).is_none() {
-            continue; // drag-overlay and any unknown window stay unzoomed
+            continue;
         }
         apply_window_zoom(&window, zoom);
-        if window.is_visible().unwrap_or(false) {
-            if label == "clip-preview" {
-                let _ = position_preview(app, &window);
-            } else if label == "favorites-sidebar" {
-                let _ = position_sidebar(app, &window);
-            }
-        }
     }
 }
 
@@ -1735,224 +1675,6 @@ fn clear_selection_if_deleted(ui: &mut FavoritesUiState, deleted_id: &str) {
 
 fn tutorial_needed(version: u32) -> bool {
     version < CURRENT_TUTORIAL_VERSION
-}
-
-/// Lazily create (or reuse) the attached favorites-sidebar window. Created
-/// hidden and unfocused so it never steals focus until explicitly opened.
-fn get_or_create_sidebar_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, String> {
-    use tauri::{WebviewUrl, WebviewWindowBuilder};
-
-    if let Some(w) = app.get_webview_window("favorites-sidebar") {
-        return Ok(w);
-    }
-
-    let (sidebar_w, sidebar_h) = zoomed_builder_size(app, SIDEBAR_WINDOW_W, SIDEBAR_WINDOW_H);
-    let mut builder = WebviewWindowBuilder::new(
-        app,
-        "favorites-sidebar",
-        WebviewUrl::App("favorites.html".into()),
-    )
-    .title("Mnemark Drawer")
-    .decorations(false)
-    .transparent(true)
-    .shadow(false)
-    .skip_taskbar(true)
-    .always_on_top(true)
-    .resizable(false)
-    .inner_size(sidebar_w, sidebar_h)
-    .visible(false)
-    .focused(false);
-    // Own the sidebar to main so Windows keeps it above the panel in Z-order.
-    #[cfg(windows)]
-    {
-        let main = app
-            .get_webview_window("main")
-            .ok_or_else(|| "main window not found".to_string())?;
-        builder = builder
-            .owner(&main)
-            .map_err(|e| format!("sidebar owner setup failed: {:?}", e))?;
-    }
-    let w = builder
-        .build()
-        .map_err(|e| format!("sidebar window creation failed: {:?}", e))?;
-    let _ = w.set_zoom(ui_zoom_of(&lock(&app.state::<AppState>().config)));
-    // Focus loss routes through the same composite re-check as main/preview.
-    let app_handle = app.clone();
-    w.on_window_event(move |event| {
-        if let tauri::WindowEvent::Focused(false) = event {
-            schedule_focus_group_check(&app_handle);
-        }
-    });
-    Ok(w)
-}
-
-/// Lazily create the single drag-card overlay alongside the drawer. Its WebView
-/// owns the visual and moves its native window from physical pointer events, so
-/// neither the main nor sidebar window can clip the card.
-fn get_or_create_drag_overlay_window(
-    app: &tauri::AppHandle,
-) -> Result<tauri::WebviewWindow, String> {
-    use tauri::{WebviewUrl, WebviewWindowBuilder};
-
-    if let Some(w) = app.get_webview_window("drag-overlay") {
-        return Ok(w);
-    }
-
-    let mut builder = WebviewWindowBuilder::new(
-        app,
-        "drag-overlay",
-        WebviewUrl::App("drag-overlay.html".into()),
-    )
-    .title("Mnemark Drag Overlay")
-    .decorations(false)
-    .transparent(true)
-    .shadow(false)
-    .skip_taskbar(true)
-    .always_on_top(true)
-    .resizable(false)
-    .focusable(false)
-    .inner_size(DRAG_OVERLAY_WINDOW_W as f64, DRAG_OVERLAY_WINDOW_H as f64)
-    .visible(false)
-    .focused(false);
-    // Own the overlay to the sidebar (itself owned by main) so Windows keeps
-    // the overlay above both host windows — always_on_top alone cannot
-    // re-elevate a window whose topmost flag is already set.
-    #[cfg(windows)]
-    {
-        let sidebar = app
-            .get_webview_window("favorites-sidebar")
-            .ok_or_else(|| "favorites sidebar window not found".to_string())?;
-        builder = builder
-            .owner(&sidebar)
-            .map_err(|e| format!("drag overlay owner setup failed: {:?}", e))?;
-    }
-    let w = builder
-        .build()
-        .map_err(|e| format!("drag overlay window creation failed: {:?}", e))?;
-    w.set_ignore_cursor_events(true)
-        .map_err(|e| format!("drag overlay cursor passthrough failed: {:?}", e))?;
-    Ok(w)
-}
-
-/// Pure left-side placement math: the sidebar sits immediately left of the
-/// visual panel, top-aligned, clamped into the monitor work area. The scale
-/// argument is the effective CSS→physical ratio (OS DPI × UI zoom).
-#[allow(clippy::too_many_arguments)]
-fn place_sidebar(
-    main_pos: (i32, i32),
-    scale: f64,
-    work_area: (i32, i32, u32, u32),
-    panel_offset: i32,
-    gap: i32,
-    content_width: u32,
-    content_height: u32,
-) -> PreviewPlacement {
-    let to_phys = |v: i32| -> i32 { ((v as f64) * scale).round() as i32 };
-
-    let (mx, my) = main_pos;
-    let (wx, wy, _ww, wh) = work_area;
-    let work_bottom = wy + wh as i32;
-
-    let panel_left = mx + to_phys(panel_offset);
-    let panel_top = my + to_phys(panel_offset);
-
-    let pref_w = to_phys(content_width as i32).max(1) as u32;
-    let pref_h = to_phys(content_height as i32).max(1) as u32;
-    let gap_px = to_phys(gap);
-
-    let left_avail = (panel_left - wx - gap_px).max(0) as u32;
-    let width = pref_w.min(left_avail).max(1);
-    let max_h = (work_bottom - panel_top).max(0) as u32;
-    let height = pref_h.min(max_h).max(1);
-
-    let x = panel_left - gap_px - width as i32;
-    let y = panel_top.clamp(wy, (work_bottom - height as i32).max(wy));
-
-    PreviewPlacement {
-        x,
-        y,
-        width,
-        height,
-    }
-}
-
-/// Position the sidebar window beside the visual main panel (left side).
-fn position_sidebar(app: &tauri::AppHandle, window: &tauri::WebviewWindow) -> Result<(), String> {
-    let main = app
-        .get_webview_window("main")
-        .ok_or_else(|| "main window not found".to_string())?;
-    let main_pos = main
-        .outer_position()
-        .map_err(|e| format!("main outer_position failed: {:?}", e))?;
-    let scale = main.scale_factor().unwrap_or(1.0)
-        * ui_zoom_of(&lock(&app.state::<AppState>().config));
-    let monitor = main
-        .current_monitor()
-        .map_err(|e| format!("current_monitor failed: {:?}", e))?
-        .ok_or_else(|| "no monitor".to_string())?;
-    let wa = monitor.work_area();
-    let placement = place_sidebar(
-        (main_pos.x, main_pos.y),
-        scale,
-        (wa.position.x, wa.position.y, wa.size.width, wa.size.height),
-        PANEL_OFFSET,
-        PREVIEW_GAP,
-        SIDEBAR_WINDOW_W,
-        SIDEBAR_WINDOW_H,
-    );
-    window
-        .set_size(tauri::PhysicalSize::new(placement.width, placement.height))
-        .map_err(|e| format!("sidebar set_size failed: {:?}", e))?;
-    window
-        .set_position(tauri::PhysicalPosition::new(placement.x, placement.y))
-        .map_err(|e| format!("sidebar set_position failed: {:?}", e))?;
-    Ok(())
-}
-
-/// Show/hide the sidebar window to match the runtime UI state + panel
-/// visibility. Creates the window on first open (main-thread only).
-fn apply_sidebar_visibility(app: &tauri::AppHandle, state: &AppState) {
-    let open = lock(&state.favorites_ui).open;
-    let panel_visible = app
-        .get_webview_window("main")
-        .map(|w| w.is_visible().unwrap_or(false))
-        .unwrap_or(false);
-
-    if open && panel_visible {
-        match get_or_create_sidebar_window(app) {
-            Ok(w) => {
-                let _ = position_sidebar(app, &w);
-                let _ = w.show();
-            }
-            Err(e) => log(&format!("[Mnemark] sidebar open failed: {}", e)),
-        }
-        if let Err(e) = get_or_create_drag_overlay_window(app) {
-            log(&format!("[Mnemark] drag overlay creation failed: {}", e));
-        }
-    } else if !open {
-        if let Some(w) = app.get_webview_window("favorites-sidebar") {
-            let _ = w.hide();
-        }
-        if let Some(w) = app.get_webview_window("drag-overlay") {
-            let _ = w.hide();
-        }
-    }
-    // open && !panel_visible: leave hidden — show_panel restores it.
-}
-
-/// Re-surface a still-open sidebar on panel reopen (state preserved through
-/// hide_panel). Only touches an existing window — creation happens on first
-/// open, not here.
-fn restore_sidebar_if_open(app: &tauri::AppHandle) {
-    let state = app.state::<AppState>();
-    if !lock(&state.favorites_ui).open {
-        return;
-    }
-    if let Some(w) = app.get_webview_window("favorites-sidebar") {
-        if position_sidebar(app, &w).is_ok() {
-            let _ = w.show();
-        }
-    }
 }
 
 fn toggle_panel(app: &tauri::AppHandle) {
@@ -2099,6 +1821,8 @@ pub fn run(_hidden: bool) {
             preview_generation: Arc::new(AtomicU64::new(0)),
             favorites: favorites.clone(),
             favorites_ui: favorites_ui.clone(),
+            workspace_left_extent: Arc::new(Mutex::new(0)),
+            workspace_right_extent: Arc::new(Mutex::new(0)),
         })
         .setup(move |app| {
             let resource_dir = app.path().resource_dir().unwrap_or_default();
@@ -2246,6 +1970,7 @@ pub fn run(_hidden: bool) {
             undo_delete,
             undo_delete_batch,
             set_pinned,
+            set_clip_note,
             get_config,
             take_startup_error,
             update_config,
@@ -2270,12 +1995,15 @@ pub fn run(_hidden: bool) {
             remove_favorites,
             list_favorite_items,
             favorite_collection_ids,
+            set_favorite_note,
             paste_favorite,
             copy_favorite,
             show_favorite_preview,
             get_favorites_ui_state,
             set_favorites_open,
+            toggle_favorites_sidebar,
             set_favorites_selected,
+            set_main_workspace_layout,
             complete_tutorial,
             show_panel_command,
             update::update_channel,
@@ -2657,7 +2385,7 @@ mod ui_scale_tests {
 
 #[cfg(test)]
 mod center_coords_tests {
-    use super::center_coords;
+    use super::{center_coords, center_history_coords};
 
     #[test]
     fn center_on_positive_monitor() {
@@ -2670,6 +2398,13 @@ mod center_coords_tests {
     fn center_on_negative_monitor_origin() {
         let (x, y) = center_coords((-1920, 0), (1920, 1080), (480, 620));
         assert_eq!(x, -1200);
+        assert_eq!(y, 230);
+    }
+
+    #[test]
+    fn expanded_workspace_centers_the_history_column() {
+        let (x, y) = center_history_coords((0, 0), (1920, 1080), (1216, 620), 368, 1.0);
+        assert_eq!(x + 30 + 368 + 210, 960);
         assert_eq!(y, 230);
     }
 
@@ -2710,78 +2445,6 @@ mod center_coords_tests {
 }
 
 #[cfg(test)]
-mod preview_placement_tests {
-    use super::place_preview;
-
-    fn place(
-        main_pos: (i32, i32),
-        scale: f64,
-        work_area: (i32, i32, u32, u32),
-    ) -> super::PreviewPlacement {
-        place_preview(main_pos, scale, work_area, 30, 420, 8, 360, 540)
-    }
-
-    #[test]
-    fn right_side_when_space_available() {
-        let p = place((100, 100), 1.0, (0, 0, 1920, 1080));
-        // panel: left 130, right 550, top 130. gap 8. right fits 360.
-        assert_eq!(p.x, 558);
-        assert_eq!(p.y, 130);
-        assert_eq!(p.width, 360);
-        assert_eq!(p.height, 540);
-        // Never overlaps the panel.
-        assert!(p.x >= 550);
-    }
-
-    #[test]
-    fn left_fallback_when_right_is_short() {
-        // panel right edge at work right (1600), so no room on the right.
-        let p = place((1150, 100), 1.0, (0, 0, 1600, 900));
-        // panel left 1180, right 1600. left avail 1172 >= 360 → left.
-        assert_eq!(p.width, 360);
-        assert_eq!(p.x, 1180 - 8 - 360); // 812
-        assert!(p.x + p.width as i32 <= 1180); // no overlap
-    }
-
-    #[test]
-    fn width_clamped_to_available_side_space() {
-        // 1024 monitor, main centered: panel left 302, right 722.
-        let p = place(((1024 - 480) / 2, 100), 1.0, (0, 0, 1024, 768));
-        // right avail = 1024 - 722 - 8 = 294 (< 360). Preferred right.
-        assert_eq!(p.x, 722 + 8); // 730
-        assert_eq!(p.width, 294);
-        assert_eq!(p.x + p.width as i32, 1024); // clamped flush to work right
-    }
-
-    #[test]
-    fn dpi_scale_applies_to_panel_and_preview() {
-        let p = place((100, 100), 1.5, (0, 0, 1920, 1080));
-        // 30*1.5=45 → panel left 145, right 775. 360*1.5=540, 540*1.5=810, gap 12.
-        assert_eq!(p.x, 775 + 12);
-        assert_eq!(p.width, 540);
-        assert_eq!(p.height, 810);
-        assert_eq!(p.y, 145);
-    }
-
-    #[test]
-    fn height_clamped_to_work_area_bottom() {
-        let p = place((100, 700), 1.0, (0, 0, 1920, 800));
-        // panel top 730; only 70px to work bottom.
-        assert_eq!(p.y, 730);
-        assert_eq!(p.height, 70);
-    }
-
-    #[test]
-    fn top_aligned_and_never_overlapping() {
-        let p = place((100, 100), 1.0, (0, 0, 1920, 1080));
-        // Panel top is main_y + 30 = 130.
-        assert_eq!(p.y, 130);
-        // Panel occupies x in [130, 550]; preview starts after 550 + gap.
-        assert!(p.x >= 550);
-    }
-}
-
-#[cfg(test)]
 mod preview_generation_tests {
     use super::show_is_current;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -2804,6 +2467,40 @@ mod preview_generation_tests {
         // The newest intent is current; an unchanged token stays current.
         assert!(show_is_current(second, second));
         assert!(show_is_current(first, first));
+    }
+}
+
+#[cfg(test)]
+mod workspace_placement_tests {
+    use super::place_workspace_window;
+
+    #[test]
+    fn left_pane_keeps_history_anchor_when_space_allows() {
+        let p = place_workspace_window((500, 100), 0, 368, 0, 1.0, 1.0, (0, 0, 1920, 1080));
+        assert_eq!(p.x, 132);
+        assert_eq!(p.x + 30 + 368, 530);
+        assert_eq!(p.physical_width, 848);
+    }
+
+    #[test]
+    fn full_workspace_uses_both_extents() {
+        let p = place_workspace_window((700, 100), 0, 368, 368, 1.0, 1.0, (0, 0, 1920, 1080));
+        assert_eq!(p.physical_width, 1216);
+        assert_eq!(p.physical_height, 620);
+    }
+
+    #[test]
+    fn workspace_clamps_into_negative_monitor_work_area() {
+        let p = place_workspace_window((-1900, 100), 0, 368, 368, 1.0, 1.0, (-1920, 0, 1920, 1080));
+        assert!(p.x >= -1920);
+        assert!(p.x + p.physical_width as i32 <= 0);
+    }
+
+    #[test]
+    fn dpi_and_ui_zoom_scale_workspace_once_each() {
+        let p = place_workspace_window((500, 100), 0, 0, 368, 1.5, 1.25, (0, 0, 2560, 1440));
+        assert_eq!(p.physical_width, (848.0_f64 * 1.5 * 1.25).round() as u32);
+        assert_eq!(p.physical_height, (620.0_f64 * 1.5 * 1.25).round() as u32);
     }
 }
 
@@ -2931,42 +2628,6 @@ mod tutorial_lifecycle_tests {
     }
 }
 
-#[cfg(test)]
-mod sidebar_placement_tests {
-    use super::place_sidebar;
-
-    fn place(main_pos: (i32, i32), work_area: (i32, i32, u32, u32)) -> super::PreviewPlacement {
-        place_sidebar(main_pos, 1.0, work_area, 30, 8, 360, 540)
-    }
-
-    #[test]
-    fn left_of_panel_with_full_space() {
-        let p = place((500, 100), (0, 0, 1920, 1080));
-        // panel_left = 530; left_avail = 522 -> full width 360.
-        assert_eq!(p.width, 360);
-        assert_eq!(p.x, 530 - 8 - 360); // 162
-        assert_eq!(p.y, 130);
-        assert_eq!(p.height, 540);
-        assert!(p.x + p.width as i32 <= 530);
-    }
-
-    #[test]
-    fn width_clamped_to_left_space() {
-        let p = place((100, 100), (0, 0, 1920, 1080));
-        // panel_left = 130; left_avail = 122 -> clamped.
-        assert_eq!(p.width, 122);
-        assert_eq!(p.x, 0);
-    }
-
-    #[test]
-    fn height_clamped_to_work_area_bottom() {
-        let p = place((500, 700), (0, 0, 1920, 800));
-        // panel_top = 730; only 70px to work bottom.
-        assert_eq!(p.y, 730);
-        assert_eq!(p.height, 70);
-    }
-}
-
 /// User-command consistency under injected persistence failures: a command
 /// must never report success without the durable write, nor fail while
 /// leaving memory/undo state saying otherwise.
@@ -2988,6 +2649,7 @@ mod persistence_consistency_tests {
             thumbnail_base64: None,
             content_hash: format!("hash-{id}"),
             preview: id.to_string(),
+            note: None,
             truncated: false,
             source_exe: "test.exe".to_string(),
             source_title: String::new(),
@@ -3015,6 +2677,8 @@ mod persistence_consistency_tests {
                 open: false,
                 selected_collection: None,
             })),
+            workspace_left_extent: Arc::new(Mutex::new(0)),
+            workspace_right_extent: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -3254,6 +2918,57 @@ mod persistence_consistency_tests {
                 .load_all()
                 .unwrap()[0]
                 .pinned
+        );
+    }
+
+    #[test]
+    fn set_clip_note_success_updates_memory_and_db() {
+        let state = app_state(
+            Some(Persistence::in_memory_for_test()),
+            AppConfig::default(),
+        );
+        let cfg = AppConfig::default();
+        let value = clip("c1", 1);
+        lock(&state.history).insert(value.clone(), &cfg);
+        lock(&state.persistence)
+            .as_mut()
+            .unwrap()
+            .persist_capture_with_evictions(&value, &[])
+            .unwrap();
+
+        set_clip_note_impl(&state, "c1", Some("memo".to_string())).unwrap();
+        assert_eq!(
+            lock(&state.history).get_clip("c1").unwrap().note.as_deref(),
+            Some("memo")
+        );
+        assert_eq!(
+            lock(&state.persistence)
+                .as_ref()
+                .unwrap()
+                .load_all()
+                .unwrap()[0]
+                .note
+                .as_deref(),
+            Some("memo")
+        );
+    }
+
+    #[test]
+    fn set_clip_note_db_failure_leaves_memory_unchanged() {
+        let state = app_state(Some(Persistence::broken_for_test()), AppConfig::default());
+        let cfg = AppConfig::default();
+        lock(&state.history).insert(clip("c1", 1), &cfg);
+
+        assert!(set_clip_note_impl(&state, "c1", Some("memo".to_string())).is_err());
+        assert_eq!(lock(&state.history).get_clip("c1").unwrap().note, None);
+    }
+
+    #[test]
+    fn blank_note_normalizes_to_none() {
+        assert_eq!(normalize_note(" \n\t".to_string()), None);
+        assert_eq!(
+            normalize_note(" memo ".to_string()).as_deref(),
+            Some(" memo ")
         );
     }
 

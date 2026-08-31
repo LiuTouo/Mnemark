@@ -4,6 +4,22 @@
 
 格式參考 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)，版本號遵循[語意化版本](https://semver.org/lang/zh-TW/)。
 
+## [0.7.2] - 2026-08-31
+
+### Added
+
+- 新增歷史、釘選與抽屜項目的備註功能；支援多行編輯、清除、SQLite 持久化、預覽顯示，以及加入／拖曳至抽屜時攜帶備註
+
+### Changed
+
+- 歷史清單、抽屜、預覽與拖曳卡片合併為單一主工作區；寬螢幕使用三欄，空間不足時改用抽屜／預覽分頁或 overlay，並保持歷史欄位置固定
+- `npm run build:app` 改用正式 Tauri bundle 流程，同時產生 release executable 與 NSIS installer；本機建置略過 updater 簽章
+
+### Fixed
+
+- 修正主面板首次顯示早於前端 listener 載入，導致抽屜第一次點擊無效、必須點第二次
+- 移除抽屜、預覽與拖曳 overlay 的跨原生視窗焦點競爭，避免側欄開關、預覽與拖曳造成面板誤判失焦
+
 ## [0.7.1] - 2026-08-26
 
 ### Changed
@@ -390,6 +406,7 @@
 
 - 初始版本：剪貼簿監聽（文字／圖片／檔案路徑）、SHA-256 內容去重、容量限制與淘汰、釘選（上限 10 則、永不淘汰）、即時搜尋、Raycast 風格浮動面板（`Ctrl+Shift+V`）、貼上模擬、刪除復原、系統匣常駐、排除清單、深淺色主題跟隨系統、免安裝可攜（設定存於 exe 旁）
 
+[0.7.2]: https://github.com/LiuTouo/Mnemark/compare/v0.7.1...v0.7.2
 [0.7.0]: https://github.com/LiuTouo/Mnemark/compare/v0.6.9...v0.7.0
 [0.6.9]: https://github.com/LiuTouo/Mnemark/compare/v0.6.8...v0.6.9
 [0.6.8]: https://github.com/LiuTouo/Mnemark/compare/v0.6.7...v0.6.8

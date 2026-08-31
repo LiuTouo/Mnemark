@@ -219,6 +219,15 @@ impl HistoryStore {
             Err("Clip not found".to_string())
         }
     }
+
+    pub fn set_note(&mut self, id: &str, note: Option<String>) -> Result<(), String> {
+        if let Some(clip) = self.clips.iter_mut().find(|c| c.id == id) {
+            clip.note = note;
+            Ok(())
+        } else {
+            Err("Clip not found".to_string())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -235,6 +244,7 @@ mod tests {
             thumbnail_base64: None,
             content_hash: format!("hash-{id}"),
             preview: id.to_string(),
+            note: None,
             truncated: false,
             source_exe: "test.exe".to_string(),
             source_title: String::new(),
@@ -452,5 +462,22 @@ mod tests {
         let mut dup = text_clip("other-id", 2);
         dup.content_hash = c1.content_hash.clone();
         assert!(h.preview_evictions(&dup, &cfg).is_empty());
+    }
+
+    #[test]
+    fn note_updates_and_survives_content_hash_dedup() {
+        let cfg = AppConfig::default();
+        let mut h = HistoryStore::new();
+        let c1 = text_clip("c1", 1);
+        h.insert(c1.clone(), &cfg);
+        h.set_note("c1", Some("remember this".to_string())).unwrap();
+
+        let mut duplicate = text_clip("other-id", 2);
+        duplicate.content_hash = c1.content_hash;
+        let (stored, _) = h.insert(duplicate, &cfg);
+        assert_eq!(stored.note.as_deref(), Some("remember this"));
+
+        h.set_note("c1", None).unwrap();
+        assert_eq!(h.get_clip("c1").unwrap().note, None);
     }
 }

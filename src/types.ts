@@ -13,6 +13,7 @@ export interface Clip {
   thumbnail_base64: string | null;
   content_hash: string;
   preview: string;
+  note: string | null;
   truncated: boolean;
   source_exe: string;
   source_title: string;
@@ -32,6 +33,7 @@ export interface FavoriteItem {
   thumbnail_base64: string | null;
   content_hash: string;
   preview: string;
+  note: string | null;
   truncated: boolean;
   source_exe: string;
   source_title: string;

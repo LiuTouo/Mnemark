@@ -1,14 +1,10 @@
-// Favorites sidebar page (favorites.html): collection list + History button,
-// inline create/rename, reorder via drag or Move Up/Down, destructive remove
-// modal, and the cross-window item-drop target. The backend is the authority
-// for every mutation; this page only mirrors and re-reads it.
+// Inline favorites pane: collection list + History button, create/rename,
+// reorder, destructive remove modal, and the item-drop target.
 
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { applyI18n, setLanguage, t } from "./i18n";
 import { applyTheme } from "./theme";
-import { ShortcutMatcher, FAVORITES_DEFAULT_CODES } from "./shortcut";
 import { computeMenuPlacement } from "./menu";
 import { DragController, rectContains, acceptDropSession, isAvailableDropTarget } from "./drag";
 import type { ItemDragPoint, ItemDragStart } from "./drag";
@@ -20,14 +16,12 @@ interface AppConfig {
   language?: string;
   theme?: string;
   ui_opacity_percent?: number;
-  favorites_toggle_shortcut?: { codes: string[] };
 }
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 let collections: CollectionSummary[] = [];
 let selected: string | null = null;
-let matcher = new ShortcutMatcher(FAVORITES_DEFAULT_CODES);
 let moreMenuFor: string | null = null;
 let editingCreate = false;
 // Rename-editing flow lives in rename-commit.ts so the rejection path
@@ -48,9 +42,6 @@ let activeDragPoint: ItemDragPoint | null = null;
 let dragMembershipIds: string[] = [];
 let dragMembershipReady = false;
 let dragMembershipPromise: Promise<string[]> | null = null;
-// Cached window geometry for screen-coordinate hit-testing.
-let windowOffset = { x: 0, y: 0 };
-let scaleFactor = 1;
 
 const listEl = document.getElementById("favorites-list")!;
 const emptyEl = document.getElementById("favorites-empty")!;
@@ -96,20 +87,6 @@ async function refreshConfig(): Promise<void> {
   applyTheme(config.theme || "system");
   const opacity = Math.min(100, Math.max(50, config.ui_opacity_percent ?? 99));
   document.documentElement.style.setProperty("--panel-opacity", String(opacity / 100));
-  matcher = new ShortcutMatcher(config.favorites_toggle_shortcut?.codes ?? FAVORITES_DEFAULT_CODES);
-}
-
-async function cacheWindowGeometry(): Promise<void> {
-  try {
-    const pos = await getCurrentWindow().outerPosition();
-    windowOffset = { x: pos.x, y: pos.y };
-    // devicePixelRatio = OS DPI × webview zoom (WebView2 ZoomFactor is page
-    // zoom), so client CSS px × DPR = physical px even when the UI is scaled.
-    scaleFactor = window.devicePixelRatio || 1;
-  } catch {
-    windowOffset = { x: 0, y: 0 };
-    scaleFactor = 1;
-  }
 }
 
 async function loadCollections(): Promise<void> {
@@ -487,14 +464,14 @@ async function commitReorder(id: string): Promise<void> {
   await invoke("reorder_collections", { ids: order }).then(() => loadCollections()).catch((err) => { showToast(String(err)); loadCollections(); });
 }
 
-// === cross-window item drop target ===
+// === inline item drop target ===
 function screenRect(el: HTMLElement): { left: number; top: number; right: number; bottom: number } {
   const r = el.getBoundingClientRect();
   return {
-    left: windowOffset.x + r.left * scaleFactor,
-    top: windowOffset.y + r.top * scaleFactor,
-    right: windowOffset.x + r.right * scaleFactor,
-    bottom: windowOffset.y + r.bottom * scaleFactor,
+    left: r.left,
+    top: r.top,
+    right: r.right,
+    bottom: r.bottom,
   };
 }
 
@@ -595,17 +572,60 @@ function ensureItemDragFromPoint(point: ItemDragPoint): void {
   });
 }
 
-// === shortcut ===
-function onKeyDown(e: KeyboardEvent): void {
-  if (matcher.keydown(e.code, e.repeat)) {
-    e.preventDefault();
-    e.stopPropagation();
-    invoke("set_favorites_open", { open: false }).catch(() => {});
+export function beginInlineItemDrag(start: ItemDragStart): void {
+  beginItemDrag(start);
+}
+
+export function moveInlineItemDrag(point: ItemDragPoint): void {
+  if (!acceptDropSession(point.sessionId, activeSessionId, cancelledSessionId)) return;
+  ensureItemDragFromPoint(point);
+  activeSessionId = point.sessionId;
+  activeDragPoint = point;
+  highlightTarget(point.x, point.y);
+}
+
+export async function endInlineItemDrag(point: ItemDragPoint): Promise<void> {
+  if (!acceptDropSession(point.sessionId, activeSessionId, cancelledSessionId)) return;
+  ensureItemDragFromPoint(point);
+  activeSessionId = point.sessionId;
+  activeDragPoint = point;
+  const rawTargetId = collectionUnderPoint(point.x, point.y);
+  const membershipIds = await (dragMembershipPromise ?? Promise.resolve([]));
+  if (activeSessionId !== point.sessionId) return;
+  dragMembershipIds = membershipIds;
+  dragMembershipReady = true;
+  applyItemDragState();
+  const targetId = targetUnderPoint(point.x, point.y);
+  if (!targetId) {
+    const duplicate = rawTargetId !== null && !isAvailableDropTarget(rawTargetId, membershipIds);
+    finishItemDrag();
+    if (duplicate) {
+      const row = listEl.querySelector<HTMLElement>(`.favorites-row[data-collection-id="${rawTargetId}"]`);
+      row?.classList.add("drop-invalid");
+      setTimeout(() => row?.classList.remove("drop-invalid"), 450);
+      showToast(t("alreadyInDrawer"));
+    }
+    return;
+  }
+  try {
+    await invoke("add_favorite", { collectionId: targetId, locator: point.locator });
+    showToast(t("addedToFavorites"));
+    finishItemDrag();
+    await loadCollections();
+    const row = listEl.querySelector<HTMLElement>(`.favorites-row[data-collection-id="${targetId}"]`);
+    if (row) {
+      row.classList.add("drop-success");
+      setTimeout(() => row.classList.remove("drop-success"), 600);
+    }
+  } catch (err) {
+    finishItemDrag();
+    showToast(String(err));
   }
 }
 
-function onKeyUp(e: KeyboardEvent): void {
-  matcher.keyup(e.code);
+export function cancelInlineItemDrag(sessionId: number): void {
+  cancelledSessionId = sessionId;
+  finishItemDrag();
 }
 
 // === init ===
@@ -616,7 +636,6 @@ async function init(): Promise<void> {
     setLanguage("zh-TW");
   }
   applyI18n();
-  await cacheWindowGeometry();
   await Promise.all([loadCollections(), loadUiState()]);
 
   addBtn.addEventListener("click", () => { moreMenuFor = null; updateMoreMenu(); if (editingCreate) cancelCreate(); else startCreate(); });
@@ -644,69 +663,7 @@ async function init(): Promise<void> {
   // The main panel asks us to enter create mode when it has no collections.
   await listen("favorites-create-request", () => startCreate());
 
-  // Cross-window item drag: the start event carries the visual snapshot once;
-  // move/end remain self-contained so a missed start can still commit safely.
-  await listen<ItemDragStart>("favorites-item-drag", (e) => beginItemDrag(e.payload));
-  await listen<ItemDragPoint>("favorites-item-drag-move", (e) => {
-    const p = e.payload;
-    if (!acceptDropSession(p.sessionId, activeSessionId, cancelledSessionId)) return;
-    ensureItemDragFromPoint(p);
-    activeSessionId = p.sessionId;
-    activeDragPoint = p;
-    highlightTarget(p.x, p.y);
-  });
-  await listen<ItemDragPoint>("favorites-item-drag-end", async (e) => {
-    const p = e.payload;
-    if (!acceptDropSession(p.sessionId, activeSessionId, cancelledSessionId)) return;
-    ensureItemDragFromPoint(p);
-    activeSessionId = p.sessionId;
-    activeDragPoint = p;
-    const rawTargetId = collectionUnderPoint(p.x, p.y);
-    const membershipIds = await (dragMembershipPromise ?? Promise.resolve([]));
-    if (activeSessionId !== p.sessionId) return;
-    dragMembershipIds = membershipIds;
-    dragMembershipReady = true;
-    applyItemDragState();
-    const targetId = targetUnderPoint(p.x, p.y);
-    if (!targetId) {
-      const duplicate = rawTargetId !== null && !isAvailableDropTarget(rawTargetId, membershipIds);
-      finishItemDrag();
-      if (duplicate) {
-        const row = listEl.querySelector<HTMLElement>(`.favorites-row[data-collection-id="${rawTargetId}"]`);
-        row?.classList.add("drop-invalid");
-        setTimeout(() => row?.classList.remove("drop-invalid"), 450);
-        showToast(t("alreadyInDrawer"));
-      }
-      return;
-    }
-    try {
-      await invoke("add_favorite", { collectionId: targetId, locator: p.locator });
-      showToast(t("addedToFavorites"));
-      finishItemDrag();
-      await loadCollections();
-      const row = listEl.querySelector<HTMLElement>(`.favorites-row[data-collection-id="${targetId}"]`);
-      if (row) {
-        row.classList.add("drop-success");
-        setTimeout(() => row.classList.remove("drop-success"), 600);
-      }
-    } catch (err) {
-      finishItemDrag();
-      showToast(String(err));
-    }
-  });
-  // The source aborted (pointercancel / re-render / window change): mark the
-  // session cancelled and clear any lingering target highlight.
-  await listen<number>("favorites-item-drag-cancel", (e) => {
-    cancelledSessionId = e.payload;
-    finishItemDrag();
-  });
-
-  document.addEventListener("keydown", onKeyDown, true);
-  document.addEventListener("keyup", onKeyUp, true);
   window.addEventListener("focus", () => {
-    void cacheWindowGeometry();
-    // Reused drawer windows only got config on init; re-apply it on focus so
-    // opacity/theme/language/shortcut changes made elsewhere show up here.
     refreshConfig()
       .then(() => {
         applyI18n();

@@ -140,7 +140,7 @@ describe("backend-authoritative resync", () => {
 
   it("preview-window close notification resyncs from backend truth", () => {
     const c = openController("clip-a");
-    const token = c.beginResync(); // fired by clip-preview-closed
+    const token = c.beginResync(); // fired by a backend-authoritative resync
     c.resolveResync(token, null); // backend confirms nothing is active
     expect(c.currentId).toBeNull();
   });

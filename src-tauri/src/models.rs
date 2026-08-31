@@ -27,6 +27,8 @@ pub struct Clip {
     pub content_hash: String,
     /// First 200 chars of text for preview
     pub preview: String,
+    /// User-authored note attached to this history entry.
+    pub note: Option<String>,
     /// Whether this Clip was truncated because it exceeded the size limit
     pub truncated: bool,
     /// Executable name of the foreground application
@@ -59,7 +61,7 @@ pub struct ClipboardUpdate {
     pub evicted: Vec<String>,
 }
 
-/// Payload of the `clip-preview-updated` event and the value returned by
+/// Payload of the `preview-payload-updated` event and the value returned by
 /// `get_active_clip_preview`. Carries everything the preview page needs to
 /// render one entry without ever crossing raw image bytes: Image entries get
 /// a bounded, display-only JPEG data URL; Text/FilePaths carry their stored
@@ -70,6 +72,7 @@ pub struct PreviewPayload {
     pub kind: ClipKind,
     pub text_content: Option<String>,
     pub image_preview_base64: Option<String>,
+    pub note: Option<String>,
     pub truncated: bool,
     pub byte_size: u64,
     pub captured_at: u64,
@@ -99,6 +102,7 @@ pub struct FavoriteItem {
     pub thumbnail_base64: Option<String>,
     pub content_hash: String,
     pub preview: String,
+    pub note: Option<String>,
     pub truncated: bool,
     pub source_exe: String,
     pub source_title: String,
@@ -123,6 +127,7 @@ impl FavoriteItem {
             thumbnail_base64: self.thumbnail_base64,
             content_hash: self.content_hash,
             preview: self.preview,
+            note: self.note,
             truncated: self.truncated,
             source_exe: self.source_exe,
             source_title: self.source_title,
@@ -147,6 +152,7 @@ impl From<Clip> for FavoriteItem {
             thumbnail_base64: clip.thumbnail_base64,
             content_hash: clip.content_hash,
             preview: clip.preview,
+            note: clip.note,
             truncated: clip.truncated,
             source_exe: clip.source_exe,
             source_title: clip.source_title,
@@ -386,6 +392,7 @@ impl Clip {
             thumbnail_base64: self.thumbnail_base64.clone(),
             content_hash: self.content_hash.clone(),
             preview: self.preview.clone(),
+            note: self.note.clone(),
             truncated: self.truncated,
             source_exe: self.source_exe.clone(),
             source_title: self.source_title.clone(),

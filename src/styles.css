@@ -189,11 +189,106 @@ html, body {
    PANEL
    ============================================================ */
 
-#panel {
+#workspace {
+  --history-left: 0px;
+  --side-left: 428px;
   position: relative;
+  width: calc(100% - 60px);
+  height: 540px;
+  margin: 30px;
+}
+
+.workspace-pane {
+  position: absolute;
+  top: 0;
+  width: 360px;
+  height: 540px;
+  min-width: 0;
+  z-index: 2;
+}
+
+.workspace-pane.hidden,
+.workspace-tabs.hidden,
+#drag-overlay-card.hidden {
+  display: none;
+}
+
+.workspace-drawer {
+  left: 0;
+}
+
+.workspace-preview {
+  left: calc(var(--history-left) + 428px);
+}
+
+.workspace-tabs {
+  position: absolute;
+  top: 0;
+  left: var(--side-left);
+  z-index: 5;
+  display: flex;
+  width: 360px;
+  height: 34px;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  background: var(--glass-bg);
+}
+
+.workspace-tabs button {
+  flex: 1;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-family: var(--font-family);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.workspace-tabs button[aria-selected="true"] {
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+#workspace[data-mode="compact"] .workspace-pane,
+#workspace[data-mode="overlay"] .workspace-pane {
+  top: 38px;
+  height: 502px;
+}
+
+#workspace[data-mode="compact"] .workspace-pane {
+  left: var(--side-left);
+}
+
+#workspace[data-mode="overlay"] .workspace-pane {
+  left: 12px !important;
+  width: calc(100% - 24px);
+  z-index: 8;
+  box-shadow: var(--shadow-lg);
+}
+
+#workspace[data-mode="overlay"] .workspace-tabs {
+  left: 12px;
+  width: calc(100% - 24px);
+  z-index: 9;
+}
+
+.workspace-drag-card {
+  position: fixed;
+  z-index: 120;
+  pointer-events: none;
+}
+
+#panel {
+  position: absolute;
+  top: 0;
+  left: var(--history-left);
   width: 420px;
+  height: 540px;
   max-height: 540px;
-  margin: 30px auto 0;
+  margin: 0;
   background: var(--glass-bg);
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-xl);
@@ -464,13 +559,6 @@ html, body {
   box-shadow: var(--shadow-md);
 }
 
-.drag-overlay-body {
-  display: grid;
-  place-items: center;
-  background: transparent !important;
-  pointer-events: none;
-}
-
 .item-drag-preview {
   position: relative;
   z-index: 1200;
@@ -491,6 +579,10 @@ html, body {
   transform-origin: top left;
   animation: item-drag-preview-in 0.08s ease-out;
   transition: opacity 0.14s ease-out, transform 0.18s ease-out;
+}
+
+#drag-overlay-card.workspace-drag-card {
+  position: fixed;
 }
 
 .item-drag-preview-visual {
@@ -1406,7 +1498,7 @@ textarea:focus-visible {
 /* No extra rules — uses .text-icon */
 
 /* ============================================================
-   PREVIEW (clip-preview side window)
+   INLINE PREVIEW PANE
    ============================================================ */
 
 .preview-body {
@@ -1417,10 +1509,10 @@ textarea:focus-visible {
   display: flex;
   flex-direction: column;
   width: 100%;
-  max-width: 360px;
+  max-width: none;
   height: 100%;
-  max-height: 540px;
-  margin: 0 auto;
+  max-height: none;
+  margin: 0;
   background: var(--glass-bg);
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-xl);
@@ -1503,6 +1595,36 @@ textarea:focus-visible {
   background: var(--bg-raised);
 }
 
+.preview-note {
+  flex-shrink: 0;
+  max-height: 34%;
+  padding: 10px 14px;
+  overflow-y: auto;
+  border-top: 1px solid var(--divider);
+  background: var(--accent-subtle);
+}
+
+.preview-note.hidden {
+  display: none;
+}
+
+.preview-note-label {
+  margin-bottom: 5px;
+  color: var(--accent);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-strong);
+}
+
+.preview-note-text {
+  color: var(--text-primary);
+  font-size: var(--font-size);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 .preview-meta {
   flex-shrink: 0;
   display: flex;
@@ -1549,10 +1671,10 @@ textarea:focus-visible {
   display: flex;
   flex-direction: column;
   width: 100%;
-  max-width: 360px;
+  max-width: none;
   height: 100%;
-  max-height: 540px;
-  margin: 0 auto;
+  max-height: none;
+  margin: 0;
   background: var(--glass-bg);
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-xl);
@@ -1934,6 +2056,38 @@ textarea:focus-visible {
   font-weight: var(--font-weight-strong);
   margin-bottom: 8px;
   color: var(--text-primary);
+}
+
+.note-modal-panel {
+  width: min(340px, calc(100vw - 24px));
+}
+
+.note-input {
+  display: block;
+  width: 100%;
+  min-height: 124px;
+  max-height: 260px;
+  margin-bottom: 6px;
+  padding: 9px 10px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  outline: none;
+  background: var(--bg-raised);
+  color: var(--text-primary);
+  font-family: var(--font-family);
+  font-size: var(--font-size);
+  line-height: 1.5;
+}
+
+.note-input:focus {
+  border-color: var(--accent);
+}
+
+.note-hint {
+  margin: 0 0 14px;
+  color: var(--text-tertiary);
+  font-size: var(--font-size-sm);
 }
 
 .modal-body {

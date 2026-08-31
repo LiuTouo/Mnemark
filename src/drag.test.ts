@@ -4,11 +4,9 @@ import {
   itemDragPayload,
   clipLocator,
   rectContains,
-  physicalScreenPoint,
   acceptDropSession,
   itemDragStartPayload,
   isAvailableDropTarget,
-  placeDragOverlay,
 } from "./drag";
 import type { Clip, FavoriteItem } from "./types";
 
@@ -21,6 +19,7 @@ function clipFixture(id: string): Clip {
     thumbnail_base64: null,
     content_hash: id,
     preview: "",
+    note: null,
     truncated: false,
     source_exe: "",
     source_title: "",
@@ -40,6 +39,7 @@ function favoriteFixture(id: string): FavoriteItem {
     thumbnail_base64: null,
     content_hash: id,
     preview: "",
+    note: null,
     truncated: false,
     source_exe: "",
     source_title: "",
@@ -121,24 +121,6 @@ describe("payloads", () => {
   });
 });
 
-describe("drag overlay placement", () => {
-  const workArea = { left: 0, top: 0, right: 1920, bottom: 1040 };
-  const size = { width: 288, height: 112 };
-
-  it("sits below and to the right when space is available", () => {
-    expect(placeDragOverlay({ x: 500, y: 300 }, size, workArea, 16)).toEqual({ x: 516, y: 316 });
-  });
-
-  it("flips left and up at the far work-area edges", () => {
-    expect(placeDragOverlay({ x: 1900, y: 1020 }, size, workArea, 16)).toEqual({ x: 1596, y: 892 });
-  });
-
-  it("clamps correctly on a negative-origin monitor", () => {
-    const negative = { left: -1920, top: -200, right: 0, bottom: 880 };
-    expect(placeDragOverlay({ x: -10, y: -190 }, size, negative, 16)).toEqual({ x: -314, y: -174 });
-  });
-});
-
 describe("drop target availability", () => {
   it("rejects drawers that already contain the item", () => {
     expect(isAvailableDropTarget("drawer-a", ["drawer-a", "drawer-b"])).toBe(false);
@@ -166,19 +148,6 @@ describe("rectContains", () => {
   it("misses outside", () => {
     expect(rectContains(rect, 101, 20)).toBe(false);
     expect(rectContains(rect, 50, 41)).toBe(false);
-  });
-});
-
-describe("physicalScreenPoint", () => {
-  const origin = { x: 128, y: 64 };
-  it("100% DPI leaves the client point unscaled", () => {
-    expect(physicalScreenPoint(origin, { x: 40, y: 20 }, 1)).toEqual({ x: 168, y: 84 });
-  });
-  it("125% DPI scales the client point", () => {
-    expect(physicalScreenPoint(origin, { x: 40, y: 20 }, 1.25)).toEqual({ x: 178, y: 89 });
-  });
-  it("150% DPI scales the client point", () => {
-    expect(physicalScreenPoint(origin, { x: 40, y: 20 }, 1.5)).toEqual({ x: 188, y: 94 });
   });
 });
 

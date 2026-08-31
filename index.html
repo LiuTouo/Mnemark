@@ -7,7 +7,29 @@
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
-    <div id="panel">
+    <div id="workspace" data-mode="center">
+      <aside id="workspace-drawer" class="workspace-pane workspace-drawer hidden" aria-label="抽屜">
+        <div id="favorites-panel">
+          <header class="favorites-header">
+            <h1 data-i18n="favorites">抽屜</h1>
+            <button id="favorites-add" class="favorites-add-btn" data-i18n-title="favoritesAdd" data-i18n-aria-label="favoritesAdd">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            </button>
+          </header>
+          <div id="favorites-create-row" class="favorites-create-row hidden">
+            <div id="favorites-create-input" class="favorites-create-input" role="textbox" contenteditable="plaintext-only" spellcheck="false" data-i18n-aria-label="collectionNamePlaceholder" aria-label="抽屜名稱"></div>
+          </div>
+          <div id="favorites-list"></div>
+          <div id="favorites-empty" class="favorites-empty hidden">
+            <p data-i18n="noCollections">尚無抽屜</p>
+            <span data-i18n="noCollectionsHint">點擊右上角「新增」建立第一個抽屜</span>
+          </div>
+          <div id="favorites-toast" class="toast hidden"></div>
+          <div id="favorites-more-menu" class="clip-action-menu hidden" role="menu"></div>
+        </div>
+      </aside>
+
+      <div id="panel">
       <div class="search-container">
         <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
         <input id="search-input" type="text" placeholder="搜尋剪貼簿歷史…" data-i18n-placeholder="searchPlaceholder" spellcheck="false" aria-describedby="search-shortcut-hint" />
@@ -58,6 +80,53 @@
       <div id="toast" class="toast hidden"></div>
       <div id="clip-action-menu" class="clip-action-menu hidden" role="menu"></div>
       <div id="add-to-collection-menu" class="clip-action-menu hidden" role="menu"></div>
+      <div id="note-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="note-modal-title">
+        <div class="modal-panel note-modal-panel" role="document">
+          <h2 id="note-modal-title" data-i18n="noteDialogTitle">編輯備註</h2>
+          <textarea id="note-input" class="note-input" data-i18n-placeholder="notePlaceholder" placeholder="輸入備註…" spellcheck="true"></textarea>
+          <p class="note-hint" data-i18n="noteHint">留空並儲存即可移除備註</p>
+          <div class="modal-actions">
+            <button type="button" id="note-cancel" class="btn-cancel" data-i18n="cancel">取消</button>
+            <button type="button" id="note-save" class="btn-primary" data-i18n="save">儲存</button>
+          </div>
+        </div>
+      </div>
+      </div>
+
+      <aside id="workspace-preview" class="workspace-pane workspace-preview hidden" aria-label="預覽">
+        <div id="preview-panel">
+          <header class="preview-header"><span class="preview-kind" id="preview-kind">文字</span></header>
+          <div class="preview-warning hidden" id="preview-warning" role="alert"></div>
+          <div class="preview-content" id="preview-content"></div>
+          <section class="preview-note hidden" id="preview-note" aria-labelledby="preview-note-label">
+            <div class="preview-note-label" id="preview-note-label" data-i18n="previewNote">備註</div>
+            <div class="preview-note-text" id="preview-note-text"></div>
+          </section>
+          <footer class="preview-meta">
+            <div class="preview-meta-row"><span class="preview-meta-label" data-i18n="previewSource">來源</span><span class="preview-meta-value" id="preview-source"></span></div>
+            <div class="preview-meta-row"><span class="preview-meta-label" data-i18n="previewCaptured">擷取時間</span><span class="preview-meta-value" id="preview-captured"></span></div>
+            <div class="preview-meta-row"><span class="preview-meta-label" data-i18n="previewSize">大小</span><span class="preview-meta-value" id="preview-size"></span></div>
+          </footer>
+        </div>
+      </aside>
+
+      <div id="workspace-tabs" class="workspace-tabs hidden" role="tablist" aria-label="側欄">
+        <button id="workspace-tab-drawer" role="tab" data-i18n="favorites">抽屜</button>
+        <button id="workspace-tab-preview" role="tab" data-i18n="previewTab">預覽</button>
+      </div>
+
+      <div id="drag-overlay-card" class="item-drag-preview hidden workspace-drag-card" aria-hidden="true"></div>
+
+      <div id="remove-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="remove-modal-title">
+        <div class="modal-panel" role="document">
+          <h2 id="remove-modal-title" data-i18n="removeCollectionTitle">刪除抽屜</h2>
+          <p id="remove-modal-body" class="modal-body"></p>
+          <div class="modal-actions">
+            <button type="button" id="remove-modal-cancel" class="btn-cancel" data-i18n="cancel">取消</button>
+            <button type="button" id="remove-modal-confirm" class="btn-primary btn-danger" data-i18n="removeCollectionConfirm">刪除</button>
+          </div>
+        </div>
+      </div>
     </div>
     <script type="module" src="/src/main.ts" defer></script>
   </body>

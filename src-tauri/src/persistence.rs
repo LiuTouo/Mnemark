@@ -29,6 +29,7 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
             thumbnail_base64 TEXT,
             content_hash TEXT NOT NULL UNIQUE,
             preview TEXT NOT NULL,
+            note TEXT,
             truncated INTEGER NOT NULL,
             source_exe TEXT NOT NULL,
             source_title TEXT NOT NULL,
@@ -49,6 +50,10 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
     if !column_exists(conn, "clips", "file_paths_json")? {
         conn.execute("ALTER TABLE clips ADD COLUMN file_paths_json TEXT", [])
             .map_err(|e| format!("Failed to migrate clips schema: {}", e))?;
+    }
+    if !column_exists(conn, "clips", "note")? {
+        conn.execute("ALTER TABLE clips ADD COLUMN note TEXT", [])
+            .map_err(|e| format!("Failed to migrate clips note schema: {}", e))?;
     }
     Ok(())
 }
@@ -119,7 +124,7 @@ impl Persistence {
             .prepare(
                 "SELECT id, kind, text_content, image_data, thumbnail_base64,
                         content_hash, preview, truncated, source_exe, source_title,
-                        source_icon, captured_at, pinned, byte_size, file_paths_json
+                        source_icon, captured_at, pinned, byte_size, file_paths_json, note
                  FROM clips ORDER BY captured_at ASC",
             )
             .map_err(|e| e.to_string())?;
@@ -145,6 +150,7 @@ impl Persistence {
                     thumbnail_base64: row.get(4)?,
                     content_hash: row.get(5)?,
                     preview: row.get(6)?,
+                    note: row.get(15)?,
                     truncated: row.get::<_, i64>(7)? != 0,
                     source_exe: row.get(8)?,
                     source_title: row.get(9)?,
@@ -220,6 +226,20 @@ impl Persistence {
                 params![pinned as i64, id],
             )
             .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn set_note(&self, id: &str, note: Option<&str>) -> Result<(), String> {
+        let updated = self
+            .conn
+            .execute(
+                "UPDATE clips SET note = ?1 WHERE id = ?2",
+                params![note, id],
+            )
+            .map_err(|e| e.to_string())?;
+        if updated == 0 {
+            return Err("Clip not found".to_string());
+        }
         Ok(())
     }
 }
@@ -346,8 +366,8 @@ fn upsert_on(conn: &Connection, clip: &Clip) -> Result<(), String> {
     conn.execute(
         "INSERT INTO clips (id, kind, text_content, image_data, thumbnail_base64,
                             content_hash, preview, truncated, source_exe, source_title,
-                            source_icon, captured_at, pinned, byte_size, file_paths_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                            source_icon, captured_at, pinned, byte_size, file_paths_json, note)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
          ON CONFLICT(content_hash) DO UPDATE SET
             captured_at = excluded.captured_at,
             source_exe = excluded.source_exe,
@@ -369,6 +389,7 @@ fn upsert_on(conn: &Connection, clip: &Clip) -> Result<(), String> {
             clip.pinned as i64,
             clip.byte_size as i64,
             file_paths_json,
+            clip.note,
         ],
     )
     .map_err(|e| format!("Failed to persist clip: {}", e))?;
@@ -416,6 +437,7 @@ mod tests {
             thumbnail_base64: None,
             content_hash: hash.to_string(),
             preview: format!("preview-{id}"),
+            note: None,
             truncated: false,
             source_exe: "test.exe".to_string(),
             source_title: String::new(),
@@ -469,6 +491,36 @@ mod tests {
         p.dump(std::slice::from_ref(&c)).unwrap();
         let loaded = p.load_all().unwrap();
         assert_eq!(loaded[0].file_paths.as_deref(), Some(paths.as_slice()));
+    }
+
+    #[test]
+    fn note_round_trips_updates_and_clears() {
+        let mut p = test_persistence();
+        let mut c = clip("c1", "h1", 1);
+        c.note = Some("first line\nsecond line".to_string());
+        p.dump(std::slice::from_ref(&c)).unwrap();
+        assert_eq!(
+            p.load_all().unwrap()[0].note.as_deref(),
+            Some("first line\nsecond line")
+        );
+
+        p.set_note("c1", Some("updated")).unwrap();
+        assert_eq!(p.load_all().unwrap()[0].note.as_deref(), Some("updated"));
+
+        p.set_note("c1", None).unwrap();
+        assert_eq!(p.load_all().unwrap()[0].note, None);
+    }
+
+    #[test]
+    fn duplicate_capture_preserves_existing_note() {
+        let mut p = test_persistence();
+        let mut original = clip("c1", "same-hash", 1);
+        original.note = Some("keep me".to_string());
+        p.dump(std::slice::from_ref(&original)).unwrap();
+
+        let duplicate = clip("c2", "same-hash", 2);
+        p.persist_capture_with_evictions(&duplicate, &[]).unwrap();
+        assert_eq!(p.load_all().unwrap()[0].note.as_deref(), Some("keep me"));
     }
 
     #[test]

@@ -33,6 +33,7 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
             image_data BLOB,
             thumbnail_base64 TEXT,
             preview TEXT NOT NULL,
+            note TEXT,
             truncated INTEGER NOT NULL,
             source_exe TEXT NOT NULL,
             source_title TEXT NOT NULL,
@@ -58,6 +59,10 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
             [],
         )
         .map_err(|e| format!("Failed to migrate favorite_items schema: {}", e))?;
+    }
+    if !column_exists(conn, "favorite_items", "note")? {
+        conn.execute("ALTER TABLE favorite_items ADD COLUMN note TEXT", [])
+            .map_err(|e| format!("Failed to migrate favorite_items note schema: {}", e))?;
     }
     Ok(())
 }
@@ -154,8 +159,8 @@ fn upsert_favorite_item(conn: &Connection, item: &FavoriteItem) -> Result<(), St
         "INSERT INTO favorite_items (content_hash, kind, text_content, image_data,
                                      thumbnail_base64, preview, truncated, source_exe,
                                      source_title, source_icon, captured_at, byte_size,
-                                     file_paths_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                                     file_paths_json, note)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
          ON CONFLICT(content_hash) DO UPDATE SET
             kind = excluded.kind,
             text_content = excluded.text_content,
@@ -168,7 +173,8 @@ fn upsert_favorite_item(conn: &Connection, item: &FavoriteItem) -> Result<(), St
             source_icon = excluded.source_icon,
             captured_at = excluded.captured_at,
             byte_size = excluded.byte_size,
-            file_paths_json = excluded.file_paths_json",
+            file_paths_json = excluded.file_paths_json,
+            note = COALESCE(excluded.note, favorite_items.note)",
         params![
             item.content_hash,
             kind_str(&item.kind),
@@ -183,6 +189,7 @@ fn upsert_favorite_item(conn: &Connection, item: &FavoriteItem) -> Result<(), St
             item.captured_at as i64,
             item.byte_size as i64,
             file_paths_json,
+            item.note,
         ],
     )
     .map_err(|e| format!("Failed to persist favorite: {}", e))?;
@@ -203,6 +210,7 @@ fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<FavoriteItem> {
         thumbnail_base64: row.get(4)?,
         content_hash,
         preview: row.get(5)?,
+        note: row.get(13)?,
         truncated: row.get::<_, i64>(6)? != 0,
         source_exe: row.get(7)?,
         source_title: row.get(8)?,
@@ -213,17 +221,17 @@ fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<FavoriteItem> {
     })
 }
 
-/// Like `row_to_item`, but reads the membership `added_at` from column 13 (the
+/// Like `row_to_item`, but reads the membership `added_at` from column 14 (the
 /// extra column selected by `list_items`).
 fn row_to_item_with_added(row: &rusqlite::Row<'_>) -> rusqlite::Result<FavoriteItem> {
     let mut item = row_to_item(row)?;
-    item.added_at = Some(row.get::<_, i64>(13)? as u64);
+    item.added_at = Some(row.get::<_, i64>(14)? as u64);
     Ok(item)
 }
 
 const ITEM_COLS: &str = "content_hash, kind, text_content, image_data, thumbnail_base64,
         preview, truncated, source_exe, source_title, source_icon, captured_at, byte_size,
-        file_paths_json";
+        file_paths_json, note";
 
 impl FavoritesStore {
     /// Open (creating if necessary) the favorites tables in `mnemark.db`.
@@ -601,6 +609,20 @@ impl FavoritesStore {
         }
     }
 
+    pub fn set_note(&self, id: &str, note: Option<&str>) -> Result<(), String> {
+        let updated = self
+            .conn
+            .execute(
+                "UPDATE favorite_items SET note = ?1 WHERE content_hash = ?2",
+                params![note, id],
+            )
+            .map_err(|e| e.to_string())?;
+        if updated == 0 {
+            return Err("Favorite item not found".to_string());
+        }
+        Ok(())
+    }
+
     /// Collection ids that reference this item (by content hash).
     pub fn collection_ids_for_item(&self, item_id: &str) -> Result<Vec<String>, String> {
         let mut stmt = self
@@ -645,6 +667,7 @@ mod tests {
             thumbnail_base64: None,
             content_hash: hash.to_string(),
             preview: format!("preview-{id}"),
+            note: None,
             truncated: false,
             source_exe: "test.exe".to_string(),
             source_title: String::new(),
@@ -765,6 +788,57 @@ mod tests {
         // Both memberships reference the same snapshot.
         let ids = store.collection_ids_for_item("shared").unwrap();
         assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn note_follows_history_into_shared_snapshot_and_can_be_edited() {
+        let mut store = test_store();
+        let a = store.create_collection("A").unwrap();
+        let b = store.create_collection("B").unwrap();
+
+        let mut annotated_clip = clip("h1", ClipKind::Text, "shared-note");
+        annotated_clip.note = Some("from history".to_string());
+        let annotated = FavoriteItem::from(annotated_clip);
+        assert_eq!(annotated.note.as_deref(), Some("from history"));
+        assert_eq!(
+            annotated.clone().into_clip().note.as_deref(),
+            Some("from history")
+        );
+        store.add_favorite(&a.id, &annotated).unwrap();
+
+        // Adding the same content from an unannotated source to another drawer
+        // must not erase the note already stored in the shared snapshot.
+        let unannotated = FavoriteItem::from(clip("h2", ClipKind::Text, "shared-note"));
+        store.add_favorite(&b.id, &unannotated).unwrap();
+        assert_eq!(
+            store
+                .get_item("shared-note")
+                .unwrap()
+                .unwrap()
+                .note
+                .as_deref(),
+            Some("from history")
+        );
+
+        // Re-adding or dragging an annotated source refreshes the shared note,
+        // including for memberships that already existed.
+        let mut updated_clip = clip("h3", ClipKind::Text, "shared-note");
+        updated_clip.note = Some("updated from pinned history".to_string());
+        let updated = FavoriteItem::from(updated_clip);
+        store.add_favorite(&b.id, &updated).unwrap();
+        assert_eq!(
+            store.list_items(&a.id).unwrap()[0].note.as_deref(),
+            Some("updated from pinned history")
+        );
+        assert_eq!(
+            store.list_items(&b.id).unwrap()[0].note.as_deref(),
+            Some("updated from pinned history")
+        );
+
+        store.set_note("shared-note", None).unwrap();
+        assert_eq!(store.list_items(&a.id).unwrap()[0].note, None);
+        assert_eq!(store.list_items(&b.id).unwrap()[0].note, None);
+        assert!(store.set_note("missing", Some("note")).is_err());
     }
 
     #[test]

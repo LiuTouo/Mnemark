@@ -1,16 +1,26 @@
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
 import { setLanguage, applyI18n, t, localizeBackendError } from "./i18n";
 import { applyTheme } from "./theme";
 import { decidePreviewSync, PreviewController } from "./preview-state";
 import { ShortcutMatcher, FAVORITES_DEFAULT_CODES } from "./shortcut";
 import { ChooserGate, computeMenuPlacement } from "./menu";
-import { DragController, itemDragStartPayload, physicalScreenPoint, isFavoriteItem, clipLocator } from "./drag";
+import { DragController, itemDragStartPayload, isFavoriteItem, clipLocator } from "./drag";
 import type { ItemDragPoint } from "./drag";
 import { classifyClip, filterItems } from "./dataset";
 import type { FilterKind } from "./dataset";
 import { MultiSelectState } from "./multi-select";
+import { decideWorkspaceLayout, escapeLayer, tabAfterPreviewIntent } from "./workspace-state";
+import type { WorkspaceTab } from "./workspace-state";
+import {
+  beginInlineItemDrag,
+  cancelInlineItemDrag,
+  endInlineItemDrag,
+  moveInlineItemDrag,
+} from "./favorites";
+import { beginInlineDragCard, finishInlineDragCard, moveInlineDragCard } from "./drag-overlay";
+import "./preview";
 import type { BatchMutationResult, Clip, ClipboardUpdate, ClipLocator, CollectionSummary, FavoriteItem, FavoritesUiState } from "./types";
 
 type DisplayItem = Clip | FavoriteItem;
@@ -20,6 +30,9 @@ let favoriteItems: FavoriteItem[] = [];
 let collections: CollectionSummary[] = [];
 let selectedCollection: string | null = null;
 let sidebarOpen = false;
+let sidebarStateRevision = 0;
+let workspaceTab: WorkspaceTab = "drawer";
+let workspaceLayoutRevision = 0;
 // The search-filtered view of the active dataset, in display order. Keyboard
 // selection indexes into this — never into the raw arrays directly.
 let visibleClips: DisplayItem[] = [];
@@ -30,6 +43,7 @@ let previewEnabled = true;
 let rememberHistoryFilter = false;
 let activeFilter: FilterKind = "all";
 let openMenuClipId: string | null = null;
+let noteTarget: ClipLocator | null = null;
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 const previewState = new PreviewController();
 let shortcutMatcher = new ShortcutMatcher(FAVORITES_DEFAULT_CODES);
@@ -40,11 +54,6 @@ let activeDragSource: HTMLElement | null = null;
 // the sidebar can reject stale or cancelled drags.
 let dragSessionSeq = 0;
 let activeDragSessionId: number | null = null;
-// Cached main-window geometry for converting client CSS points to physical
-// screen coordinates (screenX/Y lie at non-100% DPI; scaleFactor is the
-// devicePixelRatio, which also covers the UI zoom).
-let windowOrigin = { x: 0, y: 0 };
-let scaleFactor = 1;
 const chooserGate = new ChooserGate();
 let lastMenuPos = { anchorTop: 0, anchorBottom: 0, right: 0 };
 const multiSelect = new MultiSelectState();
@@ -67,6 +76,23 @@ const selectionCount = document.getElementById("selection-count")!;
 const selectionAdd = document.getElementById("selection-add") as HTMLButtonElement;
 const selectionDestructive = document.getElementById("selection-destructive") as HTMLButtonElement;
 const selectionCancel = document.getElementById("selection-cancel") as HTMLButtonElement;
+const noteModal = document.getElementById("note-modal")!;
+const noteInput = document.getElementById("note-input") as HTMLTextAreaElement;
+const noteCancel = document.getElementById("note-cancel") as HTMLButtonElement;
+const noteSave = document.getElementById("note-save") as HTMLButtonElement;
+const workspace = document.getElementById("workspace")!;
+const drawerPane = document.getElementById("workspace-drawer")!;
+const previewPane = document.getElementById("workspace-preview")!;
+const workspaceTabs = document.getElementById("workspace-tabs")!;
+const drawerTab = document.getElementById("workspace-tab-drawer") as HTMLButtonElement;
+const previewTab = document.getElementById("workspace-tab-preview") as HTMLButtonElement;
+
+// Bind the primary drawer action synchronously while the deferred script is
+// evaluated. The panel can become clickable before async init finishes, so
+// registering this after its first awaits loses the user's first click.
+favoritesToggle.addEventListener("click", () => {
+  void toggleSidebar();
+});
 
 // === Init ===
 async function refreshConfig() {
@@ -105,6 +131,7 @@ function activeDataset(): DisplayItem[] {
 }
 
 async function loadFavoritesContext() {
+  const sidebarRevision = sidebarStateRevision;
   try {
     const previousCollection = selectedCollection;
     const [cols, state] = await Promise.all([
@@ -114,7 +141,9 @@ async function loadFavoritesContext() {
     collections = cols;
     selectedCollection = state.selected_collection;
     if (previousCollection !== selectedCollection) multiSelect.exit();
-    sidebarOpen = state.open;
+    // A startup/event snapshot may have begun before a newer user toggle.
+    // Never let that older read overwrite the optimistic state of the click.
+    if (sidebarRevision === sidebarStateRevision) sidebarOpen = state.open;
     if (selectedCollection !== null) {
       favoriteItems = await invoke<FavoriteItem[]>("list_favorite_items", { collectionId: selectedCollection });
     } else {
@@ -124,6 +153,7 @@ async function loadFavoritesContext() {
     favoritesToggle.setAttribute("aria-pressed", String(sidebarOpen));
     favoritesToggle.title = sidebarOpen ? t("sidebarClose") : t("sidebarOpen");
     render();
+    void applyWorkspaceLayout();
   } catch (err) {
     console.error("Failed to load favorites context:", err);
   }
@@ -133,25 +163,43 @@ function updateFavoritesToggleA11y() {
   favoritesToggle.classList.toggle("active", sidebarOpen);
   favoritesToggle.setAttribute("aria-pressed", String(sidebarOpen));
   favoritesToggle.title = sidebarOpen ? t("sidebarClose") : t("sidebarOpen");
+  void applyWorkspaceLayout();
 }
 
-async function cacheWindowGeometry(): Promise<void> {
-  try {
-    const pos = await getCurrentWindow().outerPosition();
-    windowOrigin = { x: pos.x, y: pos.y };
-    // devicePixelRatio = OS DPI × webview zoom (WebView2 ZoomFactor is page
-    // zoom), so client CSS px × DPR = physical px even when the UI is scaled.
-    scaleFactor = window.devicePixelRatio || 1;
-  } catch {
-    windowOrigin = { x: 0, y: 0 };
-    scaleFactor = 1;
-  }
+async function applyWorkspaceLayout(): Promise<void> {
+  const revision = ++workspaceLayoutRevision;
+  const monitor = await currentMonitor().catch(() => null);
+  const availableCssWidth = monitor
+    ? monitor.workArea.size.width / (window.devicePixelRatio || 1)
+    : window.screen.availWidth;
+  const layout = decideWorkspaceLayout(
+    availableCssWidth,
+    sidebarOpen,
+    previewState.isOpen,
+    workspaceTab,
+  );
+  if (revision !== workspaceLayoutRevision) return;
+
+  workspace.dataset.mode = layout.mode;
+  workspace.style.setProperty("--history-left", `${layout.leftExtent}px`);
+  workspace.style.setProperty("--side-left", `${layout.leftExtent + 428}px`);
+  drawerPane.classList.toggle("hidden", !layout.drawerVisible);
+  previewPane.classList.toggle("hidden", !layout.previewVisible);
+  workspaceTabs.classList.toggle("hidden", layout.mode !== "compact" && layout.mode !== "overlay");
+  drawerTab.setAttribute("aria-selected", String(layout.activeTab === "drawer"));
+  previewTab.setAttribute("aria-selected", String(layout.activeTab === "preview"));
+  drawerTab.disabled = !sidebarOpen;
+  previewTab.disabled = !previewState.isOpen;
+
+  await invoke("set_main_workspace_layout", {
+    leftExtent: layout.leftExtent,
+    rightExtent: layout.rightExtent,
+  }).catch((err) => console.error("Failed to resize workspace:", err));
 }
 
 async function init() {
   await refreshConfig();
   applyI18n();
-  await cacheWindowGeometry();
 
   clips = await invoke("get_clips");
   selectedIndex = 0;
@@ -161,7 +209,6 @@ async function init() {
   await getCurrentWindow().onFocusChanged(({ payload: focused }) => {
     if (!focused) return;
     resyncPreviewState();
-    cacheWindowGeometry();
     refreshConfig().then(() => {
       applyI18n();
       updateFavoritesToggleA11y();
@@ -193,10 +240,6 @@ async function init() {
     render();
   });
 
-  await listen("clip-preview-closed", () => {
-    resyncPreviewState();
-  });
-
   // Favorites data + selection sync across both windows.
   await listen<void>("favorites-updated", () => {
     void loadFavoritesContext();
@@ -205,10 +248,6 @@ async function init() {
     void loadFavoritesContext();
   });
 
-  // Favorites toggle button.
-  favoritesToggle.addEventListener("click", () => {
-    void toggleSidebar();
-  });
   selectionToggle.addEventListener("click", () => {
     if (multiSelect.active) exitMultiSelect();
     else enterMultiSelect();
@@ -220,15 +259,31 @@ async function init() {
   selectionAdd.addEventListener("click", openBatchAddChooser);
   selectionDestructive.addEventListener("click", () => void runBatchDestructiveAction());
   selectionCancel.addEventListener("click", () => exitMultiSelect());
+  drawerTab.addEventListener("click", () => {
+    workspaceTab = "drawer";
+    void applyWorkspaceLayout();
+  });
+  previewTab.addEventListener("click", () => {
+    workspaceTab = "preview";
+    void applyWorkspaceLayout();
+  });
 
   document.addEventListener("keydown", onFavoritesShortcutKeydown, true);
   document.addEventListener("keyup", onFavoritesShortcutKeyup, true);
 }
 
 async function toggleSidebar() {
-  sidebarOpen = !sidebarOpen;
-  updateFavoritesToggleA11y();
-  await invoke("set_favorites_open", { open: sidebarOpen }).catch(() => {});
+  const revision = ++sidebarStateRevision;
+  try {
+    const state = await invoke<FavoritesUiState>("toggle_favorites_sidebar");
+    if (revision === sidebarStateRevision) {
+      sidebarOpen = state.open;
+      if (sidebarOpen) workspaceTab = "drawer";
+      updateFavoritesToggleA11y();
+    }
+  } catch (err) {
+    console.error("Failed to toggle drawer:", err);
+  }
 }
 
 function onFavoritesShortcutKeydown(e: KeyboardEvent) {
@@ -672,6 +727,10 @@ function renderActionMenu(item: DisplayItem) {
   actionMenu.replaceChildren();
   const isFav = isFavoriteItem(item);
 
+  actionMenu.appendChild(menuItem(t("noteAction"), () => {
+    openNoteModal(item);
+  }));
+
   if (isFav) {
     actionMenu.appendChild(menuItem(t("removeFromCollection"), () => {
       const fav = item as FavoriteItem;
@@ -714,6 +773,62 @@ function hideActionMenu() {
   actionMenu.classList.add("hidden");
   hideAddChooser();
 }
+
+function openNoteModal(item: DisplayItem): void {
+  hideActionMenu();
+  noteTarget = clipLocator(item);
+  noteInput.value = item.note ?? "";
+  noteModal.classList.remove("hidden");
+  noteInput.focus();
+  noteInput.setSelectionRange(noteInput.value.length, noteInput.value.length);
+}
+
+function closeNoteModal(): void {
+  noteTarget = null;
+  noteModal.classList.add("hidden");
+  noteSave.disabled = false;
+}
+
+async function saveNote(): Promise<void> {
+  const target = noteTarget;
+  if (!target) return;
+  noteSave.disabled = true;
+  try {
+    const isFavorite = target.scope === "favorite";
+    const command = isFavorite ? "set_favorite_note" : "set_clip_note";
+    const note = await invoke<string | null>(command, { id: target.id, note: noteInput.value });
+    const items = isFavorite ? favoriteItems : clips;
+    const item = items.find((candidate) => candidate.id === target.id);
+    if (item) item.note = note;
+    closeNoteModal();
+    showToast(t("noteSaved"));
+    if (previewState.currentId === target.id) {
+      const previewCommand = isFavorite ? "show_favorite_preview" : "show_clip_preview";
+      void invoke(previewCommand, { id: target.id }).catch((err) => {
+        console.error("Failed to refresh preview note:", err);
+      });
+    }
+  } catch (err) {
+    noteSave.disabled = false;
+    showToast(localizeBackendError(String(err)));
+  }
+}
+
+noteCancel.addEventListener("click", closeNoteModal);
+noteSave.addEventListener("click", () => void saveNote());
+noteModal.addEventListener("click", (e) => {
+  if (e.target === noteModal) closeNoteModal();
+});
+noteModal.addEventListener("keydown", (e) => {
+  e.stopPropagation();
+  if (e.key === "Escape") {
+    e.preventDefault();
+    closeNoteModal();
+  } else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    void saveNote();
+  }
+});
 
 // === Add-to-collection chooser ===
 function openAddChooser(item: DisplayItem) {
@@ -983,10 +1098,13 @@ async function closePanel() {
 function showPreviewFor(item: DisplayItem) {
   if (!previewEnabled || previewState.currentId === item.id) return;
   const token = previewState.beginShow(item.id);
+  workspaceTab = tabAfterPreviewIntent(workspaceTab, sidebarOpen);
+  void applyWorkspaceLayout();
   const cmd = isFavoriteItem(item) ? "show_favorite_preview" : "show_clip_preview";
   invoke(cmd, { id: item.id })
     .then(() => {
       previewState.resolveShow(token, item.id);
+      void applyWorkspaceLayout();
     })
     .catch((err) => {
       console.error("Failed to show preview:", err);
@@ -1009,7 +1127,10 @@ function syncPreviewToSelection() {
 function hidePreview() {
   const token = previewState.beginHide();
   invoke("hide_clip_preview")
-    .then(() => previewState.resolveHide(token))
+    .then(() => {
+      previewState.resolveHide(token);
+      void applyWorkspaceLayout();
+    })
     .catch((err) => {
       console.error("Failed to hide preview:", err);
       if (previewState.isCurrent(token)) resyncPreviewState();
@@ -1019,7 +1140,10 @@ function hidePreview() {
 function resyncPreviewState() {
   const token = previewState.beginResync();
   invoke<{ id: string } | null>("get_active_clip_preview")
-    .then((active) => previewState.resolveResync(token, active ? active.id : null))
+    .then((active) => {
+      previewState.resolveResync(token, active ? active.id : null);
+      void applyWorkspaceLayout();
+    })
     .catch(() => {});
 }
 
@@ -1036,7 +1160,8 @@ function releaseDragSource(el: HTMLElement, cancel: boolean): void {
   if (activeDragSource === el) {
     activeDragSource = null;
     if (cancel && activeDragSessionId !== null) {
-      void emit("favorites-item-drag-cancel", activeDragSessionId);
+      cancelInlineItemDrag(activeDragSessionId);
+      finishInlineDragCard(true);
     }
     activeDragSessionId = null;
   }
@@ -1055,22 +1180,26 @@ function attachRowDrag(row: HTMLElement, handle: HTMLElement, item: DisplayItem)
     row.classList.add("dragging-source");
     activeDragSource = row;
     handle.setPointerCapture(e.pointerId);
-    const point = physicalScreenPoint(windowOrigin, { x: e.clientX, y: e.clientY }, scaleFactor);
+    const point = { x: e.clientX, y: e.clientY };
     const payload: ItemDragPoint = { sessionId: activeDragSessionId, locator, x: point.x, y: point.y };
-    void emit("favorites-item-drag", itemDragStartPayload(activeDragSessionId, item, point));
-    void emit("favorites-item-drag-move", payload);
+    const start = itemDragStartPayload(activeDragSessionId, item, point);
+    beginInlineItemDrag(start);
+    beginInlineDragCard(start);
+    moveInlineItemDrag(payload);
   });
   handle.addEventListener("pointermove", (e) => {
     if (!drag.isDragging || activeDragSessionId === null) return;
-    const p = physicalScreenPoint(windowOrigin, { x: e.clientX, y: e.clientY }, scaleFactor);
+    const p = { x: e.clientX, y: e.clientY };
     const payload: ItemDragPoint = { sessionId: activeDragSessionId, locator, x: p.x, y: p.y };
-    void emit("favorites-item-drag-move", payload);
+    moveInlineItemDrag(payload);
+    moveInlineDragCard(payload);
   });
   handle.addEventListener("pointerup", (e) => {
     if (drag.didDrag && activeDragSessionId !== null) {
-      const p = physicalScreenPoint(windowOrigin, { x: e.clientX, y: e.clientY }, scaleFactor);
+      const p = { x: e.clientX, y: e.clientY };
       const payload: ItemDragPoint = { sessionId: activeDragSessionId, locator, x: p.x, y: p.y };
-      void emit("favorites-item-drag-end", payload);
+      void endInlineItemDrag(payload);
+      finishInlineDragCard(false);
     }
     releaseDragSource(row, false);
     drag.pointerUp();
@@ -1219,12 +1348,39 @@ document.addEventListener("keydown", (e) => {
       return;
     case "Escape":
       e.preventDefault();
-      if (multiSelect.active) {
+      const removeModal = document.getElementById("remove-modal")!;
+      const favoritesMenu = document.getElementById("favorites-more-menu")!;
+      const transientOpen = multiSelect.active
+        || !noteModal.classList.contains("hidden")
+        || openMenuClipId !== null
+        || chooserGate.isOpen
+        || batchChooserOpen
+        || !removeModal.classList.contains("hidden")
+        || !favoritesMenu.classList.contains("hidden");
+      const layer = escapeLayer(transientOpen, previewState.isOpen, sidebarOpen);
+      if (layer === "modal-or-menu" && multiSelect.active) {
         exitMultiSelect();
         return;
       }
-      if (openMenuClipId) {
+      if (layer === "modal-or-menu" && !noteModal.classList.contains("hidden")) {
+        closeNoteModal();
+        return;
+      }
+      if (layer === "modal-or-menu" && (openMenuClipId || chooserGate.isOpen || batchChooserOpen)) {
         hideActionMenu();
+        return;
+      }
+      if (layer === "modal-or-menu" && !removeModal.classList.contains("hidden")) {
+        (document.getElementById("remove-modal-cancel") as HTMLButtonElement).click();
+        return;
+      }
+      if (layer === "modal-or-menu") return;
+      if (layer === "preview") {
+        hidePreview();
+        return;
+      }
+      if (layer === "drawer") {
+        void invoke("set_favorites_open", { open: false });
         return;
       }
       if (inSearch && vimMode) {

@@ -25,10 +25,7 @@ export default defineConfig(async () => ({
       input: {
         main: resolve(__dirname, "index.html"),
         settings: resolve(__dirname, "settings.html"),
-        preview: resolve(__dirname, "preview.html"),
         about: resolve(__dirname, "about.html"),
-        favorites: resolve(__dirname, "favorites.html"),
-        dragOverlay: resolve(__dirname, "drag-overlay.html"),
         tutorial: resolve(__dirname, "tutorial.html"),
       },
     },

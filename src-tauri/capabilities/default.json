@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for Mnemark windows",
-  "windows": ["main", "settings", "about", "clip-preview", "favorites-sidebar", "drag-overlay", "tutorial"],
+  "windows": ["main", "settings", "about", "tutorial"],
   "permissions": [
     "core:default",
     "core:window:allow-close",
