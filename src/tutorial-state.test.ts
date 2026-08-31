@@ -36,11 +36,25 @@ describe("TutorialNav", () => {
 });
 
 describe("pages", () => {
-  it("declares six pages in order without a preview tutorial", () => {
-    expect(TUTORIAL_PAGES).toHaveLength(6);
-    expect(TUTORIAL_PAGES[0].id).toBe("background");
-    expect(TUTORIAL_PAGES.map((page) => page.id)).not.toContain("preview");
-    expect(TUTORIAL_PAGES[5].id).toBe("settings");
+  it("declares the complete user workflow in order", () => {
+    expect(TUTORIAL_PAGES.map((page) => page.id)).toEqual([
+      "background",
+      "shortcut",
+      "search",
+      "actions",
+      "favorites",
+      "preview",
+      "notes",
+      "settings",
+    ]);
+  });
+
+  it("teaches note editing, preview display, and drawer carry-over", () => {
+    const notes = TUTORIAL_PAGES.find((page) => page.id === "notes");
+    expect(notes?.bodyKeys).toEqual([
+      "tutorialBodyNotesEdit",
+      "tutorialBodyNotesCarry",
+    ]);
   });
 });
 

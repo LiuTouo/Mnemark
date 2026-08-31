@@ -82,7 +82,7 @@ pub struct PreviewPayload {
 
 /// Highest tutorial version shipped with this build. The tutorial window
 /// auto-opens once when a config's `tutorial_version` is below this value.
-pub const CURRENT_TUTORIAL_VERSION: u32 = 1;
+pub const CURRENT_TUTORIAL_VERSION: u32 = 2;
 
 /// A durable favorite snapshot of one clipboard item. Mirrors `Clip` minus the
 /// history-only `pinned` flag. The `id` is the item's `content_hash` (a stable

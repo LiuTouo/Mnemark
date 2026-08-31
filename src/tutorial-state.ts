@@ -27,7 +27,7 @@ export const TUTORIAL_PAGES: TutorialPage[] = [
   {
     id: "actions",
     titleKey: "tutorialTitleActions",
-    bodyKeys: ["tutorialBodyActions"],
+    bodyKeys: ["tutorialBodyActions", "tutorialBodyBatchActions"],
   },
   {
     id: "favorites",
@@ -39,9 +39,19 @@ export const TUTORIAL_PAGES: TutorialPage[] = [
     ],
   },
   {
+    id: "preview",
+    titleKey: "tutorialTitlePreview",
+    bodyKeys: ["tutorialBodyPreview"],
+  },
+  {
+    id: "notes",
+    titleKey: "tutorialTitleNotes",
+    bodyKeys: ["tutorialBodyNotesEdit", "tutorialBodyNotesCarry"],
+  },
+  {
     id: "settings",
     titleKey: "tutorialTitleSettings",
-    bodyKeys: ["tutorialBodySettings"],
+    bodyKeys: ["tutorialBodySettingsBehavior", "tutorialBodySettingsPrivacy"],
   },
 ];
 
