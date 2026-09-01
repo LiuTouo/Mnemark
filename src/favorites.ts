@@ -8,6 +8,14 @@ import { applyTheme } from "./theme";
 import { computeMenuPlacement } from "./menu";
 import { DragController, rectContains, acceptDropSession, isAvailableDropTarget } from "./drag";
 import type { ItemDragPoint, ItemDragStart } from "./drag";
+import { createDrawerDragLifecycle } from "./drawer-drag";
+import type {
+  DrawerDragCancelReason,
+  DrawerDragStart,
+  DrawerDragTargetState,
+  DrawerDragTerminalOutcome,
+} from "./drawer-drag";
+import { beginInlineDragCard, finishInlineDragCard, moveInlineDragCard } from "./drag-overlay";
 import { insertBefore, moveOne } from "./reorder";
 import { createRenameController } from "./rename-commit";
 import type { CollectionSummary, FavoritesUiState } from "./types";
@@ -42,6 +50,12 @@ let activeDragPoint: ItemDragPoint | null = null;
 let dragMembershipIds: string[] = [];
 let dragMembershipReady = false;
 let dragMembershipPromise: Promise<string[]> | null = null;
+let historyDrawerTargetState: DrawerDragTargetState = {
+  active: false,
+  membershipReady: false,
+  membershipIds: [],
+  targetId: null,
+};
 
 const listEl = document.getElementById("favorites-list")!;
 const emptyEl = document.getElementById("favorites-empty")!;
@@ -194,7 +208,8 @@ function render(): void {
 
   createRow.classList.toggle("hidden", !editingCreate);
   updateMoreMenu();
-  applyItemDragState();
+  if (historyDrawerTargetState.active) renderHistoryDrawerTargets(historyDrawerTargetState);
+  else applyItemDragState();
 }
 
 function selectCollection(id: string | null): void {
@@ -503,6 +518,84 @@ function clearDropFeedback(): void {
     row.classList.remove("drop-target", "drop-available", "drop-unavailable");
   });
   listEl.querySelector(".favorites-history-return")?.classList.remove("drag-disabled");
+}
+
+function clearHistoryDrawerFeedback(): void {
+  clearDropFeedback();
+  listEl.querySelectorAll<HTMLElement>(".favorites-row[data-collection-id]").forEach((row) => {
+    row.setAttribute("aria-disabled", "false");
+    const label = row.querySelector<HTMLElement>(".favorites-row-drop-label");
+    if (label) label.textContent = t("dropHere");
+  });
+}
+
+function renderHistoryDrawerTargets(state: DrawerDragTargetState): void {
+  historyDrawerTargetState = { ...state, membershipIds: [...state.membershipIds] };
+  document.body.classList.toggle("item-drag-active", state.active);
+  listEl.querySelector(".favorites-history-return")?.classList.toggle("drag-disabled", state.active);
+  listEl.querySelectorAll<HTMLElement>(".favorites-row[data-collection-id]").forEach((row) => {
+    const id = row.dataset.collectionId!;
+    const unavailable = state.active
+      && state.membershipReady
+      && state.membershipIds.includes(id);
+    row.classList.toggle("drop-available", state.active && !unavailable);
+    row.classList.toggle("drop-unavailable", unavailable);
+    row.classList.toggle("drop-target", state.active && state.targetId === id);
+    row.setAttribute("aria-disabled", String(unavailable));
+    const label = row.querySelector<HTMLElement>(".favorites-row-drop-label");
+    if (label) label.textContent = unavailable ? t("alreadyInDrawer") : t("dropHere");
+  });
+}
+
+const historyDrawerDrag = createDrawerDragLifecycle<HTMLElement>({
+  lookupMembership: (start) => invoke<string[]>("favorite_collection_ids", { locator: start.locator }),
+  collectionAt: (point) => collectionUnderPoint(point.x, point.y),
+  renderTargets: renderHistoryDrawerTargets,
+  activateSource: (source) => source.classList.add("dragging-source"),
+  releaseSource: (source) => source.classList.remove("dragging-source", "drag-held"),
+  beginVisual: beginInlineDragCard,
+  moveVisual: moveInlineDragCard,
+  finishVisual: (outcome) => finishInlineDragCard(outcome === "cancelled" || outcome === "replaced"),
+  clearTransientFeedback: clearHistoryDrawerFeedback,
+  commit: (collectionId, start) => invoke("add_favorite", {
+    collectionId,
+    locator: start.locator,
+  }),
+  showUnavailable: (collectionId) => {
+    const row = listEl.querySelector<HTMLElement>(`.favorites-row[data-collection-id="${collectionId}"]`);
+    row?.classList.add("drop-invalid");
+    setTimeout(() => row?.classList.remove("drop-invalid"), 450);
+    showToast(t("alreadyInDrawer"));
+  },
+  showSuccess: async (collectionId) => {
+    showToast(t("addedToFavorites"));
+    await loadCollections();
+    const row = listEl.querySelector<HTMLElement>(`.favorites-row[data-collection-id="${collectionId}"]`);
+    if (row) {
+      row.classList.add("drop-success");
+      setTimeout(() => row.classList.remove("drop-success"), 600);
+    }
+  },
+  showFailure: (error) => showToast(String(error)),
+});
+
+export function startHistoryDrawerDrag(start: DrawerDragStart<HTMLElement>): void {
+  historyDrawerDrag.start(start);
+}
+
+export function moveHistoryDrawerDrag(point: ItemDragPoint): void {
+  historyDrawerDrag.move(point);
+}
+
+export function endHistoryDrawerDrag(point: ItemDragPoint): Promise<DrawerDragTerminalOutcome | null> {
+  return historyDrawerDrag.end(point);
+}
+
+export function cancelHistoryDrawerDrag(
+  sessionId: number,
+  reason: DrawerDragCancelReason,
+): void {
+  historyDrawerDrag.cancel(sessionId, reason);
 }
 
 function applyItemDragState(): void {

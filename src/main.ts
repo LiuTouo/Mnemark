@@ -15,11 +15,16 @@ import { decideWorkspaceLayout, escapeLayer, tabAfterPreviewIntent } from "./wor
 import type { WorkspaceTab } from "./workspace-state";
 import {
   beginInlineItemDrag,
+  cancelHistoryDrawerDrag,
   cancelInlineItemDrag,
+  endHistoryDrawerDrag,
   endInlineItemDrag,
+  moveHistoryDrawerDrag,
   moveInlineItemDrag,
+  startHistoryDrawerDrag,
 } from "./favorites";
 import { beginInlineDragCard, finishInlineDragCard, moveInlineDragCard } from "./drag-overlay";
+import type { DrawerDragCancelReason } from "./drawer-drag";
 import "./preview";
 import { insertBefore, moveOne } from "./reorder";
 import type { BatchMutationResult, Clip, ClipboardUpdate, ClipLocator, CollectionSummary, FavoriteItem, FavoritesUiState } from "./types";
@@ -55,6 +60,7 @@ let activeDragSource: HTMLElement | null = null;
 // the sidebar can reject stale or cancelled drags.
 let dragSessionSeq = 0;
 let activeDragSessionId: number | null = null;
+let activeDragKind: "history" | "favorite" | null = null;
 let activeItemReorderId: string | null = null;
 let itemReorderBeforeId: string | null = null;
 let itemReorderInsideList = false;
@@ -505,7 +511,7 @@ function render() {
 
   const scrollTop = clipList.scrollTop;
   if (activeDragSource) {
-    releaseDragSource(activeDragSource, activeDragSessionId !== null);
+    releaseDragSource(activeDragSource, activeDragSessionId !== null, "source-removed");
   }
   clipList.replaceChildren();
 
@@ -1322,31 +1328,43 @@ function commitItemReorder(
   return true;
 }
 
-function releaseDragSource(el: HTMLElement, cancel: boolean): void {
+function releaseDragSource(
+  el: HTMLElement,
+  cancel: boolean,
+  reason: DrawerDragCancelReason = "explicit",
+): void {
+  let kind: "history" | "favorite" | null = null;
   if (activeDragSource === el) {
+    kind = activeDragKind;
     activeDragSource = null;
+    activeDragKind = null;
     if (cancel && activeDragSessionId !== null) {
-      cancelInlineItemDrag(activeDragSessionId);
-      finishInlineDragCard(true);
+      if (kind === "history") {
+        cancelHistoryDrawerDrag(activeDragSessionId, reason);
+      } else {
+        cancelInlineItemDrag(activeDragSessionId);
+        finishInlineDragCard(true);
+      }
     }
     activeDragSessionId = null;
   }
   clearItemReorderFeedback();
-  el.classList.remove("dragging-source", "drag-held");
+  if (kind !== "history") el.classList.remove("dragging-source", "drag-held");
 }
 
 function attachRowDrag(row: HTMLElement, handle: HTMLElement, item: DisplayItem) {
   const drag = new DragController(6);
   const locator = clipLocator(item);
+  const favorite = isFavoriteItem(item);
   handle.addEventListener("pointerdown", (e) => {
     e.preventDefault();
     e.stopPropagation();
     drag.beginImmediately(e.clientX, e.clientY);
     dragSessionSeq += 1;
     activeDragSessionId = dragSessionSeq;
-    row.classList.add("dragging-source");
+    activeDragKind = favorite ? "favorite" : "history";
     activeDragSource = row;
-    if (isFavoriteItem(item) && favoriteItemReorderEnabled()) {
+    if (favorite && favoriteItemReorderEnabled()) {
       activeItemReorderId = item.id;
       clipList.classList.add("reordering-items");
       updateItemReorder(item.id, { x: e.clientX, y: e.clientY });
@@ -1355,27 +1373,40 @@ function attachRowDrag(row: HTMLElement, handle: HTMLElement, item: DisplayItem)
     const point = { x: e.clientX, y: e.clientY };
     const payload: ItemDragPoint = { sessionId: activeDragSessionId, locator, x: point.x, y: point.y };
     const start = itemDragStartPayload(activeDragSessionId, item, point);
-    beginInlineItemDrag(start);
-    beginInlineDragCard(start);
-    moveInlineItemDrag(payload);
+    if (favorite) {
+      row.classList.add("dragging-source");
+      beginInlineItemDrag(start);
+      beginInlineDragCard(start);
+      moveInlineItemDrag(payload);
+    } else {
+      startHistoryDrawerDrag({ ...start, source: row });
+    }
   });
   handle.addEventListener("pointermove", (e) => {
     if (!drag.isDragging || activeDragSessionId === null) return;
     const p = { x: e.clientX, y: e.clientY };
     const payload: ItemDragPoint = { sessionId: activeDragSessionId, locator, x: p.x, y: p.y };
-    moveInlineItemDrag(payload);
-    moveInlineDragCard(payload);
+    if (favorite) {
+      moveInlineItemDrag(payload);
+      moveInlineDragCard(payload);
+    } else {
+      moveHistoryDrawerDrag(payload);
+    }
     if (activeItemReorderId === item.id) updateItemReorder(item.id, p);
   });
   handle.addEventListener("pointerup", (e) => {
     if (drag.didDrag && activeDragSessionId !== null) {
       const p = { x: e.clientX, y: e.clientY };
       const payload: ItemDragPoint = { sessionId: activeDragSessionId, locator, x: p.x, y: p.y };
-      const reordered = isFavoriteItem(item)
+      const reordered = favorite
         && commitItemReorder(item.id, activeDragSessionId, p);
       if (!reordered) {
-        void endInlineItemDrag(payload);
-        finishInlineDragCard(false);
+        if (favorite) {
+          void endInlineItemDrag(payload);
+          finishInlineDragCard(false);
+        } else {
+          void endHistoryDrawerDrag(payload);
+        }
       }
     }
     releaseDragSource(row, false);
@@ -1383,12 +1414,12 @@ function attachRowDrag(row: HTMLElement, handle: HTMLElement, item: DisplayItem)
   });
   handle.addEventListener("pointercancel", () => {
     const didDrag = drag.didDrag;
-    releaseDragSource(row, didDrag);
+    releaseDragSource(row, didDrag, "pointercancel");
     drag.pointerUp();
   });
   handle.addEventListener("lostpointercapture", () => {
     const didDrag = drag.didDrag;
-    releaseDragSource(row, didDrag);
+    releaseDragSource(row, didDrag, "lostpointercapture");
     drag.pointerUp();
   });
   handle.addEventListener("click", (e) => {
@@ -1525,6 +1556,10 @@ document.addEventListener("keydown", (e) => {
       return;
     case "Escape":
       e.preventDefault();
+      if (activeDragSource) {
+        releaseDragSource(activeDragSource, true, "explicit");
+        return;
+      }
       const removeModal = document.getElementById("remove-modal")!;
       const favoritesMenu = document.getElementById("favorites-more-menu")!;
       const transientOpen = multiSelect.active
@@ -1593,7 +1628,7 @@ window.addEventListener("keydown", (e) => {
 // Focus loss (alt-tab, minimize) aborts an in-flight handle drag so the row
 // doesn't stay stuck in a held/dragging state.
 window.addEventListener("blur", () => {
-  if (activeDragSource) releaseDragSource(activeDragSource, true);
+  if (activeDragSource) releaseDragSource(activeDragSource, true, "window-blur");
 });
 
 searchInput.addEventListener("input", () => {
