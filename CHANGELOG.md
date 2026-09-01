@@ -4,6 +4,19 @@
 
 格式參考 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)，版本號遵循[語意化版本](https://semver.org/lang/zh-TW/)。
 
+## [0.7.7] - 2026-09-02
+
+### Changed
+
+- 將歷史紀錄的記憶體狀態、容量政策、SQLite 持久化與單筆／批次刪除復原統一由單一 aggregate 管理；所有 mutation 皆在持久化成功後才發布新狀態
+- 將歷史與抽屜項目的貼上、複製、預覽及備註操作統一為來源無關的 located Clip 介面，並集中檔案貼上政策、錯誤分類與本地化回饋
+- 歷史紀錄與抽屜快照共用 Clip 的 SQLite 編解碼及欄位 migration 規則，避免兩套儲存格式隨後續演進產生差異
+
+### Fixed
+
+- 修正歷史紀錄寫入失敗時仍在當次工作階段留下幽靈項目並發出更新事件；現在失敗不會改變既有記憶體、持久化或復原狀態
+- 修正歷史備註持久化失敗時畫面可能保留未儲存內容，以及抽屜檔案來源全數失效時未顯示路徑文字 fallback 回饋
+
 ## [0.7.6] - 2026-09-01
 
 ### Changed
@@ -440,6 +453,7 @@
 
 - 初始版本：剪貼簿監聽（文字／圖片／檔案路徑）、SHA-256 內容去重、容量限制與淘汰、釘選（上限 10 則、永不淘汰）、即時搜尋、Raycast 風格浮動面板（`Ctrl+Shift+V`）、貼上模擬、刪除復原、系統匣常駐、排除清單、深淺色主題跟隨系統、免安裝可攜（設定存於 exe 旁）
 
+[0.7.7]: https://github.com/LiuTouo/Mnemark/compare/v0.7.6...v0.7.7
 [0.7.6]: https://github.com/LiuTouo/Mnemark/compare/v0.7.5...v0.7.6
 [0.7.5]: https://github.com/LiuTouo/Mnemark/compare/v0.7.4...v0.7.5
 [0.7.4]: https://github.com/LiuTouo/Mnemark/compare/v0.7.3...v0.7.4
