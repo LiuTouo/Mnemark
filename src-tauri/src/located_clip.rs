@@ -6,10 +6,9 @@ use std::sync::Mutex;
 use serde::Serialize;
 
 use crate::drawer::DrawerState;
-use crate::history::HistoryStore;
+use crate::history_state::HistoryState;
 use crate::lock;
 use crate::models::{Clip, ClipKind, ClipLocator, ClipScope, FavoriteItem, PreviewPayload};
-use crate::persistence::Persistence;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -156,15 +155,16 @@ pub(crate) trait LocatedClipSource {
     ) -> Result<NoteCommit, LocatedClipError>;
 }
 
+/// History-scope source: everything routes through the History aggregate, so
+/// this adapter never coordinates memory and persistence locks itself.
 struct HistoryAdapter<'a> {
-    history: &'a Mutex<HistoryStore>,
-    persistence: &'a Mutex<Option<Persistence>>,
+    history: &'a Mutex<HistoryState>,
 }
 
 impl LocatedClipSource for HistoryAdapter<'_> {
     fn resolve(&self, locator: &ClipLocator) -> Result<LocatedClip, LocatedClipError> {
         lock(self.history)
-            .get_clip(&locator.id)
+            .clip(&locator.id)
             .map(LocatedClip::from)
             .ok_or(LocatedClipError::NotFound)
     }
@@ -174,20 +174,14 @@ impl LocatedClipSource for HistoryAdapter<'_> {
         locator: &ClipLocator,
         note: Option<String>,
     ) -> Result<NoteCommit, LocatedClipError> {
-        let mut history = lock(self.history);
-        if history.get_clip(&locator.id).is_none() {
-            return Err(LocatedClipError::NotFound);
-        }
-        let mut persistence = lock(self.persistence);
-        if let Some(store) = persistence.as_mut() {
-            store
-                .set_note(&locator.id, note.as_deref())
-                .map_err(LocatedClipError::HistoryPersistence)?;
-        }
-        drop(persistence);
-        history
+        lock(self.history)
             .set_note(&locator.id, note.clone())
-            .map_err(|_| LocatedClipError::NotFound)?;
+            .map_err(|e| match e {
+                crate::history_state::HistoryError::Persistence(detail) => {
+                    LocatedClipError::HistoryPersistence(detail)
+                }
+                _ => LocatedClipError::NotFound,
+            })?;
         Ok(NoteCommit {
             note,
             drawer_generation: None,
@@ -244,16 +238,9 @@ pub(crate) struct StateLocatedClipSource<'a> {
 }
 
 impl<'a> StateLocatedClipSource<'a> {
-    pub(crate) fn new(
-        history: &'a Mutex<HistoryStore>,
-        drawer: &'a Mutex<DrawerState>,
-        persistence: &'a Mutex<Option<Persistence>>,
-    ) -> Self {
+    pub(crate) fn new(history: &'a Mutex<HistoryState>, drawer: &'a Mutex<DrawerState>) -> Self {
         Self {
-            history: HistoryAdapter {
-                history,
-                persistence,
-            },
+            history: HistoryAdapter { history },
             drawer: DrawerSnapshotAdapter { drawer },
         }
     }
@@ -475,9 +462,19 @@ mod tests {
     };
     use crate::drawer::DrawerState;
     use crate::favorites::FavoritesStore;
-    use crate::history::HistoryStore;
-    use crate::models::{AppConfig, Clip, ClipKind, ClipLocator, ClipScope, FavoriteItem};
+    use crate::history::HistoryPolicy;
+    use crate::history_state::HistoryState;
+    use crate::models::{Clip, ClipKind, ClipLocator, ClipScope, FavoriteItem};
     use crate::persistence::Persistence;
+
+    /// History aggregate fixture seeded through its public capture seam.
+    fn history_state(clips: &[Clip]) -> Mutex<HistoryState> {
+        let mut state = HistoryState::new(HistoryPolicy::default());
+        for clip in clips {
+            state.capture(clip.clone()).unwrap();
+        }
+        Mutex::new(state)
+    }
 
     struct MemorySource;
 
@@ -1077,23 +1074,20 @@ mod tests {
             image_clip("history-image", "hash-image"),
             file_clip("history-files", "hash-files"),
         ];
-        let mut history = HistoryStore::new();
         let mut drawer = DrawerState::new(Some(FavoritesStore::from_conn(
             Connection::open_in_memory().unwrap(),
         )));
         let collection = drawer.create_collection("Contract").unwrap().value;
-        for clip in clips {
-            history.insert(clip.clone(), &AppConfig::default());
+        for clip in &clips {
             drawer
-                .add_snapshot(&collection.id, &FavoriteItem::from(clip))
+                .add_snapshot(&collection.id, &FavoriteItem::from(clip.clone()))
                 .unwrap();
         }
-        let history = Mutex::new(history);
+        let history = history_state(&clips);
         let drawer = Mutex::new(drawer);
-        let persistence = Mutex::new(None);
         let events = Arc::new(Mutex::new(Vec::new()));
         let module = test_module(
-            StateLocatedClipSource::new(&history, &drawer, &persistence),
+            StateLocatedClipSource::new(&history, &drawer),
             RecordingClipboard(Arc::clone(&events)),
         );
 
@@ -1104,9 +1098,6 @@ mod tests {
     #[tokio::test]
     async fn drawer_actions_survive_history_deletion() {
         let clip = text_clip("history-id", "content-hash");
-        let mut history = HistoryStore::new();
-        history.insert(clip.clone(), &AppConfig::default());
-
         let mut drawer = DrawerState::new(Some(FavoritesStore::from_conn(
             Connection::open_in_memory().unwrap(),
         )));
@@ -1115,13 +1106,12 @@ mod tests {
             .add_snapshot(&collection.id, &FavoriteItem::from(clip))
             .unwrap();
 
-        history.delete("history-id");
-        let history = Mutex::new(history);
+        let history = history_state(&[text_clip("history-id", "content-hash")]);
+        history.lock().unwrap().delete("history-id").unwrap();
         let drawer = Mutex::new(drawer);
-        let persistence = Mutex::new(None);
         let events = Arc::new(Mutex::new(Vec::new()));
         let module = test_module(
-            StateLocatedClipSource::new(&history, &drawer, &persistence),
+            StateLocatedClipSource::new(&history, &drawer),
             RecordingClipboard(Arc::clone(&events)),
         );
         let locator = ClipLocator {
@@ -1203,17 +1193,15 @@ mod tests {
     #[test]
     fn history_note_persists_before_memory_through_located_interface() {
         let clip = text_clip("history-id", "content-hash");
-        let mut history = HistoryStore::new();
-        history.insert(clip.clone(), &AppConfig::default());
-        let mut persistence = Persistence::in_memory_for_test();
-        persistence
-            .persist_capture_with_evictions(&clip, &[])
+        let mut state = HistoryState::new(HistoryPolicy::default());
+        state
+            .enable_persistence(|| Ok(Persistence::in_memory_for_test()))
             .unwrap();
-        let history = Mutex::new(history);
+        state.capture(clip).unwrap();
+        let history = Mutex::new(state);
         let drawer = Mutex::new(DrawerState::new(None));
-        let persistence = Mutex::new(Some(persistence));
         let module = test_module(
-            StateLocatedClipSource::new(&history, &drawer, &persistence),
+            StateLocatedClipSource::new(&history, &drawer),
             RecordingClipboard(Arc::new(Mutex::new(Vec::new()))),
         );
         let locator = ClipLocator {
@@ -1223,42 +1211,28 @@ mod tests {
 
         module.set_note(&locator, "memo".to_string()).unwrap();
 
+        let state = history.lock().unwrap();
         assert_eq!(
-            history
-                .lock()
-                .unwrap()
-                .get_clip("history-id")
-                .unwrap()
-                .note
-                .as_deref(),
+            state.clip("history-id").unwrap().note.as_deref(),
             Some("memo")
         );
         assert_eq!(
-            persistence
-                .lock()
-                .unwrap()
-                .as_ref()
-                .unwrap()
-                .load_all()
-                .unwrap()[0]
-                .note
-                .as_deref(),
+            state.durable_clips().unwrap()[0].note.as_deref(),
             Some("memo")
         );
     }
 
     #[test]
     fn history_note_persistence_failure_leaves_memory_unchanged() {
-        let mut history = HistoryStore::new();
-        history.insert(
-            text_clip("history-id", "content-hash"),
-            &AppConfig::default(),
-        );
-        let history = Mutex::new(history);
+        let mut state = HistoryState::new(HistoryPolicy::default());
+        state
+            .capture(text_clip("history-id", "content-hash"))
+            .unwrap();
+        state.install_persistence_for_test(Persistence::writes_fail_for_test());
+        let history = Mutex::new(state);
         let drawer = Mutex::new(DrawerState::new(None));
-        let persistence = Mutex::new(Some(Persistence::broken_for_test()));
         let module = test_module(
-            StateLocatedClipSource::new(&history, &drawer, &persistence),
+            StateLocatedClipSource::new(&history, &drawer),
             RecordingClipboard(Arc::new(Mutex::new(Vec::new()))),
         );
         let locator = ClipLocator {
@@ -1271,7 +1245,7 @@ mod tests {
             Err(LocatedClipError::HistoryPersistence(_))
         ));
         assert_eq!(
-            history.lock().unwrap().get_clip("history-id").unwrap().note,
+            history.lock().unwrap().clip("history-id").unwrap().note,
             None
         );
     }
@@ -1293,13 +1267,12 @@ mod tests {
 
     #[test]
     fn production_source_errors_distinguish_not_found_and_drawer_unavailable() {
-        let history = Mutex::new(HistoryStore::new());
+        let history = Mutex::new(HistoryState::new(HistoryPolicy::default()));
         let available_drawer = Mutex::new(DrawerState::new(Some(FavoritesStore::from_conn(
             Connection::open_in_memory().unwrap(),
         ))));
-        let persistence = Mutex::new(None);
         let available = test_module(
-            StateLocatedClipSource::new(&history, &available_drawer, &persistence),
+            StateLocatedClipSource::new(&history, &available_drawer),
             RecordingClipboard(Arc::new(Mutex::new(Vec::new()))),
         );
 
@@ -1317,7 +1290,7 @@ mod tests {
 
         let unavailable_drawer = Mutex::new(DrawerState::new(None));
         let unavailable = test_module(
-            StateLocatedClipSource::new(&history, &unavailable_drawer, &persistence),
+            StateLocatedClipSource::new(&history, &unavailable_drawer),
             RecordingClipboard(Arc::new(Mutex::new(Vec::new()))),
         );
         assert_eq!(

@@ -2,6 +2,7 @@ mod clipboard;
 mod drawer;
 mod favorites;
 mod history;
+mod history_state;
 mod located_clip;
 mod migration;
 mod models;
@@ -11,7 +12,8 @@ mod update;
 
 use drawer::{DrawerMutation, DrawerState, DrawerViewInvalidation, DrawerViewState};
 use favorites::FavoritesStore;
-use history::HistoryStore;
+use history::HistoryPolicy;
+use history_state::HistoryState;
 use located_clip::{
     CopyOutcome, LocatedClipModule, LocatedClipWireError, StateLocatedClipSource,
     SystemLocatedClipPlatform,
@@ -21,7 +23,6 @@ use models::{
     CollectionSummary, FavoriteItem, PanelShortcut, PreviewPayload, CURRENT_TUTORIAL_VERSION,
 };
 use persistence::Persistence;
-use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
@@ -42,12 +43,12 @@ pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 struct AppState {
-    history: Arc<Mutex<HistoryStore>>,
+    /// Authoritative History aggregate: in-memory store, capacity policy,
+    /// optional persistence and the undo entry share one lock, so a mutation
+    /// can never interleave with another (same boundary as the Drawer).
+    history: Arc<Mutex<HistoryState>>,
     config: Arc<Mutex<AppConfig>>,
     monitor_running: Arc<Mutex<bool>>,
-    last_deleted: Arc<Mutex<Option<Clip>>>,
-    last_deleted_batch: Arc<Mutex<Option<Vec<Clip>>>>,
-    persistence: Arc<Mutex<Option<Persistence>>>,
     tray_items: Arc<Mutex<Option<TrayMenuItems>>>,
     /// Hotkey-registration failure that opened Settings at startup, shown
     /// inline there (CONTEXT: Hotkey conflict detection).
@@ -107,184 +108,49 @@ fn tray_labels(lang: &str) -> TrayLabels {
     }
 }
 
-/// Write-through to SQLite when persistence is enabled. The closure's Result
-/// propagates to the caller — a failed durable write must surface to the
-/// user, never be swallowed. Persistence disabled: pure in-memory success.
-/// Lock order: callers may hold the history/config locks across this — no
-/// code path takes the persistence lock and then a history/config lock, so
-/// the nesting cannot deadlock.
-fn persist_with<F>(state: &AppState, f: F) -> Result<(), String>
-where
-    F: FnOnce(&mut Persistence) -> Result<(), String>,
-{
-    let mut guard = lock(&state.persistence);
-    match guard.as_mut() {
-        Some(p) => f(p),
-        None => Ok(()),
-    }
-}
+/// Every History command is one aggregate call plus a wire mapping: the
+/// consistency policy lives in the History module, not in transport code.
 
 #[tauri::command]
 fn get_clips(state: tauri::State<AppState>) -> Vec<Clip> {
-    let history = lock(&state.history);
-    history.get_all_for_ipc()
-}
-
-fn delete_clip_impl(state: &AppState, id: &str) -> Result<(), String> {
-    // History is held across the DB write so the memory target and the
-    // durable row cannot drift apart mid-command. DB-first: the durable
-    // delete must succeed before memory (and the undo slot) change.
-    let deleted = {
-        let mut history = lock(&state.history);
-        let Some(clip) = history.get_clip(id) else {
-            return Err("Clip not found".to_string());
-        };
-        persist_with(state, |p| p.delete(id))?;
-        let removed = history.delete(id);
-        debug_assert_eq!(removed.map(|c| c.id), Some(clip.id.clone()));
-        // A newer single-item deletion invalidates any older batch undo.
-        lock(&state.last_deleted_batch).take();
-        clip
-    };
-    *lock(&state.last_deleted) = Some(deleted);
-    Ok(())
+    lock(&state.history).clips_for_ipc()
 }
 
 #[tauri::command]
 fn delete_clip(id: String, state: tauri::State<AppState>) -> Result<(), String> {
-    delete_clip_impl(&state, &id)
-}
-
-fn undo_delete_impl(state: &AppState, id: &str) -> Result<Clip, String> {
-    // Undo is keyed to the deleted Clip's id: only the most recent delete is
-    // restorable, and a stale undo request (e.g. from an outdated toast)
-    // must not restore some other Clip. Peeked, not taken: the slot survives
-    // any DB failure below.
-    let clip = {
-        let last = lock(&state.last_deleted);
-        match last.as_ref() {
-            Some(c) if c.id == id => c.clone(),
-            _ => return Err("Nothing to undo".to_string()),
-        }
-    };
-    // History + config are held across preview → DB transaction → insert so
-    // the planned evictions and the applied ones are provably the same set
-    // (the parity is also pinned by the history.rs planner tests). Lock
-    // order history → config → persistence has no reverse path anywhere.
-    let restored = {
-        let mut history = lock(&state.history);
-        let config = lock(&state.config);
-        let evicted = history.preview_evictions(&clip, &config);
-        persist_with(state, |p| p.persist_capture_with_evictions(&clip, &evicted))?;
-        let (restored, applied) = history.insert(clip, &config);
-        debug_assert_eq!(applied, evicted);
-        restored
-    };
-    // The DB commit succeeded: only now consume the undo slot.
-    {
-        let mut last = lock(&state.last_deleted);
-        if last.as_ref().is_some_and(|c| c.id == id) {
-            last.take();
-        }
-    }
-    Ok(restored)
+    lock(&state.history)
+        .delete(&id)
+        .map(|_| ())
+        .map_err(|e| e.message())
 }
 
 #[tauri::command]
 fn undo_delete(id: String, state: tauri::State<AppState>) -> Result<Clip, String> {
-    undo_delete_impl(&state, &id)
-}
-
-fn delete_clips_impl(state: &AppState, ids: &[String]) -> Result<(), String> {
-    if ids.is_empty() {
-        return Err("Batch must include at least one Clip".to_string());
-    }
-    let mut seen = HashSet::new();
-    if ids.iter().any(|id| !seen.insert(id.as_str())) {
-        return Err("Batch contains duplicate Clips".to_string());
-    }
-
-    let mut history = lock(&state.history);
-    let deleted = ids
-        .iter()
-        .map(|id| {
-            history
-                .get_clip(id)
-                .ok_or_else(|| "Clip not found".to_string())
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    persist_with(state, |p| p.delete_many(ids))?;
-    for id in ids {
-        let removed = history.delete(id);
-        debug_assert!(removed.is_some());
-    }
-    *lock(&state.last_deleted_batch) = Some(deleted);
-    lock(&state.last_deleted).take();
-    Ok(())
+    lock(&state.history)
+        .undo_delete(&id)
+        .map_err(|e| e.message())
 }
 
 #[tauri::command]
 fn delete_clips(ids: Vec<String>, state: tauri::State<AppState>) -> Result<(), String> {
-    delete_clips_impl(&state, &ids)
-}
-
-fn undo_delete_batch_impl(state: &AppState, ids: &[String]) -> Result<(), String> {
-    if ids.is_empty() {
-        return Err("Nothing to undo".to_string());
-    }
-
-    // Keep History + the batch slot locked through planning, persistence, and
-    // apply so a concurrent deletion cannot make a stale undo current again.
-    let mut history = lock(&state.history);
-    let mut batch_slot = lock(&state.last_deleted_batch);
-    let deleted = match batch_slot.as_ref() {
-        Some(clips)
-            if clips.len() == ids.len()
-                && clips.iter().zip(ids).all(|(clip, id)| clip.id == *id) =>
-        {
-            clips.clone()
-        }
-        _ => return Err("Nothing to undo".to_string()),
-    };
-
-    let config = lock(&state.config);
-    let mut planned = HistoryStore::new();
-    planned.clips = history.clips.clone();
-    for clip in deleted {
-        planned.insert(clip, &config);
-    }
-    persist_with(state, |p| p.dump(&planned.clips))?;
-    history.clips = planned.clips;
-    batch_slot.take();
-    Ok(())
+    lock(&state.history)
+        .delete_many(&ids)
+        .map(|_| ())
+        .map_err(|e| e.message())
 }
 
 #[tauri::command]
 fn undo_delete_batch(ids: Vec<String>, state: tauri::State<AppState>) -> Result<(), String> {
-    undo_delete_batch_impl(&state, &ids)
-}
-
-fn set_pinned_impl(state: &AppState, id: &str, pinned: bool) -> Result<(), String> {
-    // History is held across the DB write; on DB failure the memory flag is
-    // rolled back so memory state and the returned result always agree.
-    let mut history = lock(&state.history);
-    let old = history.get_clip(id).map(|c| c.pinned);
-    history.set_pinned(id, pinned)?; // validates pin limit + existence first
-    if let Err(e) = persist_with(state, |p| p.set_pinned(id, pinned)) {
-        // Rollback cannot hit the pin limit: pinning just occupied this
-        // clip's own slot, unpinning freed one.
-        history
-            .set_pinned(id, old.unwrap_or(pinned))
-            .map_err(|rollback| format!("{} (memory rollback failed: {})", e, rollback))?;
-        return Err(e);
-    }
-    Ok(())
+    lock(&state.history)
+        .undo_delete_batch(&ids)
+        .map_err(|e| e.message())
 }
 
 #[tauri::command]
 fn set_pinned(id: String, pinned: bool, state: tauri::State<AppState>) -> Result<(), String> {
-    set_pinned_impl(&state, &id, pinned)
+    lock(&state.history)
+        .set_pinned(&id, pinned)
+        .map_err(|e| e.message())
 }
 
 #[tauri::command]
@@ -318,21 +184,23 @@ pub(crate) fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Apply the persistence side of a config change. When enabling: open the
-/// database and dump the current in-memory History. When disabling: record the
-/// disable time as the durable last-cleanup gate, then drop the live connection
-/// — the DB file is left in place for a later startup to reconcile/purge.
+/// Apply the persistence side of a config change, through the aggregate. When
+/// enabling: the History module opens the database and atomically dumps the
+/// current in-memory History before entering write-through mode. When
+/// disabling: the durable last-cleanup gate is written before the connection
+/// is dropped — the DB file stays in place for a later startup to
+/// reconcile/purge. Any failure leaves the previous mode intact.
 fn apply_persist(state: &AppState, enabled: bool) -> Result<(), String> {
+    let mut history = lock(&state.history);
     if enabled {
-        let mut p = Persistence::open()?;
-        let clips = lock(&state.history).get_all();
-        p.dump(&clips)?;
-        *lock(&state.persistence) = Some(p);
+        history
+            .enable_persistence(Persistence::open)
+            .map_err(|e| e.message())
     } else {
-        let mut guard = lock(&state.persistence);
-        persistence::disable(&mut guard, now_ms())?;
+        history
+            .disable_persistence(now_ms())
+            .map_err(|e| e.message())
     }
-    Ok(())
 }
 
 /// Undo a persistence toggle after a later step failed.
@@ -474,8 +342,12 @@ fn update_config(
     let ui_scale_changed = new_config.ui_scale_percent != old_ui_scale;
 
     let mut config = lock(&state.config);
-    *config = new_config;
+    *config = new_config.clone();
     drop(config);
+    // Pure capacity-policy sync inside the aggregate: new limits apply from
+    // the next capture/restore, existing Clips are not re-trimmed (existing
+    // observable semantics).
+    lock(&state.history).set_policy(HistoryPolicy::from(&new_config));
 
     if preview_turned_off {
         hide_preview_window(&app);
@@ -528,11 +400,7 @@ fn located_clip_module(
 ) -> LocatedClipModule<StateLocatedClipSource<'_>, SystemLocatedClipPlatform> {
     let config = lock(&state.config);
     LocatedClipModule::new(
-        StateLocatedClipSource::new(
-            state.history.as_ref(),
-            state.drawer.as_ref(),
-            state.persistence.as_ref(),
-        ),
+        StateLocatedClipSource::new(state.history.as_ref(), state.drawer.as_ref()),
         SystemLocatedClipPlatform,
         config.paste_files_as_files,
         config.preview_enabled,
@@ -631,7 +499,7 @@ fn resolve_favorite_item(state: &AppState, locator: &ClipLocator) -> Result<Favo
     match locator.scope {
         ClipScope::History => {
             let clip = lock(&state.history)
-                .get_clip(&locator.id)
+                .clip(&locator.id)
                 .ok_or_else(|| "Clip not found".to_string())?;
             Ok(FavoriteItem::from(clip))
         }
@@ -647,7 +515,7 @@ fn resolve_favorite_item(state: &AppState, locator: &ClipLocator) -> Result<Favo
 fn resolve_content_hash(state: &AppState, locator: &ClipLocator) -> Result<String, String> {
     match locator.scope {
         ClipScope::History => lock(&state.history)
-            .get_clip(&locator.id)
+            .clip(&locator.id)
             .map(|c| c.content_hash)
             .ok_or_else(|| "Clip not found".to_string()),
         ClipScope::Drawer => Ok(locator.id.clone()),
@@ -914,10 +782,9 @@ fn track_first_seen(
 /// lifetime of the app; `tick` runs one poll iteration.
 struct Monitor {
     app: tauri::AppHandle,
-    history: Arc<Mutex<HistoryStore>>,
+    history: Arc<Mutex<HistoryState>>,
     config: Arc<Mutex<AppConfig>>,
     running: Arc<Mutex<bool>>,
-    persistence: Arc<Mutex<Option<Persistence>>>,
     /// Own exe name, so content Mnemark itself wrote (paste / copy-only
     /// while the Panel had focus) keeps its original source attribution.
     self_exe: String,
@@ -991,37 +858,42 @@ impl Monitor {
                 }
                 self.last_hash = Some((content_hash.clone(), now));
 
-                if !self.self_exe.is_empty() && clip.source_exe.eq_ignore_ascii_case(&self.self_exe)
-                {
-                    if let Some((exe, title)) = lock(&self.history).source_by_hash(&content_hash) {
-                        clip.source_exe = exe;
-                        clip.source_title = title;
-                    }
-                }
-
-                let (clip, evicted) = {
+                // Source attribution + capture share one aggregate lock; the
+                // capture commits durably before its memory state is
+                // published, so a failed write leaves no phantom Clip.
+                let stored = {
                     let mut history = lock(&self.history);
-                    history.insert(clip, &config)
-                };
-                {
-                    let mut guard = lock(&self.persistence);
-                    if let Some(p) = guard.as_mut() {
-                        if let Err(e) = p.persist_capture_with_evictions(&clip, &evicted) {
-                            // The monitor cannot surface a UI error. Minimal
-                            // observable strategy within the existing
-                            // architecture: unconditional stderr (visible
-                            // whenever the app runs with a console, release
-                            // included) plus a broadcast event; the iteration
-                            // always continues — clipboard capture must never
-                            // die on a DB error.
-                            eprintln!("[Mnemark] history persistence write failed: {}", e);
-                            let _ = self.app.emit("history-persistence-error", &e);
+                    if !self.self_exe.is_empty()
+                        && clip.source_exe.eq_ignore_ascii_case(&self.self_exe)
+                    {
+                        if let Some((exe, title)) = history.source_by_hash(&content_hash) {
+                            clip.source_exe = exe;
+                            clip.source_title = title;
                         }
                     }
+                    history.capture(clip)
+                };
+                match stored {
+                    Ok((clip, evicted)) => {
+                        // Events are not authoritative state: this only ever
+                        // describes an already-committed capture result.
+                        let _ = self
+                            .app
+                            .emit("clipboard-update", ClipboardUpdate { clip, evicted });
+                    }
+                    Err(e) => {
+                        // The monitor cannot surface a UI error. Minimal
+                        // observable strategy within the existing
+                        // architecture: unconditional stderr (visible
+                        // whenever the app runs with a console, release
+                        // included) plus a broadcast event; no success update
+                        // is emitted. The iteration always continues —
+                        // clipboard capture must never die on a DB error.
+                        let message = e.message();
+                        eprintln!("[Mnemark] history persistence write failed: {}", message);
+                        let _ = self.app.emit("history-persistence-error", &message);
+                    }
                 }
-                let _ = self
-                    .app
-                    .emit("clipboard-update", ClipboardUpdate { clip, evicted });
             }
             Err(clipboard::CaptureError::Locked) => {}
             Err(clipboard::CaptureError::Skip(reason)) => {
@@ -1036,10 +908,9 @@ impl Monitor {
 
 fn start_monitor(
     app_handle: tauri::AppHandle,
-    history: Arc<Mutex<HistoryStore>>,
+    history: Arc<Mutex<HistoryState>>,
     config: Arc<Mutex<AppConfig>>,
     monitor_running: Arc<Mutex<bool>>,
-    persistence: Arc<Mutex<Option<Persistence>>>,
 ) {
     std::thread::spawn(move || {
         let mut monitor = Monitor {
@@ -1047,7 +918,6 @@ fn start_monitor(
             history,
             config,
             running: monitor_running,
-            persistence,
             self_exe: std::env::current_exe()
                 .ok()
                 .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
@@ -1542,66 +1412,19 @@ pub fn run(_hidden: bool) {
     if config.favorites_toggle_shortcut.validate().is_err() {
         config.favorites_toggle_shortcut = PanelShortcut::default();
     }
-    let mut history_store = HistoryStore::new();
-
-    // Optional SQLite persistence: reload history left from previous runs, then
-    // run the 72h reconciliation when due. When disabled but a DB is left from
-    // a prior persist-enabled run, purge its stale rows after the grace period
-    // without enabling write-through.
-    let persistence = if config.persist {
-        match Persistence::open() {
-            Ok(mut p) => {
-                match p.load_all() {
-                    Ok(clips) => {
-                        for clip in clips {
-                            history_store.insert(clip, &config);
-                        }
-                    }
-                    Err(e) => log(&format!(
-                        "[Mnemark] failed to load persisted history: {}",
-                        e
-                    )),
-                }
-                // Reconcile against the loaded history (already trimmed by the
-                // current limits), so rows evicted by limits leave the DB too.
-                let active: Vec<&str> = history_store.clips.iter().map(|c| c.id.as_str()).collect();
-                if let Err(e) = p.reconcile_if_due(&active, now_ms()) {
-                    log(&format!(
-                        "[Mnemark] persistence reconciliation failed: {}",
-                        e
-                    ));
-                }
-                Some(p)
-            }
-            Err(e) => {
-                log(&format!(
-                    "[Mnemark] failed to open persistence database: {}",
-                    e
-                ));
-                None
-            }
-        }
-    } else if persistence::db_exists() {
-        match Persistence::open() {
-            Ok(mut p) => {
-                // Empty active set: with persistence off, nothing is "live", so
-                // every leftover row is stale and is purged once due.
-                if let Err(e) = p.reconcile_if_due(&[], now_ms()) {
-                    log(&format!(
-                        "[Mnemark] disabled-persistence cleanup failed: {}",
-                        e
-                    ));
-                }
-            }
-            Err(e) => log(&format!(
-                "[Mnemark] failed to open persistence database: {}",
-                e
-            )),
-        }
-        None
-    } else {
-        None
-    };
+    // History aggregate startup: optional SQLite persistence is loaded,
+    // reconciled (72h stale-row policy) and installed inside the module. Any
+    // failure degrades to memory-only operation with the existing
+    // diagnostics — the app still starts.
+    let (history_state, startup_diagnostics) = HistoryState::bootstrap(
+        &config,
+        now_ms(),
+        persistence::db_exists(),
+        Persistence::open,
+    );
+    for diagnostic in &startup_diagnostics {
+        log(&format!("[Mnemark] {diagnostic}"));
+    }
 
     // Favorites are always persisted, independent of the history `persist`
     // toggle: open the favorites store (its own tables in mnemark.db).
@@ -1613,12 +1436,9 @@ pub fn run(_hidden: bool) {
         }
     };
 
-    let history = Arc::new(Mutex::new(history_store));
+    let history = Arc::new(Mutex::new(history_state));
     let config_store = Arc::new(Mutex::new(config.clone()));
     let monitor_running = Arc::new(Mutex::new(true));
-    let last_deleted = Arc::new(Mutex::new(None));
-    let last_deleted_batch = Arc::new(Mutex::new(None));
-    let persistence = Arc::new(Mutex::new(persistence));
     let drawer = Arc::new(Mutex::new(DrawerState::new(favorites)));
     let tray_items = Arc::new(Mutex::new(None));
     let startup_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(migration_error));
@@ -1633,9 +1453,6 @@ pub fn run(_hidden: bool) {
             history: history.clone(),
             config: config_store.clone(),
             monitor_running: monitor_running.clone(),
-            last_deleted: last_deleted.clone(),
-            last_deleted_batch: last_deleted_batch.clone(),
-            persistence: persistence.clone(),
             tray_items: tray_items.clone(),
             startup_error: startup_error.clone(),
             preview: Arc::new(Mutex::new(None)),
@@ -1697,7 +1514,6 @@ pub fn run(_hidden: bool) {
                 history.clone(),
                 config_store.clone(),
                 monitor_running.clone(),
-                persistence.clone(),
             );
 
             // Background auto-update check (installed builds only, and only
@@ -2375,405 +2191,6 @@ mod tutorial_lifecycle_tests {
                 open_history: false
             }
         );
-    }
-}
-
-/// User-command consistency under injected persistence failures: a command
-/// must never report success without the durable write, nor fail while
-/// leaving memory/undo state saying otherwise.
-#[cfg(test)]
-mod persistence_consistency_tests {
-    use super::*;
-    use crate::models::{AppConfig, Clip, ClipKind};
-    use crate::persistence::Persistence;
-    use std::sync::atomic::AtomicU64;
-    use std::sync::{Arc, Mutex};
-
-    fn clip(id: &str, captured_at: u64) -> Clip {
-        Clip {
-            id: id.to_string(),
-            kind: ClipKind::Text,
-            text_content: Some(format!("content-{id}")),
-            file_paths: None,
-            image_data: None,
-            thumbnail_base64: None,
-            content_hash: format!("hash-{id}"),
-            preview: id.to_string(),
-            note: None,
-            truncated: false,
-            source_exe: "test.exe".to_string(),
-            source_title: String::new(),
-            source_icon: None,
-            captured_at,
-            pinned: false,
-            byte_size: 10,
-        }
-    }
-
-    fn app_state(persistence: Option<Persistence>, config: AppConfig) -> AppState {
-        AppState {
-            history: Arc::new(Mutex::new(HistoryStore::new())),
-            config: Arc::new(Mutex::new(config)),
-            monitor_running: Arc::new(Mutex::new(true)),
-            last_deleted: Arc::new(Mutex::new(None)),
-            last_deleted_batch: Arc::new(Mutex::new(None)),
-            persistence: Arc::new(Mutex::new(persistence)),
-            tray_items: Arc::new(Mutex::new(None)),
-            startup_error: Arc::new(Mutex::new(None)),
-            preview: Arc::new(Mutex::new(None)),
-            preview_generation: Arc::new(AtomicU64::new(0)),
-            drawer: Arc::new(Mutex::new(DrawerState::new(None))),
-            workspace_left_extent: Arc::new(Mutex::new(0)),
-            workspace_right_extent: Arc::new(Mutex::new(0)),
-        }
-    }
-
-    fn db_ids(state: &AppState) -> Vec<String> {
-        let guard = lock(&state.persistence);
-        let mut ids: Vec<String> = guard
-            .as_ref()
-            .unwrap()
-            .load_all()
-            .unwrap()
-            .into_iter()
-            .map(|c| c.id)
-            .collect();
-        ids.sort();
-        ids
-    }
-
-    fn memory_ids(state: &AppState) -> Vec<String> {
-        let mut ids: Vec<String> = lock(&state.history)
-            .clips
-            .iter()
-            .map(|c| c.id.clone())
-            .collect();
-        ids.sort();
-        ids
-    }
-
-    #[test]
-    fn delete_clip_db_failure_keeps_memory_and_undo_intact() {
-        let state = app_state(Some(Persistence::broken_for_test()), AppConfig::default());
-        lock(&state.history).insert(clip("c1", 1), &AppConfig::default());
-
-        assert!(delete_clip_impl(&state, "c1").is_err());
-        assert_eq!(memory_ids(&state), vec!["c1".to_string()]);
-        assert!(lock(&state.last_deleted).is_none());
-    }
-
-    #[test]
-    fn delete_clip_success_updates_memory_undo_and_db() {
-        let state = app_state(
-            Some(Persistence::in_memory_for_test()),
-            AppConfig::default(),
-        );
-        let cfg = AppConfig::default();
-        lock(&state.history).insert(clip("c1", 1), &cfg);
-        lock(&state.persistence)
-            .as_mut()
-            .unwrap()
-            .persist_capture_with_evictions(&clip("c1", 1), &[])
-            .unwrap();
-
-        delete_clip_impl(&state, "c1").unwrap();
-        assert!(memory_ids(&state).is_empty());
-        assert!(lock(&state.last_deleted)
-            .as_ref()
-            .is_some_and(|c| c.id == "c1"));
-        assert!(db_ids(&state).is_empty());
-    }
-
-    #[test]
-    fn delete_clip_missing_id_errors_without_side_effects() {
-        let state = app_state(
-            Some(Persistence::in_memory_for_test()),
-            AppConfig::default(),
-        );
-        assert_eq!(
-            delete_clip_impl(&state, "nope").unwrap_err(),
-            "Clip not found"
-        );
-        assert!(lock(&state.last_deleted).is_none());
-    }
-
-    #[test]
-    fn batch_delete_and_undo_update_memory_db_and_batch_slot() {
-        let state = app_state(
-            Some(Persistence::in_memory_for_test()),
-            AppConfig::default(),
-        );
-        let cfg = AppConfig::default();
-        for (id, captured_at) in [("c1", 1), ("c2", 2), ("c3", 3)] {
-            let value = clip(id, captured_at);
-            lock(&state.history).insert(value.clone(), &cfg);
-            lock(&state.persistence)
-                .as_mut()
-                .unwrap()
-                .persist_capture_with_evictions(&value, &[])
-                .unwrap();
-        }
-        let ids = vec!["c3".to_string(), "c1".to_string()];
-
-        delete_clips_impl(&state, &ids).unwrap();
-        assert_eq!(memory_ids(&state), vec!["c2".to_string()]);
-        assert_eq!(db_ids(&state), vec!["c2".to_string()]);
-        assert!(lock(&state.last_deleted).is_none());
-        assert_eq!(
-            lock(&state.last_deleted_batch)
-                .as_ref()
-                .unwrap()
-                .iter()
-                .map(|clip| clip.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["c3", "c1"]
-        );
-
-        undo_delete_batch_impl(&state, &ids).unwrap();
-        assert_eq!(
-            memory_ids(&state),
-            vec!["c1".to_string(), "c2".to_string(), "c3".to_string()]
-        );
-        assert_eq!(db_ids(&state), memory_ids(&state));
-        assert!(lock(&state.last_deleted_batch).is_none());
-    }
-
-    #[test]
-    fn batch_delete_validation_or_db_failure_has_no_side_effects() {
-        let state = app_state(Some(Persistence::broken_for_test()), AppConfig::default());
-        let cfg = AppConfig::default();
-        lock(&state.history).insert(clip("c1", 1), &cfg);
-        lock(&state.history).insert(clip("c2", 2), &cfg);
-
-        assert!(delete_clips_impl(&state, &["c1".to_string(), "c2".to_string()]).is_err());
-        assert_eq!(memory_ids(&state), vec!["c1".to_string(), "c2".to_string()]);
-        assert!(lock(&state.last_deleted_batch).is_none());
-
-        *lock(&state.persistence) = None;
-        assert!(delete_clips_impl(&state, &["c1".to_string(), "missing".to_string()]).is_err());
-        assert!(delete_clips_impl(&state, &["c1".to_string(), "c1".to_string()]).is_err());
-        assert_eq!(memory_ids(&state), vec!["c1".to_string(), "c2".to_string()]);
-        assert!(lock(&state.last_deleted_batch).is_none());
-    }
-
-    #[test]
-    fn batch_undo_db_failure_preserves_deleted_batch_and_history() {
-        let state = app_state(None, AppConfig::default());
-        let cfg = AppConfig::default();
-        lock(&state.history).insert(clip("c1", 1), &cfg);
-        lock(&state.history).insert(clip("c2", 2), &cfg);
-        let ids = vec!["c1".to_string(), "c2".to_string()];
-        delete_clips_impl(&state, &ids).unwrap();
-        *lock(&state.persistence) = Some(Persistence::broken_for_test());
-
-        assert!(undo_delete_batch_impl(&state, &ids).is_err());
-        assert!(memory_ids(&state).is_empty());
-        assert!(lock(&state.last_deleted_batch).is_some());
-        assert_eq!(
-            undo_delete_batch_impl(&state, &["c2".to_string(), "c1".to_string()]).unwrap_err(),
-            "Nothing to undo"
-        );
-    }
-
-    #[test]
-    fn batch_undo_applies_capacity_limits_atomically() {
-        let state = app_state(
-            Some(Persistence::in_memory_for_test()),
-            AppConfig {
-                text_count_limit: 2,
-                ..AppConfig::default()
-            },
-        );
-        let cfg = lock(&state.config).clone();
-        for (id, captured_at) in [("c1", 4), ("c2", 3)] {
-            let value = clip(id, captured_at);
-            lock(&state.history).insert(value.clone(), &cfg);
-            lock(&state.persistence)
-                .as_mut()
-                .unwrap()
-                .persist_capture_with_evictions(&value, &[])
-                .unwrap();
-        }
-        let ids = vec!["c1".to_string(), "c2".to_string()];
-        delete_clips_impl(&state, &ids).unwrap();
-
-        for (id, captured_at) in [("c3", 2), ("c4", 1)] {
-            let value = clip(id, captured_at);
-            let evicted = lock(&state.history).preview_evictions(&value, &cfg);
-            lock(&state.persistence)
-                .as_mut()
-                .unwrap()
-                .persist_capture_with_evictions(&value, &evicted)
-                .unwrap();
-            lock(&state.history).insert(value, &cfg);
-        }
-
-        undo_delete_batch_impl(&state, &ids).unwrap();
-        assert_eq!(memory_ids(&state), vec!["c1".to_string(), "c2".to_string()]);
-        assert_eq!(db_ids(&state), memory_ids(&state));
-    }
-
-    #[test]
-    fn newer_single_delete_invalidates_batch_undo() {
-        let state = app_state(None, AppConfig::default());
-        let cfg = AppConfig::default();
-        for (id, captured_at) in [("c1", 1), ("c2", 2), ("c3", 3)] {
-            lock(&state.history).insert(clip(id, captured_at), &cfg);
-        }
-        let batch_ids = vec!["c1".to_string(), "c2".to_string()];
-        delete_clips_impl(&state, &batch_ids).unwrap();
-        delete_clip_impl(&state, "c3").unwrap();
-
-        assert!(lock(&state.last_deleted_batch).is_none());
-        assert_eq!(
-            undo_delete_batch_impl(&state, &batch_ids).unwrap_err(),
-            "Nothing to undo"
-        );
-    }
-
-    #[test]
-    fn set_pinned_db_failure_rolls_back_memory() {
-        let state = app_state(Some(Persistence::broken_for_test()), AppConfig::default());
-        let cfg = AppConfig::default();
-        lock(&state.history).insert(clip("c1", 1), &cfg);
-
-        assert!(set_pinned_impl(&state, "c1", true).is_err());
-        assert!(!lock(&state.history).get_clip("c1").unwrap().pinned);
-    }
-
-    #[test]
-    fn set_pinned_success_updates_memory_and_db() {
-        let state = app_state(
-            Some(Persistence::in_memory_for_test()),
-            AppConfig::default(),
-        );
-        let cfg = AppConfig::default();
-        lock(&state.history).insert(clip("c1", 1), &cfg);
-        lock(&state.persistence)
-            .as_mut()
-            .unwrap()
-            .persist_capture_with_evictions(&clip("c1", 1), &[])
-            .unwrap();
-
-        set_pinned_impl(&state, "c1", true).unwrap();
-        assert!(lock(&state.history).get_clip("c1").unwrap().pinned);
-        assert!(
-            lock(&state.persistence)
-                .as_ref()
-                .unwrap()
-                .load_all()
-                .unwrap()[0]
-                .pinned
-        );
-    }
-
-    #[test]
-    fn set_pinned_pin_limit_rejected_before_db() {
-        let state = app_state(
-            Some(Persistence::in_memory_for_test()),
-            AppConfig {
-                text_count_limit: 20,
-                ..AppConfig::default()
-            },
-        );
-        let cfg = {
-            let c = lock(&state.config);
-            c.clone()
-        };
-        for i in 1..=11 {
-            lock(&state.history).insert(clip(&format!("p{i}"), i as u64), &cfg);
-        }
-        for i in 1..=10 {
-            set_pinned_impl(&state, &format!("p{i}"), true).unwrap();
-        }
-        // The 11th pin exceeds the limit and must be rejected by the memory
-        // validation — before any DB write happens.
-        assert_eq!(
-            set_pinned_impl(&state, "p11", true).unwrap_err(),
-            "Maximum 10 pinned Clips"
-        );
-        assert!(!lock(&state.history).get_clip("p11").unwrap().pinned);
-    }
-
-    #[test]
-    fn undo_delete_db_failure_preserves_last_deleted_and_history() {
-        // Healthy delete, then the DB breaks: undo must fail atomically.
-        let state = app_state(
-            Some(Persistence::in_memory_for_test()),
-            AppConfig::default(),
-        );
-        let cfg = AppConfig::default();
-        lock(&state.history).insert(clip("c1", 1), &cfg);
-        delete_clip_impl(&state, "c1").unwrap();
-        *lock(&state.persistence) = Some(Persistence::broken_for_test());
-
-        assert!(undo_delete_impl(&state, "c1").is_err());
-        assert!(lock(&state.last_deleted)
-            .as_ref()
-            .is_some_and(|c| c.id == "c1"));
-        assert!(
-            memory_ids(&state).is_empty(),
-            "history untouched by failed undo"
-        );
-    }
-
-    #[test]
-    fn undo_delete_success_is_atomic_with_evictions() {
-        // capacity 1: restoring c1 must evict c2 in memory AND in the DB,
-        // in one transaction.
-        let state = app_state(
-            Some(Persistence::in_memory_for_test()),
-            AppConfig {
-                text_count_limit: 1,
-                ..AppConfig::default()
-            },
-        );
-        let cfg = {
-            let c = lock(&state.config);
-            c.clone()
-        };
-        // c1 is newer than c2 so the capacity-1 restore evicts c2, not the
-        // restored clip itself (eviction goes by true age).
-        lock(&state.history).insert(clip("c1", 3), &cfg);
-        delete_clip_impl(&state, "c1").unwrap();
-        lock(&state.history).insert(clip("c2", 2), &cfg);
-        lock(&state.persistence)
-            .as_mut()
-            .unwrap()
-            .persist_capture_with_evictions(&clip("c2", 2), &[])
-            .unwrap();
-
-        let restored = undo_delete_impl(&state, "c1").unwrap();
-        assert_eq!(restored.id, "c1");
-        assert_eq!(memory_ids(&state), vec!["c1".to_string()]);
-        assert_eq!(db_ids(&state), vec!["c1".to_string()]);
-        assert!(lock(&state.last_deleted).is_none());
-    }
-
-    #[test]
-    fn undo_delete_stale_id_rejected() {
-        let state = app_state(
-            Some(Persistence::in_memory_for_test()),
-            AppConfig::default(),
-        );
-        assert_eq!(
-            undo_delete_impl(&state, "anything").unwrap_err(),
-            "Nothing to undo"
-        );
-    }
-
-    #[test]
-    fn disabled_persistence_keeps_pure_memory_success() {
-        let state = app_state(None, AppConfig::default());
-        let cfg = AppConfig::default();
-        lock(&state.history).insert(clip("c1", 1), &cfg);
-
-        delete_clip_impl(&state, "c1").unwrap();
-        assert!(lock(&state.last_deleted).is_some());
-        undo_delete_impl(&state, "c1").unwrap();
-        assert_eq!(memory_ids(&state), vec!["c1".to_string()]);
-        set_pinned_impl(&state, "c1", true).unwrap();
-        assert!(lock(&state.history).get_clip("c1").unwrap().pinned);
     }
 }
 

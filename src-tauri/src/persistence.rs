@@ -104,6 +104,46 @@ impl Persistence {
         Self { conn }
     }
 
+    /// Fault injection: schema initialized, then the meta table dropped, so
+    /// the 72-hour cleanup gate write fails deterministically.
+    #[cfg(test)]
+    pub(crate) fn meta_dropped_for_test() -> Self {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn.execute_batch("DROP TABLE meta").unwrap();
+        Self { conn }
+    }
+
+    /// Fault injection: reads still work, but every clips write aborts via
+    /// trigger, so tests can assert durable rows stayed unchanged after a
+    /// failed write. Seed rows BEFORE the triggers are installed (DELETE and
+    /// UPDATE triggers only fire for rows that actually match).
+    #[cfg(test)]
+    pub(crate) fn writes_fail_for_test() -> Self {
+        Self::writes_fail_seeded_for_test(&[])
+    }
+
+    #[cfg(test)]
+    pub(crate) fn writes_fail_seeded_for_test(seed: &[Clip]) -> Self {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        let mut p = Self { conn };
+        if !seed.is_empty() {
+            p.dump(seed).unwrap();
+        }
+        p.conn
+            .execute_batch(
+                "CREATE TRIGGER fail_insert BEFORE INSERT ON clips
+                 BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;
+                 CREATE TRIGGER fail_update BEFORE UPDATE ON clips
+                 BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;
+                 CREATE TRIGGER fail_delete BEFORE DELETE ON clips
+                 BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;",
+            )
+            .unwrap();
+        p
+    }
+
     /// Record the current time as the last-cleanup gate. Disabling persistence
     /// calls this so the leftover DB survives a 72-hour grace before a later
     /// startup reconciliation purges its now-stale rows.
@@ -168,23 +208,27 @@ impl Persistence {
         Ok(clips)
     }
 
-    /// Atomically persist a capture/restore and the capacity evictions it
-    /// causes: one transaction, all-or-nothing, so the DB never holds an
-    /// evicted row alongside its replacement (a partial write would resurrect
-    /// deleted Clips on the next startup load).
-    pub fn persist_capture_with_evictions(
+    /// Atomically apply a planned insert (capture, undo restore, batch
+    /// restore): upsert every stored Clip — a dedup collision resolves to the
+    /// existing row, keeping the database's id in sync with memory — and
+    /// delete every capacity-evicted id in one transaction, so the database
+    /// ends holding exactly the planned active set (a partial write would
+    /// resurrect deleted Clips on the next startup load).
+    pub fn persist_insert_with_evictions(
         &mut self,
-        clip: &Clip,
+        stored: &[Clip],
         evicted: &[String],
     ) -> Result<(), String> {
         let tx = self.conn.transaction().map_err(|e| e.to_string())?;
-        upsert_on(&tx, clip)?;
+        for clip in stored {
+            upsert_on(&tx, clip)?;
+        }
         for id in evicted {
             tx.execute("DELETE FROM clips WHERE id = ?1", params![id])
                 .map_err(|e| format!("Failed to delete evicted clip: {}", e))?;
         }
         tx.commit()
-            .map_err(|e| format!("Failed to commit capture write: {}", e))
+            .map_err(|e| format!("Failed to commit clip insert: {}", e))
     }
 
     /// Replace the entire table contents with the given Clips. Transactional:
@@ -418,15 +462,6 @@ mod tests {
         Persistence::from_conn(conn)
     }
 
-    /// A live connection whose `meta` table is gone, so `record_last_cleanup`
-    /// (an INSERT into `meta`) fails deterministically.
-    fn persistence_without_meta() -> Persistence {
-        let conn = Connection::open_in_memory().unwrap();
-        init_schema(&conn).unwrap();
-        conn.execute_batch("DROP TABLE meta").unwrap();
-        Persistence::from_conn(conn)
-    }
-
     fn clip(id: &str, hash: &str, captured_at: u64) -> Clip {
         Clip {
             id: id.to_string(),
@@ -446,6 +481,17 @@ mod tests {
             pinned: false,
             byte_size: 10,
         }
+    }
+
+    #[test]
+    fn insert_with_evictions_upserts_and_deletes_together() {
+        let mut p = test_persistence();
+        p.dump(&[clip("a", "ha", 1), clip("b", "hb", 2)]).unwrap();
+        p.persist_insert_with_evictions(&[clip("r", "hr", 3)], &["a".to_string()])
+            .unwrap();
+        let mut ids: Vec<String> = p.load_all().unwrap().into_iter().map(|c| c.id).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["b".to_string(), "r".to_string()]);
     }
 
     #[test]
@@ -519,7 +565,8 @@ mod tests {
         p.dump(std::slice::from_ref(&original)).unwrap();
 
         let duplicate = clip("c2", "same-hash", 2);
-        p.persist_capture_with_evictions(&duplicate, &[]).unwrap();
+        p.persist_insert_with_evictions(std::slice::from_ref(&duplicate), &[])
+            .unwrap();
         assert_eq!(p.load_all().unwrap()[0].note.as_deref(), Some("keep me"));
     }
 
@@ -654,7 +701,7 @@ mod tests {
 
     #[test]
     fn disable_keeps_connection_when_gate_write_fails() {
-        let mut opt = Some(persistence_without_meta());
+        let mut opt = Some(Persistence::meta_dropped_for_test());
         assert!(disable(&mut opt, 5_000_000).is_err());
         assert!(
             opt.is_some(),

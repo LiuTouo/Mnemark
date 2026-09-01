@@ -1221,8 +1221,8 @@ mod tests {
         store.add_favorite(&c.id, &item).unwrap();
 
         let mut history = crate::history::HistoryStore::new();
-        let cfg = crate::models::AppConfig::default();
-        history.insert(clip("h1", ClipKind::Text, "hash"), &cfg);
+        let policy = crate::history::HistoryPolicy::default();
+        history.insert(clip("h1", ClipKind::Text, "hash"), &policy);
         assert!(history.delete("h1").is_some()); // history entry gone
 
         assert_eq!(store.list_items(&c.id).unwrap().len(), 1);
