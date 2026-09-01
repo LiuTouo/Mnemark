@@ -4,6 +4,12 @@
 
 格式參考 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)，版本號遵循[語意化版本](https://semver.org/lang/zh-TW/)。
 
+## [0.7.5] - 2026-09-01
+
+### Added
+
+- 新增抽屜內容項目自訂排序；支援拖曳、選單上移／下移與重啟後保留順序，並維持拖到其他抽屜的複製操作
+
 ## [0.7.4] - 2026-08-31
 
 ### Fixed
@@ -422,6 +428,7 @@
 
 - 初始版本：剪貼簿監聽（文字／圖片／檔案路徑）、SHA-256 內容去重、容量限制與淘汰、釘選（上限 10 則、永不淘汰）、即時搜尋、Raycast 風格浮動面板（`Ctrl+Shift+V`）、貼上模擬、刪除復原、系統匣常駐、排除清單、深淺色主題跟隨系統、免安裝可攜（設定存於 exe 旁）
 
+[0.7.5]: https://github.com/LiuTouo/Mnemark/compare/v0.7.4...v0.7.5
 [0.7.4]: https://github.com/LiuTouo/Mnemark/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/LiuTouo/Mnemark/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/LiuTouo/Mnemark/compare/v0.7.1...v0.7.2
