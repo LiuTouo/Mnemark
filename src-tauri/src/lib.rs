@@ -736,6 +736,18 @@ fn reorder_collections(
 }
 
 #[tauri::command]
+fn reorder_favorite_items(
+    collection_id: String,
+    ids: Vec<String>,
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<(), String> {
+    with_favorites(&state, |f| f.reorder_items(&collection_id, &ids))?;
+    let _ = app.emit("favorites-updated", ());
+    Ok(())
+}
+
+#[tauri::command]
 fn add_favorite(
     collection_id: String,
     locator: ClipLocator,
@@ -2024,6 +2036,7 @@ pub fn run(_hidden: bool) {
             rename_collection,
             delete_collection,
             reorder_collections,
+            reorder_favorite_items,
             add_favorite,
             add_favorites,
             remove_favorite,

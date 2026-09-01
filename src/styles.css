@@ -559,6 +559,19 @@ html, body {
   box-shadow: var(--shadow-md);
 }
 
+#clip-list.reordering-items {
+  cursor: grabbing;
+}
+
+.clip-reorder-indicator {
+  height: 2px;
+  margin: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-subtle);
+  pointer-events: none;
+}
+
 .item-drag-preview {
   position: relative;
   z-index: 1200;

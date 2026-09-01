@@ -45,6 +45,7 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
             collection_id TEXT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
             item_id TEXT NOT NULL REFERENCES favorite_items(content_hash) ON DELETE CASCADE,
             added_at INTEGER NOT NULL,
+            sort_order INTEGER NOT NULL,
             PRIMARY KEY (collection_id, item_id)
         );
         CREATE INDEX IF NOT EXISTS idx_memberships_item ON memberships(item_id);",
@@ -64,6 +65,40 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
         conn.execute("ALTER TABLE favorite_items ADD COLUMN note TEXT", [])
             .map_err(|e| format!("Failed to migrate favorite_items note schema: {}", e))?;
     }
+    if !column_exists(conn, "memberships", "sort_order")? {
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| format!("Failed to start membership order migration: {}", e))?;
+        tx.execute(
+            "ALTER TABLE memberships ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| format!("Failed to migrate memberships order schema: {}", e))?;
+        let collection_ids = {
+            let mut stmt = tx
+                .prepare("SELECT id FROM collections")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(|e| e.to_string())?;
+            let mut ids = Vec::new();
+            for id in rows {
+                ids.push(id.map_err(|e| e.to_string())?);
+            }
+            ids
+        };
+        for collection_id in collection_ids {
+            compact_item_sort_orders(&tx, &collection_id)?;
+        }
+        tx.commit()
+            .map_err(|e| format!("Failed to commit membership order migration: {}", e))?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memberships_order
+         ON memberships(collection_id, sort_order)",
+        [],
+    )
+    .map_err(|e| format!("Failed to initialize membership order index: {}", e))?;
     Ok(())
 }
 
@@ -137,6 +172,39 @@ fn compact_sort_orders(conn: &Connection) -> Result<(), String> {
         conn.execute(
             "UPDATE collections SET sort_order = ?1 WHERE id = ?2",
             params![i as i64, id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Renumber one collection's membership order to a contiguous `0..n` while
+/// preserving its current order. The timestamp/hash fallback also reconstructs
+/// the historical newest-first order during the schema migration, when every
+/// newly added `sort_order` initially equals zero.
+fn compact_item_sort_orders(conn: &Connection, collection_id: &str) -> Result<(), String> {
+    let ids = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT item_id FROM memberships
+                 WHERE collection_id = ?1
+                 ORDER BY sort_order ASC, added_at DESC, item_id ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![collection_id], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        let mut ids = Vec::new();
+        for id in rows {
+            ids.push(id.map_err(|e| e.to_string())?);
+        }
+        ids
+    };
+    for (i, id) in ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE memberships SET sort_order = ?1
+             WHERE collection_id = ?2 AND item_id = ?3",
+            params![i as i64, collection_id, id],
         )
         .map_err(|e| e.to_string())?;
     }
@@ -433,6 +501,55 @@ impl FavoritesStore {
         Ok(())
     }
 
+    /// Reorder every item in one collection to exactly the supplied id
+    /// sequence. Validation happens before the transaction writes anything, so
+    /// duplicate, unknown, foreign, or missing ids cannot partially reorder a
+    /// drawer.
+    pub fn reorder_items(&mut self, collection_id: &str, ids: &[String]) -> Result<(), String> {
+        if !self.collection_exists(collection_id)? {
+            return Err("Collection not found".to_string());
+        }
+        let current = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT item_id FROM memberships WHERE collection_id = ?1")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(params![collection_id], |r| r.get::<_, String>(0))
+                .map_err(|e| e.to_string())?;
+            let mut current = Vec::new();
+            for id in rows {
+                current.push(id.map_err(|e| e.to_string())?);
+            }
+            current
+        };
+        let current_set: HashSet<&str> = current.iter().map(|id| id.as_str()).collect();
+        let mut seen = HashSet::new();
+        for id in ids {
+            if !seen.insert(id.as_str()) {
+                return Err(format!("Duplicate favorite item id '{}'", id));
+            }
+            if !current_set.contains(id.as_str()) {
+                return Err(format!("Unknown favorite item id '{}'", id));
+            }
+        }
+        if ids.len() != current.len() {
+            return Err("Reorder must include every favorite item".to_string());
+        }
+
+        let tx = self.conn.transaction().map_err(|e| e.to_string())?;
+        for (i, id) in ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE memberships SET sort_order = ?1
+                 WHERE collection_id = ?2 AND item_id = ?3",
+                params![i as i64, collection_id, id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     /// Add a favorite to a collection. Idempotent: re-adding the same content
     /// shares the existing snapshot and membership.
     pub fn add_favorite(&mut self, collection_id: &str, item: &FavoriteItem) -> Result<(), String> {
@@ -463,20 +580,46 @@ impl FavoritesStore {
 
         let added_at = crate::now_ms() as i64;
         let tx = self.conn.transaction().map_err(|e| e.to_string())?;
-        let mut changed = 0_u64;
-        for item in items {
-            upsert_favorite_item(&tx, item)?;
-            changed += tx
-                .execute(
-                    "INSERT INTO memberships (collection_id, item_id, added_at)
-                     VALUES (?1, ?2, ?3)
-                     ON CONFLICT(collection_id, item_id) DO NOTHING",
-                    params![collection_id, item.content_hash, added_at],
+        let new_items = {
+            let mut exists_stmt = tx
+                .prepare(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM memberships
+                        WHERE collection_id = ?1 AND item_id = ?2
+                     )",
                 )
-                .map_err(|e| e.to_string())? as u64;
+                .map_err(|e| e.to_string())?;
+            let mut new_items = Vec::new();
+            for item in items {
+                upsert_favorite_item(&tx, item)?;
+                let exists: bool = exists_stmt
+                    .query_row(params![collection_id, item.content_hash], |r| r.get(0))
+                    .map_err(|e| e.to_string())?;
+                if !exists {
+                    new_items.push(item);
+                }
+            }
+            new_items
+        };
+        if !new_items.is_empty() {
+            tx.execute(
+                "UPDATE memberships SET sort_order = sort_order + ?1
+                 WHERE collection_id = ?2",
+                params![new_items.len() as i64, collection_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        for (i, item) in new_items.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO memberships (collection_id, item_id, added_at, sort_order)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![collection_id, item.content_hash, added_at, i as i64],
+            )
+            .map_err(|e| e.to_string())?;
         }
         tx.commit().map_err(|e| e.to_string())?;
         let requested = items.len() as u64;
+        let changed = new_items.len() as u64;
         Ok(BatchMutationResult {
             requested,
             changed,
@@ -497,13 +640,30 @@ impl FavoritesStore {
         }
         let tx = self.conn.transaction().map_err(|e| e.to_string())?;
         upsert_favorite_item(&tx, item)?;
-        tx.execute(
-            "INSERT INTO memberships (collection_id, item_id, added_at)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(collection_id, item_id) DO NOTHING",
-            params![collection_id, item.content_hash, added_at as i64],
-        )
-        .map_err(|e| e.to_string())?;
+        let exists: bool = tx
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM memberships
+                    WHERE collection_id = ?1 AND item_id = ?2
+                 )",
+                params![collection_id, item.content_hash],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if !exists {
+            tx.execute(
+                "UPDATE memberships SET sort_order = sort_order + 1
+                 WHERE collection_id = ?1",
+                params![collection_id],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute(
+                "INSERT INTO memberships (collection_id, item_id, added_at, sort_order)
+                 VALUES (?1, ?2, ?3, 0)",
+                params![collection_id, item.content_hash, added_at as i64],
+            )
+            .map_err(|e| e.to_string())?;
+        }
         tx.commit().map_err(|e| e.to_string())?;
         Ok(())
     }
@@ -526,6 +686,7 @@ impl FavoritesStore {
             params![collection_id, item_id],
         )
         .map_err(|e| e.to_string())?;
+        compact_item_sort_orders(&tx, collection_id)?;
         delete_orphan_items(&tx)?;
         tx.commit().map_err(|e| e.to_string())?;
         Ok(())
@@ -559,6 +720,7 @@ impl FavoritesStore {
                 )
                 .map_err(|e| e.to_string())? as u64;
         }
+        compact_item_sort_orders(&tx, collection_id)?;
         delete_orphan_items(&tx)?;
         tx.commit().map_err(|e| e.to_string())?;
         let requested = item_ids.len() as u64;
@@ -569,8 +731,8 @@ impl FavoritesStore {
         })
     }
 
-    /// Items of one collection, newest membership first. Each item's `added_at`
-    /// is the membership timestamp; ties break deterministically by content hash.
+    /// Items of one collection in its durable custom order. Each item's
+    /// `added_at` remains the original membership timestamp.
     pub fn list_items(&self, collection_id: &str) -> Result<Vec<FavoriteItem>, String> {
         let mut stmt = self
             .conn
@@ -579,7 +741,7 @@ impl FavoritesStore {
                  FROM favorite_items f
                  JOIN memberships m ON m.item_id = f.content_hash
                  WHERE m.collection_id = ?1
-                 ORDER BY m.added_at DESC, f.content_hash ASC"
+                 ORDER BY m.sort_order ASC, m.added_at DESC, f.content_hash ASC"
             ))
             .map_err(|e| e.to_string())?;
         let rows = stmt
@@ -757,9 +919,17 @@ mod tests {
                 item_id TEXT NOT NULL REFERENCES favorite_items(content_hash) ON DELETE CASCADE,
                 added_at INTEGER NOT NULL, PRIMARY KEY (collection_id, item_id));
              INSERT INTO collections VALUES ('c1', 'Old', 'old', 0, 1);
-             INSERT INTO favorite_items VALUES ('old-hash', 'FilePaths', 'C:\\x.txt', NULL,
-                NULL, 'old', 0, 'x.exe', '', NULL, 1, 10);
-             INSERT INTO memberships VALUES ('c1', 'old-hash', 5);",
+             INSERT INTO favorite_items VALUES
+                ('old-hash', 'FilePaths', 'C:\\x.txt', NULL, NULL, 'old', 0,
+                 'x.exe', '', NULL, 1, 10),
+                ('new-hash', 'Text', 'new', NULL, NULL, 'new', 0,
+                 'x.exe', '', NULL, 2, 10),
+                ('mid-hash', 'Text', 'mid', NULL, NULL, 'mid', 0,
+                 'x.exe', '', NULL, 3, 10);
+             INSERT INTO memberships VALUES
+                ('c1', 'old-hash', 5),
+                ('c1', 'new-hash', 30),
+                ('c1', 'mid-hash', 20);",
         )
         .unwrap();
         let store = FavoritesStore::from_conn(conn); // from_conn runs init_schema (migrates)
@@ -767,8 +937,14 @@ mod tests {
         assert_eq!(item.file_paths, None); // legacy NULL → fallback
         assert_eq!(item.text_content.as_deref(), Some("C:\\x.txt"));
         let listed = store.list_items("c1").unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].added_at, Some(5));
+        let order: Vec<(&str, u64)> = listed
+            .iter()
+            .map(|item| (item.content_hash.as_str(), item.added_at.unwrap()))
+            .collect();
+        assert_eq!(
+            order,
+            vec![("new-hash", 30), ("mid-hash", 20), ("old-hash", 5)]
+        );
     }
 
     #[test]
@@ -847,25 +1023,33 @@ mod tests {
         let c = store.create_collection("Batch").unwrap();
         let first = FavoriteItem::from(clip("h1", ClipKind::Text, "first"));
         let second = FavoriteItem::from(clip("h2", ClipKind::Text, "second"));
+        let third = FavoriteItem::from(clip("h3", ClipKind::Text, "third"));
         store.add_favorite(&c.id, &first).unwrap();
 
         let result = store
-            .add_favorites(&c.id, &[first.clone(), second.clone()])
+            .add_favorites(&c.id, &[first.clone(), second.clone(), third])
             .unwrap();
         assert_eq!(
             result,
             BatchMutationResult {
-                requested: 2,
-                changed: 1,
+                requested: 3,
+                changed: 2,
                 unchanged: 1,
             }
         );
-        assert_eq!(store.list_items(&c.id).unwrap().len(), 2);
+        assert_eq!(store.list_items(&c.id).unwrap().len(), 3);
+        let order: Vec<String> = store
+            .list_items(&c.id)
+            .unwrap()
+            .into_iter()
+            .map(|item| item.content_hash)
+            .collect();
+        assert_eq!(order, vec!["second", "third", "first"]);
 
         assert!(store
             .add_favorites(&c.id, &[second.clone(), second])
             .is_err());
-        assert_eq!(store.list_items(&c.id).unwrap().len(), 2);
+        assert_eq!(store.list_items(&c.id).unwrap().len(), 3);
     }
 
     #[test]
@@ -975,6 +1159,49 @@ mod tests {
     }
 
     #[test]
+    fn item_reorder_is_atomic_validated_and_collection_local() {
+        let mut store = test_store();
+        let a = store.create_collection("A").unwrap();
+        let b = store.create_collection("B").unwrap();
+        for hash in ["one", "two", "three"] {
+            store
+                .add_favorite(&a.id, &FavoriteItem::from(clip(hash, ClipKind::Text, hash)))
+                .unwrap();
+        }
+        store
+            .add_favorite(
+                &b.id,
+                &FavoriteItem::from(clip("foreign", ClipKind::Text, "foreign")),
+            )
+            .unwrap();
+
+        assert!(store
+            .reorder_items(&a.id, &["one".into(), "one".into(), "two".into()])
+            .is_err());
+        assert!(store
+            .reorder_items(&a.id, &["one".into(), "two".into()])
+            .is_err());
+        assert!(store
+            .reorder_items(&a.id, &["one".into(), "two".into(), "foreign".into()])
+            .is_err());
+        assert!(store
+            .reorder_items(&a.id, &["one".into(), "two".into(), "missing".into()])
+            .is_err());
+
+        store
+            .reorder_items(&a.id, &["one".into(), "three".into(), "two".into()])
+            .unwrap();
+        let order: Vec<String> = store
+            .list_items(&a.id)
+            .unwrap()
+            .into_iter()
+            .map(|item| item.content_hash)
+            .collect();
+        assert_eq!(order, vec!["one", "three", "two"]);
+        assert_eq!(store.list_items(&b.id).unwrap()[0].content_hash, "foreign");
+    }
+
+    #[test]
     fn names_are_trimmed_bounded_and_case_insensitively_unique() {
         let store = test_store();
         assert!(store.create_collection("   ").is_err()); // empty after trim
@@ -1013,7 +1240,7 @@ mod tests {
     }
 
     #[test]
-    fn list_items_sets_added_at_and_orders_newest_first() {
+    fn newly_added_items_start_at_top_and_keep_membership_timestamp() {
         let mut store = test_store();
         let c = store.create_collection("A").unwrap();
         store
@@ -1045,33 +1272,57 @@ mod tests {
             .collect();
         assert_eq!(
             order,
-            vec![("hash-b", 300), ("hash-c", 200), ("hash-a", 100)]
+            vec![("hash-c", 200), ("hash-b", 300), ("hash-a", 100)]
+        );
+        store
+            .add_favorite_at(
+                &c.id,
+                &FavoriteItem::from(clip("h2-new", ClipKind::Text, "hash-b")),
+                400,
+            )
+            .unwrap();
+        let unchanged: Vec<(String, u64)> = store
+            .list_items(&c.id)
+            .unwrap()
+            .into_iter()
+            .map(|item| (item.content_hash, item.added_at.unwrap()))
+            .collect();
+        assert_eq!(
+            unchanged,
+            vec![
+                ("hash-c".to_string(), 200),
+                ("hash-b".to_string(), 300),
+                ("hash-a".to_string(), 100),
+            ]
         );
         // Fetched outside a collection, `added_at` is None.
         assert_eq!(store.get_item("hash-b").unwrap().unwrap().added_at, None);
     }
 
     #[test]
-    fn list_items_tie_breaks_by_content_hash() {
+    fn removing_item_compacts_membership_sort_orders() {
         let mut store = test_store();
         let c = store.create_collection("A").unwrap();
-        store
-            .add_favorite_at(
-                &c.id,
-                &FavoriteItem::from(clip("h1", ClipKind::Text, "hash-b")),
-                100,
-            )
-            .unwrap();
-        store
-            .add_favorite_at(
-                &c.id,
-                &FavoriteItem::from(clip("h2", ClipKind::Text, "hash-a")),
-                100,
-            )
-            .unwrap();
-        let items = store.list_items(&c.id).unwrap();
-        let order: Vec<&str> = items.iter().map(|i| i.content_hash.as_str()).collect();
-        assert_eq!(order, vec!["hash-a", "hash-b"]);
+        for hash in ["one", "two", "three"] {
+            store
+                .add_favorite(&c.id, &FavoriteItem::from(clip(hash, ClipKind::Text, hash)))
+                .unwrap();
+        }
+        store.remove_favorite(&c.id, "two").unwrap();
+        let sort_orders: Vec<i64> = {
+            let mut stmt = store
+                .conn
+                .prepare(
+                    "SELECT sort_order FROM memberships
+                     WHERE collection_id = ?1 ORDER BY sort_order",
+                )
+                .unwrap();
+            stmt.query_map(params![c.id], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(sort_orders, vec![0, 1]);
     }
 
     #[test]

@@ -61,6 +61,15 @@ describe("insertBefore / insertionIndex", () => {
     expect(insertBefore(["a", "b"], "b", "nope")).toEqual(["a", "b"]);
   });
 
+  it("keeps the canonical order when dropped at the current insertion point", () => {
+    expect(insertBefore(["a", "b", "c"], "b", "c")).toEqual(["a", "b", "c"]);
+  });
+
+  it("moves an item to either edge", () => {
+    expect(insertBefore(["a", "b", "c"], "c", "a")).toEqual(["c", "a", "b"]);
+    expect(insertBefore(["a", "b", "c"], "a", null)).toEqual(["b", "c", "a"]);
+  });
+
   it("reports the insertion index for a drop before a row", () => {
     expect(insertionIndex(["a", "b", "c", "d"], "d", "b")).toBe(1);
     expect(insertionIndex(["a", "b", "c"], "a", null)).toBe(2);

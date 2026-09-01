@@ -6,7 +6,7 @@ import { applyTheme } from "./theme";
 import { decidePreviewSync, PreviewController } from "./preview-state";
 import { ShortcutMatcher, FAVORITES_DEFAULT_CODES } from "./shortcut";
 import { ChooserGate, computeMenuPlacement } from "./menu";
-import { DragController, itemDragStartPayload, isFavoriteItem, clipLocator } from "./drag";
+import { DragController, itemDragStartPayload, isFavoriteItem, clipLocator, rectContains } from "./drag";
 import type { ItemDragPoint } from "./drag";
 import { classifyClip, filterItems } from "./dataset";
 import type { FilterKind } from "./dataset";
@@ -21,6 +21,7 @@ import {
 } from "./favorites";
 import { beginInlineDragCard, finishInlineDragCard, moveInlineDragCard } from "./drag-overlay";
 import "./preview";
+import { insertBefore, moveOne } from "./reorder";
 import type { BatchMutationResult, Clip, ClipboardUpdate, ClipLocator, CollectionSummary, FavoriteItem, FavoritesUiState } from "./types";
 
 type DisplayItem = Clip | FavoriteItem;
@@ -54,6 +55,11 @@ let activeDragSource: HTMLElement | null = null;
 // the sidebar can reject stale or cancelled drags.
 let dragSessionSeq = 0;
 let activeDragSessionId: number | null = null;
+let activeItemReorderId: string | null = null;
+let itemReorderBeforeId: string | null = null;
+let itemReorderInsideList = false;
+let itemReorderPointer: { x: number; y: number } | null = null;
+let itemReorderScrollFrame: number | null = null;
 const chooserGate = new ChooserGate();
 let lastMenuPos = { anchorTop: 0, anchorBottom: 0, right: 0 };
 const multiSelect = new MultiSelectState();
@@ -62,6 +68,9 @@ let batchChooserOpen = false;
 const searchInput = document.getElementById("search-input") as HTMLInputElement;
 const filterBar = document.getElementById("filter-bar")!;
 const clipList = document.getElementById("clip-list")!;
+const itemReorderIndicator = document.createElement("div");
+itemReorderIndicator.className = "clip-reorder-indicator";
+itemReorderIndicator.setAttribute("aria-hidden", "true");
 const emptyState = document.getElementById("empty-state")!;
 const emptyTitle = document.getElementById("empty-title")!;
 const emptyHint = document.getElementById("empty-hint")!;
@@ -128,6 +137,13 @@ function sortClips() {
 
 function activeDataset(): DisplayItem[] {
   return selectedCollection === null ? clips : favoriteItems;
+}
+
+function favoriteItemReorderEnabled(): boolean {
+  return selectedCollection !== null
+    && searchInput.value.length === 0
+    && activeFilter === "all"
+    && !multiSelect.active;
 }
 
 async function loadFavoritesContext() {
@@ -572,8 +588,11 @@ function render() {
     const dragHandle = document.createElement("button");
     dragHandle.type = "button";
     dragHandle.className = "clip-drag-handle";
-    dragHandle.setAttribute("aria-label", t("dragToDrawer"));
-    dragHandle.title = t("dragToDrawer");
+    const dragLabel = isFav && favoriteItemReorderEnabled()
+      ? t("dragToReorderOrDrawer")
+      : t("dragToDrawer");
+    dragHandle.setAttribute("aria-label", dragLabel);
+    dragHandle.title = dragLabel;
     dragHandle.appendChild(dragGripIcon());
     el.appendChild(dragHandle);
     attachRowDrag(el, dragHandle, item);
@@ -737,6 +756,14 @@ function renderActionMenu(item: DisplayItem) {
   }));
 
   if (isFav) {
+    const itemIndex = favoriteItems.findIndex((favorite) => favorite.id === item.id);
+    const reorderEnabled = favoriteItemReorderEnabled();
+    const moveUp = menuItem(t("moveUp"), () => void moveFavoriteItem(item.id, -1));
+    moveUp.disabled = !reorderEnabled || itemIndex <= 0;
+    actionMenu.appendChild(moveUp);
+    const moveDown = menuItem(t("moveDown"), () => void moveFavoriteItem(item.id, 1));
+    moveDown.disabled = !reorderEnabled || itemIndex < 0 || itemIndex >= favoriteItems.length - 1;
+    actionMenu.appendChild(moveDown);
     actionMenu.appendChild(menuItem(t("removeFromCollection"), () => {
       const fav = item as FavoriteItem;
       invoke("remove_favorite", { collectionId: selectedCollection, itemId: fav.id })
@@ -771,6 +798,22 @@ function menuItem(label: string, onClick: () => void, danger = false): HTMLButto
     onClick();
   });
   return b;
+}
+
+async function moveFavoriteItem(itemId: string, delta: number): Promise<void> {
+  const collectionId = selectedCollection;
+  if (!collectionId || !favoriteItemReorderEnabled()) return;
+  const currentIds = favoriteItems.map((item) => item.id);
+  const nextIds = moveOne(currentIds, currentIds.indexOf(itemId), delta);
+  if (nextIds.every((id, index) => id === currentIds[index])) return;
+  hideActionMenu();
+  try {
+    await invoke("reorder_favorite_items", { collectionId, ids: nextIds });
+    await loadFavoritesContext();
+  } catch (err) {
+    showToast(localizeBackendError(String(err)));
+    await loadFavoritesContext();
+  }
 }
 
 function hideActionMenu() {
@@ -1168,11 +1211,117 @@ function isSpaceKey(e: KeyboardEvent): boolean {
   return e.code === "Space" || e.key === " ";
 }
 
-// === Item drag source (to the sidebar) ===
-// Both history clips and drawer favorite items drag into a drawer collection
-// (a copy — the source row is never removed or moved). Source feedback is
-// added once the 6px threshold is crossed and cleared on drop/cancel; a cancel
-// is broadcast on abort so the sidebar drops any lingering drop-target state.
+// === Item drag source (to the sidebar or within the active drawer) ===
+// History clips drag into a drawer collection. Drawer items keep that copy
+// behavior when dropped over the sidebar, while a drop inside the unfiltered
+// center list persists a new item order.
+function stopItemReorderAutoScroll(): void {
+  if (itemReorderScrollFrame !== null) cancelAnimationFrame(itemReorderScrollFrame);
+  itemReorderScrollFrame = null;
+}
+
+function clearItemReorderFeedback(): void {
+  stopItemReorderAutoScroll();
+  activeItemReorderId = null;
+  itemReorderBeforeId = null;
+  itemReorderInsideList = false;
+  itemReorderPointer = null;
+  itemReorderIndicator.remove();
+  clipList.classList.remove("reordering-items");
+}
+
+function itemReorderScrollVelocity(point: { x: number; y: number }): number {
+  const rect = clipList.getBoundingClientRect();
+  if (!rectContains(rect, point.x, point.y)) return 0;
+  const edge = 40;
+  if (point.y < rect.top + edge) {
+    return -Math.max(3, Math.ceil((rect.top + edge - point.y) / 3));
+  }
+  if (point.y > rect.bottom - edge) {
+    return Math.max(3, Math.ceil((point.y - (rect.bottom - edge)) / 3));
+  }
+  return 0;
+}
+
+function placeItemReorderIndicator(itemId: string, point: { x: number; y: number }): void {
+  const listRect = clipList.getBoundingClientRect();
+  itemReorderInsideList = rectContains(listRect, point.x, point.y);
+  if (!itemReorderInsideList) {
+    itemReorderBeforeId = null;
+    itemReorderIndicator.remove();
+    return;
+  }
+
+  const rows = [...clipList.querySelectorAll<HTMLElement>('.clip-item[data-is-favorite="1"]')];
+  let beforeId: string | null = null;
+  for (const candidate of rows) {
+    if (candidate.dataset.clipId === itemId) continue;
+    const rect = candidate.getBoundingClientRect();
+    if (point.y < rect.top + rect.height / 2) {
+      beforeId = candidate.dataset.clipId ?? null;
+      break;
+    }
+  }
+  itemReorderBeforeId = beforeId;
+  const beforeRow = beforeId
+    ? clipList.querySelector<HTMLElement>(`.clip-item[data-clip-id="${CSS.escape(beforeId)}"]`)
+    : null;
+  if (beforeRow) clipList.insertBefore(itemReorderIndicator, beforeRow);
+  else clipList.appendChild(itemReorderIndicator);
+}
+
+function runItemReorderAutoScroll(): void {
+  itemReorderScrollFrame = null;
+  const itemId = activeItemReorderId;
+  const point = itemReorderPointer;
+  if (!itemId || !point) return;
+  const velocity = itemReorderScrollVelocity(point);
+  if (velocity === 0) return;
+  const previous = clipList.scrollTop;
+  clipList.scrollTop += velocity;
+  placeItemReorderIndicator(itemId, point);
+  if (clipList.scrollTop !== previous) {
+    itemReorderScrollFrame = requestAnimationFrame(runItemReorderAutoScroll);
+  }
+}
+
+function updateItemReorder(itemId: string, point: { x: number; y: number }): void {
+  if (activeItemReorderId !== itemId) return;
+  itemReorderPointer = point;
+  placeItemReorderIndicator(itemId, point);
+  const velocity = itemReorderScrollVelocity(point);
+  if (velocity === 0) {
+    stopItemReorderAutoScroll();
+  } else if (itemReorderScrollFrame === null) {
+    itemReorderScrollFrame = requestAnimationFrame(runItemReorderAutoScroll);
+  }
+}
+
+function commitItemReorder(
+  itemId: string,
+  sessionId: number,
+  point: { x: number; y: number },
+): boolean {
+  const collectionId = selectedCollection;
+  if (!collectionId || activeItemReorderId !== itemId || !favoriteItemReorderEnabled()) return false;
+  updateItemReorder(itemId, point);
+  if (!itemReorderInsideList) return false;
+
+  const currentIds = favoriteItems.map((item) => item.id);
+  const nextIds = insertBefore(currentIds, itemId, itemReorderBeforeId);
+  cancelInlineItemDrag(sessionId);
+  finishInlineDragCard(false);
+  clearItemReorderFeedback();
+  if (nextIds.every((id, index) => id === currentIds[index])) return true;
+  void invoke("reorder_favorite_items", { collectionId, ids: nextIds })
+    .then(() => loadFavoritesContext())
+    .catch(async (err) => {
+      showToast(localizeBackendError(String(err)));
+      await loadFavoritesContext();
+    });
+  return true;
+}
+
 function releaseDragSource(el: HTMLElement, cancel: boolean): void {
   if (activeDragSource === el) {
     activeDragSource = null;
@@ -1182,6 +1331,7 @@ function releaseDragSource(el: HTMLElement, cancel: boolean): void {
     }
     activeDragSessionId = null;
   }
+  clearItemReorderFeedback();
   el.classList.remove("dragging-source", "drag-held");
 }
 
@@ -1196,6 +1346,11 @@ function attachRowDrag(row: HTMLElement, handle: HTMLElement, item: DisplayItem)
     activeDragSessionId = dragSessionSeq;
     row.classList.add("dragging-source");
     activeDragSource = row;
+    if (isFavoriteItem(item) && favoriteItemReorderEnabled()) {
+      activeItemReorderId = item.id;
+      clipList.classList.add("reordering-items");
+      updateItemReorder(item.id, { x: e.clientX, y: e.clientY });
+    }
     handle.setPointerCapture(e.pointerId);
     const point = { x: e.clientX, y: e.clientY };
     const payload: ItemDragPoint = { sessionId: activeDragSessionId, locator, x: point.x, y: point.y };
@@ -1210,13 +1365,18 @@ function attachRowDrag(row: HTMLElement, handle: HTMLElement, item: DisplayItem)
     const payload: ItemDragPoint = { sessionId: activeDragSessionId, locator, x: p.x, y: p.y };
     moveInlineItemDrag(payload);
     moveInlineDragCard(payload);
+    if (activeItemReorderId === item.id) updateItemReorder(item.id, p);
   });
   handle.addEventListener("pointerup", (e) => {
     if (drag.didDrag && activeDragSessionId !== null) {
       const p = { x: e.clientX, y: e.clientY };
       const payload: ItemDragPoint = { sessionId: activeDragSessionId, locator, x: p.x, y: p.y };
-      void endInlineItemDrag(payload);
-      finishInlineDragCard(false);
+      const reordered = isFavoriteItem(item)
+        && commitItemReorder(item.id, activeDragSessionId, p);
+      if (!reordered) {
+        void endInlineItemDrag(payload);
+        finishInlineDragCard(false);
+      }
     }
     releaseDragSource(row, false);
     drag.pointerUp();
