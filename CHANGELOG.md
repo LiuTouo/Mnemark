@@ -4,6 +4,18 @@
 
 格式參考 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)，版本號遵循[語意化版本](https://semver.org/lang/zh-TW/)。
 
+## [0.7.6] - 2026-09-01
+
+### Changed
+
+- 將抽屜的清單、開關、選取與目前內容統一為具 generation 的一致性 view，由主面板與抽屜共用單一 freshness projection
+- 收攏主面板與抽屜的啟動、事件、重新載入及拖曳復原流程，移除舊的分散式 loaders、細粒度讀取指令與重複更新事件
+
+### Fixed
+
+- 修正抽屜初始化期間可能漏接更新，以及非同步回應亂序、重入讀取或舊狀態覆寫較新操作的競態
+- 抽屜資料 mutation 現在會等待 authoritative refresh，再顯示完成結果；重新整理失敗時保留最後有效內容並顯示正確的本地化錯誤
+
 ## [0.7.5] - 2026-09-01
 
 ### Added
@@ -428,6 +440,7 @@
 
 - 初始版本：剪貼簿監聽（文字／圖片／檔案路徑）、SHA-256 內容去重、容量限制與淘汰、釘選（上限 10 則、永不淘汰）、即時搜尋、Raycast 風格浮動面板（`Ctrl+Shift+V`）、貼上模擬、刪除復原、系統匣常駐、排除清單、深淺色主題跟隨系統、免安裝可攜（設定存於 exe 旁）
 
+[0.7.6]: https://github.com/LiuTouo/Mnemark/compare/v0.7.5...v0.7.6
 [0.7.5]: https://github.com/LiuTouo/Mnemark/compare/v0.7.4...v0.7.5
 [0.7.4]: https://github.com/LiuTouo/Mnemark/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/LiuTouo/Mnemark/compare/v0.7.2...v0.7.3
