@@ -1,7 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
-import { setLanguage, applyI18n, t, localizeBackendError, localizeDrawerError } from "./i18n";
+import {
+  setLanguage,
+  applyI18n,
+  t,
+  localizeBackendError,
+  localizeDrawerError,
+  localizeLocatedClipError,
+} from "./i18n";
 import { applyTheme } from "./theme";
 import { decidePreviewSync, PreviewController } from "./preview-state";
 import { ShortcutMatcher, FAVORITES_DEFAULT_CODES } from "./shortcut";
@@ -20,6 +27,7 @@ import type { DrawerView } from "./drawer-view";
 import type { DrawerDragCancelReason, DrawerDragSession } from "./drawer-drag";
 import { mountPreview } from "./preview";
 import { moveOne } from "./reorder";
+import { LocatedClipFacade } from "./located-clip";
 import type { BatchMutationResult, Clip, ClipboardUpdate, ClipLocator, FavoriteItem } from "./types";
 
 type DisplayItem = Clip | FavoriteItem;
@@ -33,7 +41,6 @@ let workspaceLayoutRevision = 0;
 let visibleClips: DisplayItem[] = [];
 let selectedIndex = -1;
 let vimMode = false;
-let pasteFilesAsFiles = true;
 let previewEnabled = true;
 let rememberHistoryFilter = false;
 let activeFilter: FilterKind = "all";
@@ -50,6 +57,19 @@ const drawerViewCoordinator = new DrawerViewCoordinator(drawerViewProjection, {
   presentError: (error) => showToast(localizeDrawerError(String(error))),
   presentStale: () => showToast(t("drawerRefreshFailed")),
   reportDiagnostic: (context, error) => console.error(`[Mnemark] ${context}`, error),
+});
+const locatedClip = new LocatedClipFacade({
+  invoke: (command, args) => invoke(command, args),
+  publishHistoryNote: (id, note) => {
+    const item = clips.find((candidate) => candidate.id === id);
+    if (item) item.note = note;
+  },
+  refreshDrawer: () => drawerViewCoordinator.refreshAfterMutation("Drawer note refresh failed"),
+  presentCopyOutcome: (outcome) => {
+    showToast(t(outcome === "missing-files-text-fallback" ? "filesMissingFallback" : "copied"));
+  },
+  isPreviewActive: (locator) => previewState.currentId === locator.id,
+  reportDiagnostic: (context, error) => console.error(`[Mnemark] ${context}:`, error),
 });
 
 const searchInput = document.getElementById("search-input") as HTMLInputElement;
@@ -95,14 +115,12 @@ async function refreshConfig() {
       vim_mode?: boolean;
       theme?: string;
       ui_opacity_percent?: number;
-      paste_files_as_files?: boolean;
       preview_enabled?: boolean;
       remember_history_filter?: boolean;
       favorites_toggle_shortcut?: { codes: string[] };
     }>("get_config");
     setLanguage(config.language || "zh-TW");
     vimMode = !!config.vim_mode;
-    pasteFilesAsFiles = config.paste_files_as_files !== false;
     previewEnabled = config.preview_enabled !== false;
     rememberHistoryFilter = !!config.remember_history_filter;
     applyTheme(config.theme || "system");
@@ -845,31 +863,12 @@ async function saveNote(): Promise<void> {
   if (!target) return;
   noteSave.disabled = true;
   try {
-    const isFavorite = target.scope === "favorite";
-    const command = isFavorite ? "set_favorite_note" : "set_clip_note";
-    const note = await invoke<string | null>(command, { id: target.id, note: noteInput.value });
-    if (isFavorite) {
-      if (!await drawerViewCoordinator.refreshAfterMutation("Drawer note refresh failed")) {
-        closeNoteModal();
-        return;
-      }
-    } else {
-      const item = clips.find((candidate) => candidate.id === target.id);
-      if (item) item.note = note;
-    }
+    const completion = await locatedClip.setNote(target, noteInput.value);
     closeNoteModal();
-    showToast(t("noteSaved"));
-    if (previewState.currentId === target.id) {
-      const previewCommand = isFavorite ? "show_favorite_preview" : "show_clip_preview";
-      void invoke(previewCommand, { id: target.id }).catch((err) => {
-        console.error("Failed to refresh preview note:", err);
-      });
-    }
+    if (completion.status === "published") showToast(t("noteSaved"));
   } catch (err) {
     noteSave.disabled = false;
-    showToast(target.scope === "favorite"
-      ? localizeDrawerError(String(err))
-      : localizeBackendError(String(err)));
+    showToast(localizeLocatedClipError(err, "drawerActionFailed"));
   }
 }
 
@@ -1050,78 +1049,20 @@ addMenu.addEventListener("click", (e) => {
 
 // === Actions ===
 async function pasteActive(item: DisplayItem) {
-  if (isFavoriteItem(item)) {
-    try {
-      await invoke<string>("paste_favorite", { id: item.id });
-    } catch (err) {
-      console.error("Paste failed:", err);
-      showToast(t("pasteFailed"));
-    }
-    return;
-  }
-  await pasteClip(item as Clip);
-}
-
-async function pasteClip(clip: Clip) {
   try {
-    switch (clip.kind) {
-      case "Text":
-        await invoke("paste_text", { text: clip.text_content || "" });
-        break;
-      case "FilePaths":
-        if (pasteFilesAsFiles) {
-          await invoke<string>("paste_files", { id: clip.id });
-        } else {
-          await invoke("paste_text", { text: clip.text_content || "" });
-        }
-        break;
-      case "Image":
-        await invoke("paste_image", { id: clip.id });
-        break;
-    }
+    await locatedClip.paste(clipLocator(item));
   } catch (err) {
     console.error("Paste failed:", err);
-    showToast(t("pasteFailed"));
+    showToast(localizeLocatedClipError(err, "pasteFailed"));
   }
 }
 
 async function copyActive(item: DisplayItem) {
-  if (isFavoriteItem(item)) {
-    try {
-      await invoke<string>("copy_favorite", { id: item.id });
-      showToast(t("copied"));
-    } catch (err) {
-      console.error("Copy failed:", err);
-      showToast(t("copyFailed"));
-    }
-    return;
-  }
-  await copyOnly(item as Clip);
-}
-
-async function copyOnly(clip: Clip) {
   try {
-    let toastKey = "copied";
-    switch (clip.kind) {
-      case "Text":
-        await invoke("copy_only_text", { text: clip.text_content || "" });
-        break;
-      case "FilePaths":
-        if (pasteFilesAsFiles) {
-          const outcome = await invoke<string>("copy_only_files", { id: clip.id });
-          if (outcome === "text") toastKey = "filesMissingFallback";
-        } else {
-          await invoke("copy_only_text", { text: clip.text_content || "" });
-        }
-        break;
-      case "Image":
-        await invoke("copy_only_image", { id: clip.id });
-        break;
-    }
-    showToast(t(toastKey));
+    await locatedClip.copy(clipLocator(item));
   } catch (err) {
     console.error("Copy failed:", err);
-    showToast(t("copyFailed"));
+    showToast(localizeLocatedClipError(err, "copyFailed"));
   }
 }
 
@@ -1172,14 +1113,13 @@ function showPreviewFor(item: DisplayItem) {
   const token = previewState.beginShow(item.id);
   workspaceTab = tabAfterPreviewIntent(workspaceTab, drawerIsOpen());
   void applyWorkspaceLayout();
-  const cmd = isFavoriteItem(item) ? "show_favorite_preview" : "show_clip_preview";
-  invoke(cmd, { id: item.id })
+  locatedClip.preview(clipLocator(item))
     .then(() => {
       previewState.resolveShow(token, item.id);
       void applyWorkspaceLayout();
     })
     .catch((err) => {
-      console.error("Failed to show preview:", err);
+      console.error("Failed to show preview:", localizeLocatedClipError(err));
       if (previewState.isCurrent(token)) resyncPreviewState();
     });
 }

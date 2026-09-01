@@ -2,6 +2,7 @@ mod clipboard;
 mod drawer;
 mod favorites;
 mod history;
+mod located_clip;
 mod migration;
 mod models;
 mod persistence;
@@ -11,8 +12,12 @@ mod update;
 use drawer::{DrawerMutation, DrawerState, DrawerViewInvalidation, DrawerViewState};
 use favorites::FavoritesStore;
 use history::HistoryStore;
+use located_clip::{
+    CopyOutcome, LocatedClipModule, LocatedClipWireError, StateLocatedClipSource,
+    SystemLocatedClipPlatform,
+};
 use models::{
-    AppConfig, BatchMutationResult, Clip, ClipKind, ClipLocator, ClipScope, ClipboardUpdate,
+    AppConfig, BatchMutationResult, Clip, ClipLocator, ClipScope, ClipboardUpdate,
     CollectionSummary, FavoriteItem, PanelShortcut, PreviewPayload, CURRENT_TUTORIAL_VERSION,
 };
 use persistence::Persistence;
@@ -282,34 +287,6 @@ fn set_pinned(id: String, pinned: bool, state: tauri::State<AppState>) -> Result
     set_pinned_impl(&state, &id, pinned)
 }
 
-fn normalize_note(note: String) -> Option<String> {
-    if note.trim().is_empty() {
-        None
-    } else {
-        Some(note)
-    }
-}
-
-fn set_clip_note_impl(state: &AppState, id: &str, note: Option<String>) -> Result<(), String> {
-    let mut history = lock(&state.history);
-    if history.get_clip(id).is_none() {
-        return Err("Clip not found".to_string());
-    }
-    persist_with(state, |p| p.set_note(id, note.as_deref()))?;
-    history.set_note(id, note)
-}
-
-#[tauri::command]
-fn set_clip_note(
-    id: String,
-    note: String,
-    state: tauri::State<AppState>,
-) -> Result<Option<String>, String> {
-    let note = normalize_note(note);
-    set_clip_note_impl(&state, &id, note.clone())?;
-    Ok(note)
-}
-
 #[tauri::command]
 fn get_config(state: tauri::State<AppState>) -> AppConfig {
     let config = lock(&state.config);
@@ -546,79 +523,77 @@ async fn hide_and_paste(app: &tauri::AppHandle) {
     }
 }
 
-#[tauri::command]
-async fn paste_text(app: tauri::AppHandle, text: String) -> Result<(), String> {
-    clipboard::write_text_to_clipboard(&text)?;
-    hide_and_paste(&app).await;
-    Ok(())
+fn located_clip_module(
+    state: &AppState,
+) -> LocatedClipModule<StateLocatedClipSource<'_>, SystemLocatedClipPlatform> {
+    let config = lock(&state.config);
+    LocatedClipModule::new(
+        StateLocatedClipSource::new(
+            state.history.as_ref(),
+            state.drawer.as_ref(),
+            state.persistence.as_ref(),
+        ),
+        SystemLocatedClipPlatform,
+        config.paste_files_as_files,
+        config.preview_enabled,
+    )
 }
 
-/// Fetch an Image Clip's raw DIB bytes from the History by id. Raw images
-/// never cross IPC (see models::Clip::image_data), so paste/copy ask the
-/// backend for the bytes at use time.
-fn image_data_by_id(state: &AppState, id: &str) -> Result<Vec<u8>, String> {
-    lock(&state.history).get_clip_image(id)
-}
-
 #[tauri::command]
-async fn paste_image(
+async fn paste_located_clip(
     app: tauri::AppHandle,
-    id: String,
+    locator: ClipLocator,
     state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
-    let image_data = image_data_by_id(&state, &id)?;
-    clipboard::write_image_to_clipboard(&image_data)?;
-    hide_and_paste(&app).await;
-    Ok(())
+) -> Result<CopyOutcome, LocatedClipWireError> {
+    located_clip_module(&state)
+        .paste(&locator, || hide_and_paste(&app))
+        .await
+        .map_err(LocatedClipWireError::from)
 }
 
 #[tauri::command]
-fn copy_only_text(text: String, _state: tauri::State<AppState>) -> Result<(), String> {
-    clipboard::write_text_to_clipboard(&text)
+fn copy_located_clip(
+    locator: ClipLocator,
+    state: tauri::State<AppState>,
+) -> Result<CopyOutcome, LocatedClipWireError> {
+    located_clip_module(&state)
+        .copy(&locator)
+        .map_err(LocatedClipWireError::from)
 }
 
 #[tauri::command]
-fn copy_only_image(id: String, state: tauri::State<AppState>) -> Result<(), String> {
-    let image_data = image_data_by_id(&state, &id)?;
-    clipboard::write_image_to_clipboard(&image_data)
-}
-
-/// Resolve a FilePaths Clip's canonical paths (structured `file_paths` when
-/// present; legacy rows fall back to the ambiguous ';'-split of the stored
-/// text) and write them as CF_HDROP. Returns "files" or "text" (all source
-/// files gone → path-text fallback).
-fn write_clip_files(clip: &Clip) -> Result<String, String> {
-    let text = clip.text_content.as_deref().unwrap_or("");
-    let paths: Vec<String> = match &clip.file_paths {
-        Some(p) => p.clone(),
-        None => clipboard::split_legacy_file_text(text),
-    };
-    clipboard::write_files_to_clipboard_from_paths(&paths, text)
-}
-
-/// Paste a FilePaths history entry as real files (CF_HDROP), resolving the
-/// canonical paths from backend state by clip id — the frontend never sends
-/// path text for the backend to split.
-#[tauri::command]
-async fn paste_files(
+async fn show_located_clip_preview(
+    locator: ClipLocator,
     app: tauri::AppHandle,
-    id: String,
     state: tauri::State<'_, AppState>,
-) -> Result<String, String> {
-    let clip = lock(&state.history)
-        .get_clip(&id)
-        .ok_or_else(|| "Clip not found".to_string())?;
-    let outcome = write_clip_files(&clip)?;
-    hide_and_paste(&app).await;
-    Ok(outcome)
+) -> Result<(), LocatedClipWireError> {
+    located_clip_module(&state)
+        .preview(
+            &locator,
+            state.preview_generation.as_ref(),
+            |generation, payload| commit_preview_on_main_thread(&app, generation, payload),
+        )
+        .await
+        .map_err(LocatedClipWireError::from)
 }
 
 #[tauri::command]
-fn copy_only_files(id: String, state: tauri::State<AppState>) -> Result<String, String> {
-    let clip = lock(&state.history)
-        .get_clip(&id)
-        .ok_or_else(|| "Clip not found".to_string())?;
-    write_clip_files(&clip)
+fn set_located_clip_note(
+    locator: ClipLocator,
+    note: String,
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<Option<String>, LocatedClipWireError> {
+    let commit = located_clip_module(&state)
+        .set_note(&locator, note)
+        .map_err(LocatedClipWireError::from)?;
+    if let Some(generation) = commit.drawer_generation {
+        let _ = app.emit(
+            "drawer-view-invalidated",
+            DrawerViewInvalidation { generation },
+        );
+    }
+    Ok(commit.note)
 }
 
 // === Drawer ===
@@ -660,7 +635,7 @@ fn resolve_favorite_item(state: &AppState, locator: &ClipLocator) -> Result<Favo
                 .ok_or_else(|| "Clip not found".to_string())?;
             Ok(FavoriteItem::from(clip))
         }
-        ClipScope::Favorite => with_drawer(state, |drawer| {
+        ClipScope::Drawer => with_drawer(state, |drawer| {
             drawer
                 .get_item(&locator.id)?
                 .ok_or_else(|| "Favorite item not found".to_string())
@@ -675,19 +650,8 @@ fn resolve_content_hash(state: &AppState, locator: &ClipLocator) -> Result<Strin
             .get_clip(&locator.id)
             .map(|c| c.content_hash)
             .ok_or_else(|| "Clip not found".to_string()),
-        ClipScope::Favorite => Ok(locator.id.clone()),
+        ClipScope::Drawer => Ok(locator.id.clone()),
     }
-}
-
-/// A favorite's stored snapshot as a full `Clip` (image bytes included), for
-/// reuse by the preview/paste/copy paths.
-fn favorite_as_clip(state: &AppState, id: &str) -> Result<Clip, String> {
-    let item = with_drawer(state, |drawer| {
-        drawer
-            .get_item(id)?
-            .ok_or_else(|| "Favorite item not found".to_string())
-    })?;
-    Ok(item.into_clip())
 }
 
 #[tauri::command]
@@ -813,90 +777,6 @@ fn favorite_collection_ids(
     with_drawer(&state, |drawer| drawer.collection_ids_for_item(&hash))
 }
 
-#[tauri::command]
-fn set_favorite_note(
-    id: String,
-    note: String,
-    app: tauri::AppHandle,
-    state: tauri::State<AppState>,
-) -> Result<Option<String>, String> {
-    let note = normalize_note(note);
-    mutate_drawer(&state, &app, |drawer| drawer.set_note(&id, note.as_deref()))?;
-    Ok(note)
-}
-
-/// Outcome string mirrors the history `paste_files` contract: `""` for a plain
-/// text/image paste (or files-as-text), `"files"` for a real CF_HDROP paste,
-/// `"text"` when the source files are gone and the path text was pasted instead.
-#[tauri::command]
-async fn paste_favorite(
-    app: tauri::AppHandle,
-    id: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<String, String> {
-    let clip = favorite_as_clip(&state, &id)?;
-    let outcome = match clip.kind {
-        ClipKind::Text => {
-            clipboard::write_text_to_clipboard(clip.text_content.as_deref().unwrap_or(""))?;
-            String::new()
-        }
-        ClipKind::Image => {
-            let data = clip.image_data.as_deref().ok_or("Image data missing")?;
-            clipboard::write_image_to_clipboard(data)?;
-            String::new()
-        }
-        ClipKind::FilePaths => {
-            if lock(&state.config).paste_files_as_files {
-                write_clip_files(&clip)?
-            } else {
-                clipboard::write_text_to_clipboard(clip.text_content.as_deref().unwrap_or(""))?;
-                String::new()
-            }
-        }
-    };
-    hide_and_paste(&app).await;
-    Ok(outcome)
-}
-
-#[tauri::command]
-fn copy_favorite(id: String, state: tauri::State<AppState>) -> Result<String, String> {
-    let clip = favorite_as_clip(&state, &id)?;
-    match clip.kind {
-        ClipKind::Text => {
-            clipboard::write_text_to_clipboard(clip.text_content.as_deref().unwrap_or(""))?;
-            Ok(String::new())
-        }
-        ClipKind::Image => {
-            let data = clip.image_data.as_deref().ok_or("Image data missing")?;
-            clipboard::write_image_to_clipboard(data)?;
-            Ok(String::new())
-        }
-        ClipKind::FilePaths => {
-            if lock(&state.config).paste_files_as_files {
-                write_clip_files(&clip)
-            } else {
-                clipboard::write_text_to_clipboard(clip.text_content.as_deref().unwrap_or(""))?;
-                Ok(String::new())
-            }
-        }
-    }
-}
-
-#[tauri::command]
-async fn show_favorite_preview(
-    id: String,
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
-    if !lock(&state.config).preview_enabled {
-        return Err("Preview is disabled".to_string());
-    }
-    let generation = state.preview_generation.fetch_add(1, Ordering::SeqCst) + 1;
-    let clip = favorite_as_clip(&state, &id)?;
-    let payload = build_preview_payload(clip)?;
-    commit_preview_on_main_thread(&app, generation, payload).await
-}
-
 /// Open/close the inline drawer pane. Closing clears the selection.
 #[tauri::command]
 fn set_favorites_open(
@@ -929,65 +809,11 @@ fn set_favorites_selected(
     Ok(())
 }
 
-/// Build the serializable preview payload for one Clip. For Image entries the
-/// stored DIB is decoded and re-encoded as a bounded display-only JPEG data
-/// URL — done here, outside any AppState/HistoryStore lock (see the caller).
-fn build_preview_payload(clip: Clip) -> Result<PreviewPayload, String> {
-    let image_preview_base64 = if clip.kind == ClipKind::Image {
-        let dib = clip
-            .image_data
-            .as_deref()
-            .ok_or_else(|| "Image data missing".to_string())?;
-        Some(clipboard::generate_preview_data_url(dib)?)
-    } else {
-        None
-    };
-    Ok(PreviewPayload {
-        id: clip.id,
-        kind: clip.kind,
-        text_content: clip.text_content,
-        image_preview_base64,
-        note: clip.note,
-        truncated: clip.truncated,
-        byte_size: clip.byte_size,
-        captured_at: clip.captured_at,
-        source_exe: clip.source_exe,
-        source_title: clip.source_title,
-    })
-}
-
 /// True when a show whose generation is `mine` is still the newest intent
 /// (`now` has not advanced past it). A later show or hide bumps the shared
 /// generation and supersedes every earlier claim.
 fn show_is_current(now: u64, mine: u64) -> bool {
     now == mine
-}
-
-#[tauri::command]
-async fn show_clip_preview(
-    id: String,
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
-    if !lock(&state.config).preview_enabled {
-        return Err("Preview is disabled".to_string());
-    }
-    // Claim a fresh generation before any work. Heavy DIB/JPEG/base64 work
-    // below runs on the async runtime (off the UI main thread); a later show
-    // or hide bumps the generation and supersedes us. SeqCst gives one total
-    // order over every show/hide intent, which is exactly what latest-wins
-    // needs — and is negligible for a token bumped a few times per interaction.
-    let generation = state.preview_generation.fetch_add(1, Ordering::SeqCst) + 1;
-
-    // Clone a single Clip (never get_all), then release the history lock
-    // before image decode.
-    let clip = lock(&state.history)
-        .get_clip(&id)
-        .ok_or_else(|| "Clip not found".to_string())?;
-
-    let payload = build_preview_payload(clip)?;
-
-    commit_preview_on_main_thread(&app, generation, payload).await
 }
 
 /// Commit a prepared preview to the UI on the Tauri main thread and hand the
@@ -1964,17 +1790,13 @@ pub fn run(_hidden: bool) {
             undo_delete,
             undo_delete_batch,
             set_pinned,
-            set_clip_note,
+            set_located_clip_note,
             get_config,
             take_startup_error,
             update_config,
-            paste_text,
-            paste_image,
-            copy_only_text,
-            copy_only_image,
-            paste_files,
-            copy_only_files,
-            show_clip_preview,
+            paste_located_clip,
+            copy_located_clip,
+            show_located_clip_preview,
             hide_clip_preview,
             hide_panel_command,
             set_main_modal_open,
@@ -1990,10 +1812,6 @@ pub fn run(_hidden: bool) {
             remove_favorite,
             remove_favorites,
             favorite_collection_ids,
-            set_favorite_note,
-            paste_favorite,
-            copy_favorite,
-            show_favorite_preview,
             set_favorites_open,
             toggle_favorites_sidebar,
             set_favorites_selected,
@@ -2846,57 +2664,6 @@ mod persistence_consistency_tests {
                 .load_all()
                 .unwrap()[0]
                 .pinned
-        );
-    }
-
-    #[test]
-    fn set_clip_note_success_updates_memory_and_db() {
-        let state = app_state(
-            Some(Persistence::in_memory_for_test()),
-            AppConfig::default(),
-        );
-        let cfg = AppConfig::default();
-        let value = clip("c1", 1);
-        lock(&state.history).insert(value.clone(), &cfg);
-        lock(&state.persistence)
-            .as_mut()
-            .unwrap()
-            .persist_capture_with_evictions(&value, &[])
-            .unwrap();
-
-        set_clip_note_impl(&state, "c1", Some("memo".to_string())).unwrap();
-        assert_eq!(
-            lock(&state.history).get_clip("c1").unwrap().note.as_deref(),
-            Some("memo")
-        );
-        assert_eq!(
-            lock(&state.persistence)
-                .as_ref()
-                .unwrap()
-                .load_all()
-                .unwrap()[0]
-                .note
-                .as_deref(),
-            Some("memo")
-        );
-    }
-
-    #[test]
-    fn set_clip_note_db_failure_leaves_memory_unchanged() {
-        let state = app_state(Some(Persistence::broken_for_test()), AppConfig::default());
-        let cfg = AppConfig::default();
-        lock(&state.history).insert(clip("c1", 1), &cfg);
-
-        assert!(set_clip_note_impl(&state, "c1", Some("memo".to_string())).is_err());
-        assert_eq!(lock(&state.history).get_clip("c1").unwrap().note, None);
-    }
-
-    #[test]
-    fn blank_note_normalizes_to_none() {
-        assert_eq!(normalize_note(" \n\t".to_string()), None);
-        assert_eq!(
-            normalize_note(" memo ".to_string()).as_deref(),
-            Some(" memo ")
         );
     }
 

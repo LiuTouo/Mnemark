@@ -529,7 +529,7 @@ function createProductionDrawerDrag(inlineDragCard: InlineDragCard): DrawerDragL
       const orderedItemIds = drawerItemRows()
         .map((row) => row.dataset.clipId ?? "")
         .filter((id) => id.length > 0);
-      if (start.locator.scope !== "favorite"
+      if (start.locator.scope !== "drawer"
         || !collectionId
         || (document.getElementById("search-input") as HTMLInputElement).value.length > 0
         || filter !== "all"

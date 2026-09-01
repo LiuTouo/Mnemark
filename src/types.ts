@@ -65,7 +65,7 @@ export interface BatchMutationResult {
   unchanged: number;
 }
 
-export type ClipScope = "history" | "favorite";
+export type ClipScope = "history" | "drawer";
 
 /** Identifies a clip by scope (see the backend `ClipLocator`). */
 export interface ClipLocator {

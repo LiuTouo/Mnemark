@@ -976,10 +976,7 @@ mod tests {
         annotated_clip.note = Some("from history".to_string());
         let annotated = FavoriteItem::from(annotated_clip);
         assert_eq!(annotated.note.as_deref(), Some("from history"));
-        assert_eq!(
-            annotated.clone().into_clip().note.as_deref(),
-            Some("from history")
-        );
+        assert_eq!(annotated.note.as_deref(), Some("from history"));
         store.add_favorite(&a.id, &annotated).unwrap();
 
         // Adding the same content from an unannotated source to another drawer

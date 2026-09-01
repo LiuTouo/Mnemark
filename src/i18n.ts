@@ -83,6 +83,11 @@ const I18N: Record<string, Record<string, string>> = {
     notePlaceholder: "輸入備註…",
     noteHint: "留空並儲存即可移除備註",
     noteSaved: "備註已儲存",
+    clipNotFound: "項目已不存在",
+    clipContentMissing: "項目內容不完整，無法執行此操作",
+    historyPersistenceFailed: "歷史備註無法儲存",
+    previewDisabledMessage: "預覽功能已停用",
+    previewPublicationFailed: "無法更新預覽",
     filesMissingFallback: "來源檔案已不存在，改複製路徑文字",
     pasteFailed: "貼上失敗，請重試（剪貼簿可能被其他程式佔用）",
     copyFailed: "複製失敗，請重試（剪貼簿可能被其他程式佔用）",
@@ -285,6 +290,11 @@ const I18N: Record<string, Record<string, string>> = {
     notePlaceholder: "Enter a note…",
     noteHint: "Save an empty note to remove it",
     noteSaved: "Note saved",
+    clipNotFound: "This item no longer exists",
+    clipContentMissing: "This item's content is incomplete and cannot be used",
+    historyPersistenceFailed: "The history note could not be saved",
+    previewDisabledMessage: "Preview is disabled",
+    previewPublicationFailed: "Preview could not be updated",
     filesMissingFallback: "Source files no longer exist — copied the path text instead",
     pasteFailed: "Paste failed — please try again (the clipboard may be busy)",
     copyFailed: "Copy failed — please try again (the clipboard may be busy)",
@@ -437,6 +447,11 @@ export function t(key: string, vars?: Record<string, string | number>): string {
 /** Map a backend error string (a stable frontend/backend protocol, always
  * English) to a localized message. Unknown strings pass through unchanged. */
 export function localizeBackendError(msg: string): string {
+  if (msg.includes("located_clip.not_found")) return t("clipNotFound");
+  if (msg.includes("located_clip.drawer_unavailable")) return t("drawerUnavailable");
+  if (msg.includes("located_clip.history_persistence")) return t("historyPersistenceFailed");
+  if (msg.includes("located_clip.missing_content")) return t("clipContentMissing");
+  if (msg.includes("located_clip.drawer_mutation")) return t("drawerActionFailed");
   if (msg.includes("Maximum") && msg.includes("pinned")) return t("pinLimitReached");
   if (msg.includes("Nothing to undo")) return t("nothingToUndo");
   if (msg.includes("Invalid hotkey")) return t("hotkeyInvalid");
@@ -444,6 +459,28 @@ export function localizeBackendError(msg: string): string {
   if (msg.includes("must include")) return t("hotkeyNeedModifier");
   if (msg.includes("Favorites unavailable")) return t("drawerUnavailable");
   return msg;
+}
+
+/** Map the structured located Clip command error once. `fallbackKey` keeps
+ * action-specific clipboard feedback for unknown/low-level failures. */
+export function localizeLocatedClipError(error: unknown, fallbackKey?: string): string {
+  const code = typeof error === "object" && error !== null && "code" in error
+    ? String((error as { code: unknown }).code)
+    : "";
+  switch (code) {
+    case "not_found": return t("clipNotFound");
+    case "drawer_unavailable": return t("drawerUnavailable");
+    case "history_persistence": return t("historyPersistenceFailed");
+    case "missing_content": return t("clipContentMissing");
+    case "clipboard_write": return t(fallbackKey || "copyFailed");
+    case "preview_disabled": return t("previewDisabledMessage");
+    case "preview_publication": return t("previewPublicationFailed");
+    case "drawer_mutation": return t("drawerActionFailed");
+    default: {
+      const legacy = localizeBackendError(String(error));
+      return legacy === String(error) && fallbackKey ? t(fallbackKey) : legacy;
+    }
+  }
 }
 
 export function localizeDrawerError(msg: string): string {

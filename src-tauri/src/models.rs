@@ -114,31 +114,6 @@ pub struct FavoriteItem {
     pub added_at: Option<u64>,
 }
 
-impl FavoriteItem {
-    /// Rebuild the `Clip` this snapshot came from, for reuse by the existing
-    /// preview/paste/copy paths (a favorite is pasted exactly like a Clip).
-    pub fn into_clip(self) -> Clip {
-        Clip {
-            id: self.id,
-            kind: self.kind,
-            text_content: self.text_content,
-            file_paths: self.file_paths,
-            image_data: self.image_data,
-            thumbnail_base64: self.thumbnail_base64,
-            content_hash: self.content_hash,
-            preview: self.preview,
-            note: self.note,
-            truncated: self.truncated,
-            source_exe: self.source_exe,
-            source_title: self.source_title,
-            source_icon: self.source_icon,
-            captured_at: self.captured_at,
-            pinned: false,
-            byte_size: self.byte_size,
-        }
-    }
-}
-
 impl From<Clip> for FavoriteItem {
     fn from(clip: Clip) -> Self {
         FavoriteItem {
@@ -182,8 +157,8 @@ pub struct BatchMutationResult {
     pub unchanged: u64,
 }
 
-/// Identifies a clip by scope for cross-referencing ("favorite this history
-/// item" / "copy this favorite into another collection").
+/// Identifies History or Drawer content without exposing either owner's
+/// storage representation to action callers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClipLocator {
     pub scope: ClipScope,
@@ -194,7 +169,8 @@ pub struct ClipLocator {
 #[serde(rename_all = "lowercase")]
 pub enum ClipScope {
     History,
-    Favorite,
+    #[serde(rename = "drawer", alias = "favorite")]
+    Drawer,
 }
 
 /// Keyboard chord (key codes) that opens the favorites sidebar. Stored in

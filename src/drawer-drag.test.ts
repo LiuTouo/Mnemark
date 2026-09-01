@@ -58,7 +58,7 @@ function startFact(
 function favoriteStartFact(fixtureId: number, snapshotId: string): FixtureItemStart {
   return {
     ...startFact(fixtureId),
-    locator: { scope: "favorite", id: snapshotId },
+    locator: { scope: "drawer", id: snapshotId },
     source: `drawer-row-${snapshotId}`,
   };
 }
@@ -120,7 +120,7 @@ class MemoryDrawerReorderAdapter implements DrawerDragReorderAdapter {
   failureRecovery: Promise<void> | null = null;
 
   context(start: DrawerDragItemContext) {
-    if (this.projection !== "all" || start.locator.scope !== "favorite") return null;
+    if (this.projection !== "all" || start.locator.scope !== "drawer") return null;
     return {
       collectionId: this.collectionId,
       itemId: start.locator.id,

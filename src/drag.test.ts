@@ -46,7 +46,7 @@ describe("clipLocator", () => {
   it("maps a history Clip to a history locator", () => {
     expect(clipLocator(clipFixture("clip-a"))).toEqual({ scope: "history", id: "clip-a" });
   });
-  it("maps a FavoriteItem to a favorite locator", () => {
-    expect(clipLocator(favoriteFixture("hash-x"))).toEqual({ scope: "favorite", id: "hash-x" });
+  it("maps a FavoriteItem to a Drawer snapshot locator", () => {
+    expect(clipLocator(favoriteFixture("hash-x"))).toEqual({ scope: "drawer", id: "hash-x" });
   });
 });

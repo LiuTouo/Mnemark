@@ -867,6 +867,10 @@ pub fn write_image_to_clipboard(data: &[u8]) -> Result<(), String> {
 /// copy), plus a CF_UNICODETEXT companion so non-file targets (Notepad etc.)
 /// still receive something pasteable. Both formats are set in one clipboard
 /// session; on success the system owns both handles.
+fn file_paths_companion_text(paths: &[String]) -> String {
+    paths.join("\r\n")
+}
+
 pub fn write_files_to_clipboard(paths: &[String]) -> Result<(), String> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
@@ -910,7 +914,7 @@ pub fn write_files_to_clipboard(paths: &[String]) -> Result<(), String> {
         let _ = GlobalUnlock(hdrop);
 
         // Companion text: paths joined with \r\n (Windows text convention).
-        let text = paths.join("\r\n");
+        let text = file_paths_companion_text(paths);
         let wide_text: Vec<u16> = OsStr::new(&text)
             .encode_wide()
             .chain(std::iter::once(0))
@@ -956,26 +960,9 @@ pub fn write_files_to_clipboard(paths: &[String]) -> Result<(), String> {
     }
 }
 
-/// Write a canonical path list, dropping paths that no longer exist. When
-/// EVERY path is gone, fall back to writing `text` so paste still does
-/// something. Returns "files" or "text" so the caller can surface the fallback.
-pub fn write_files_to_clipboard_from_paths(paths: &[String], text: &str) -> Result<String, String> {
-    let existing: Vec<String> = paths
-        .iter()
-        .filter(|p| std::path::Path::new(p).exists())
-        .cloned()
-        .collect();
-    if existing.is_empty() {
-        write_text_to_clipboard(text)?;
-        return Ok("text".to_string());
-    }
-    write_files_to_clipboard(&existing)?;
-    Ok("files".to_string())
-}
-
 #[cfg(test)]
 mod legacy_file_text_tests {
-    use super::split_legacy_file_text;
+    use super::{file_paths_companion_text, split_legacy_file_text};
 
     #[test]
     fn legacy_split_drops_empty_segments() {
@@ -984,6 +971,14 @@ mod legacy_file_text_tests {
             vec!["C:\\a", "C:\\b"]
         );
         assert!(split_legacy_file_text("").is_empty());
+    }
+
+    #[test]
+    fn file_path_companion_uses_windows_crlf_between_filtered_paths() {
+        assert_eq!(
+            file_paths_companion_text(&["C:\\one.txt".to_string(), "C:\\two.txt".to_string()]),
+            "C:\\one.txt\r\nC:\\two.txt"
+        );
     }
 }
 

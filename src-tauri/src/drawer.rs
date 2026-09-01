@@ -43,6 +43,10 @@ impl DrawerState {
         }
     }
 
+    pub(crate) fn has_favorites_store(&self) -> bool {
+        self.favorites.is_some()
+    }
+
     pub(crate) fn view(&self) -> Result<DrawerViewState, String> {
         let favorites = self
             .favorites
