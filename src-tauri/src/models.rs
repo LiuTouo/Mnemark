@@ -360,14 +360,6 @@ impl PanelShortcut {
     }
 }
 
-/// Session-only runtime state of the favorites sidebar: whether it is open and
-/// which collection (if any) is selected. Never persisted.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct FavoritesUiState {
-    pub open: bool,
-    pub selected_collection: Option<String>,
-}
-
 impl Clip {
     /// Generate a new unique ID based on content hash and timestamp.
     pub fn new_id(content_hash: &str, captured_at: u64) -> String {

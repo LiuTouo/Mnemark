@@ -621,7 +621,7 @@ fn copy_only_files(id: String, state: tauri::State<AppState>) -> Result<String, 
     write_clip_files(&clip)
 }
 
-// === Favorites ===
+// === Drawer ===
 
 /// Run a read against the authoritative Drawer aggregate.
 fn with_drawer<T>(

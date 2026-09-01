@@ -1,4 +1,4 @@
-// Inline favorites pane: collection list + History button, create/rename,
+// Inline Drawer pane: Collection list + History button, create/rename,
 // reorder, destructive remove modal, and the item-drop target.
 
 import { invoke } from "@tauri-apps/api/core";

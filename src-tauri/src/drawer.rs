@@ -1,11 +1,17 @@
 use serde::Serialize;
 
 use crate::favorites::FavoritesStore;
-use crate::models::{BatchMutationResult, CollectionSummary, FavoriteItem, FavoritesUiState};
+use crate::models::{BatchMutationResult, CollectionSummary, FavoriteItem};
+
+#[derive(Default)]
+struct DrawerUiState {
+    open: bool,
+    selected_collection: Option<String>,
+}
 
 pub(crate) struct DrawerState {
     favorites: Option<FavoritesStore>,
-    ui: FavoritesUiState,
+    ui: DrawerUiState,
     generation: u64,
 }
 
@@ -32,7 +38,7 @@ impl DrawerState {
     pub(crate) fn new(favorites: Option<FavoritesStore>) -> Self {
         Self {
             favorites,
-            ui: FavoritesUiState::default(),
+            ui: DrawerUiState::default(),
             generation: 0,
         }
     }
@@ -72,7 +78,7 @@ impl DrawerState {
 
     fn mutate<T>(
         &mut self,
-        operation: impl FnOnce(&mut FavoritesStore, &mut FavoritesUiState) -> Result<T, String>,
+        operation: impl FnOnce(&mut FavoritesStore, &mut DrawerUiState) -> Result<T, String>,
     ) -> Result<DrawerMutation<T>, String> {
         let next_generation = self
             .generation
@@ -93,7 +99,7 @@ impl DrawerState {
     pub(crate) fn set_selected(
         &mut self,
         collection_id: Option<String>,
-    ) -> Result<DrawerMutation<FavoritesUiState>, String> {
+    ) -> Result<DrawerMutation<()>, String> {
         self.mutate(|favorites, ui| {
             if let Some(id) = &collection_id {
                 if !favorites.collection_exists(id)? {
@@ -101,27 +107,24 @@ impl DrawerState {
                 }
             }
             ui.selected_collection = collection_id;
-            Ok(ui.clone())
+            Ok(())
         })
     }
 
-    pub(crate) fn set_open(
-        &mut self,
-        open: bool,
-    ) -> Result<DrawerMutation<FavoritesUiState>, String> {
-        self.mutate(|_, ui| Ok(Self::apply_open(ui, open)))
+    pub(crate) fn set_open(&mut self, open: bool) -> Result<DrawerMutation<()>, String> {
+        self.mutate(|_, ui| {
+            Self::apply_open(ui, open);
+            Ok(())
+        })
     }
 
-    pub(crate) fn delete_collection(
-        &mut self,
-        id: &str,
-    ) -> Result<DrawerMutation<FavoritesUiState>, String> {
+    pub(crate) fn delete_collection(&mut self, id: &str) -> Result<DrawerMutation<()>, String> {
         self.mutate(|favorites, ui| {
             favorites.delete_collection(id)?;
             if ui.selected_collection.as_deref() == Some(id) {
                 ui.selected_collection = None;
             }
-            Ok(ui.clone())
+            Ok(())
         })
     }
 
@@ -195,19 +198,19 @@ impl DrawerState {
         self.mutate(|favorites, _| favorites.set_note(id, note))
     }
 
-    pub(crate) fn toggle_open(&mut self) -> Result<DrawerMutation<FavoritesUiState>, String> {
+    pub(crate) fn toggle_open(&mut self) -> Result<DrawerMutation<()>, String> {
         self.mutate(|_, ui| {
             let open = !ui.open;
-            Ok(Self::apply_open(ui, open))
+            Self::apply_open(ui, open);
+            Ok(())
         })
     }
 
-    fn apply_open(ui: &mut FavoritesUiState, open: bool) -> FavoritesUiState {
+    fn apply_open(ui: &mut DrawerUiState, open: bool) {
         ui.open = open;
         if !open {
             ui.selected_collection = None;
         }
-        ui.clone()
     }
 }
 
@@ -272,10 +275,6 @@ mod tests {
         let view = state.view().unwrap();
 
         assert_eq!(mutation.generation, 1);
-        assert_eq!(
-            mutation.value.selected_collection,
-            Some(collection.id.clone())
-        );
         assert!(!view.open);
         assert_eq!(view.selected_collection, Some(collection.id));
         assert_eq!(view.active_snapshots.len(), 1);
@@ -297,8 +296,6 @@ mod tests {
         let view = state.view().unwrap();
 
         assert_eq!(mutation.generation, 3);
-        assert!(!mutation.value.open);
-        assert_eq!(mutation.value.selected_collection, None);
         assert!(!view.open);
         assert_eq!(view.selected_collection, None);
         assert!(view.active_snapshots.is_empty());
@@ -316,8 +313,6 @@ mod tests {
         let view = state.view().unwrap();
 
         assert_eq!(mutation.generation, 3);
-        assert!(mutation.value.open);
-        assert_eq!(mutation.value.selected_collection, None);
         assert!(view.open);
         assert_eq!(view.selected_collection, None);
         assert!(view.collections.is_empty());
