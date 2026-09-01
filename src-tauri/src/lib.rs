@@ -13,8 +13,7 @@ use favorites::FavoritesStore;
 use history::HistoryStore;
 use models::{
     AppConfig, BatchMutationResult, Clip, ClipKind, ClipLocator, ClipScope, ClipboardUpdate,
-    CollectionSummary, FavoriteItem, FavoritesUiState, PanelShortcut, PreviewPayload,
-    CURRENT_TUTORIAL_VERSION,
+    CollectionSummary, FavoriteItem, PanelShortcut, PreviewPayload, CURRENT_TUTORIAL_VERSION,
 };
 use persistence::Persistence;
 use std::collections::HashSet;
@@ -692,11 +691,6 @@ fn favorite_as_clip(state: &AppState, id: &str) -> Result<Clip, String> {
 }
 
 #[tauri::command]
-fn list_collections(state: tauri::State<AppState>) -> Result<Vec<CollectionSummary>, String> {
-    with_drawer(&state, |drawer| drawer.list_collections())
-}
-
-#[tauri::command]
 fn get_drawer_view(state: tauri::State<AppState>) -> Result<DrawerViewState, String> {
     with_drawer(&state, DrawerState::view)
 }
@@ -707,9 +701,7 @@ fn create_collection(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<CollectionSummary, String> {
-    let summary = mutate_drawer(&state, &app, |drawer| drawer.create_collection(&name))?;
-    let _ = app.emit("favorites-updated", ());
-    Ok(summary)
+    mutate_drawer(&state, &app, |drawer| drawer.create_collection(&name))
 }
 
 #[tauri::command]
@@ -719,9 +711,7 @@ fn rename_collection(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<CollectionSummary, String> {
-    let summary = mutate_drawer(&state, &app, |drawer| drawer.rename_collection(&id, &name))?;
-    let _ = app.emit("favorites-updated", ());
-    Ok(summary)
+    mutate_drawer(&state, &app, |drawer| drawer.rename_collection(&id, &name))
 }
 
 #[tauri::command]
@@ -730,9 +720,7 @@ fn delete_collection(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
-    let ui_state = mutate_drawer(&state, &app, |drawer| drawer.delete_collection(&id))?;
-    let _ = app.emit("favorites-updated", ());
-    let _ = app.emit("favorites-ui-state-changed", &ui_state);
+    mutate_drawer(&state, &app, |drawer| drawer.delete_collection(&id))?;
     Ok(())
 }
 
@@ -742,9 +730,7 @@ fn reorder_collections(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
-    mutate_drawer(&state, &app, |drawer| drawer.reorder_collections(&ids))?;
-    let _ = app.emit("favorites-updated", ());
-    Ok(())
+    mutate_drawer(&state, &app, |drawer| drawer.reorder_collections(&ids))
 }
 
 #[tauri::command]
@@ -756,9 +742,7 @@ fn reorder_favorite_items(
 ) -> Result<(), String> {
     mutate_drawer(&state, &app, |drawer| {
         drawer.reorder_items(&collection_id, &ids)
-    })?;
-    let _ = app.emit("favorites-updated", ());
-    Ok(())
+    })
 }
 
 #[tauri::command]
@@ -771,9 +755,7 @@ fn add_favorite(
     let item = resolve_favorite_item(&state, &locator)?;
     mutate_drawer(&state, &app, |drawer| {
         drawer.add_snapshot(&collection_id, &item)
-    })?;
-    let _ = app.emit("favorites-updated", ());
-    Ok(())
+    })
 }
 
 #[tauri::command]
@@ -790,11 +772,9 @@ fn add_favorites(
         .iter()
         .map(|locator| resolve_favorite_item(&state, locator))
         .collect::<Result<Vec<_>, _>>()?;
-    let result = mutate_drawer(&state, &app, |drawer| {
+    mutate_drawer(&state, &app, |drawer| {
         drawer.add_snapshots(&collection_id, &items)
-    })?;
-    let _ = app.emit("favorites-updated", ());
-    Ok(result)
+    })
 }
 
 #[tauri::command]
@@ -806,9 +786,7 @@ fn remove_favorite(
 ) -> Result<(), String> {
     mutate_drawer(&state, &app, |drawer| {
         drawer.remove_snapshot(&collection_id, &item_id)
-    })?;
-    let _ = app.emit("favorites-updated", ());
-    Ok(())
+    })
 }
 
 #[tauri::command]
@@ -818,19 +796,9 @@ fn remove_favorites(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<BatchMutationResult, String> {
-    let result = mutate_drawer(&state, &app, |drawer| {
+    mutate_drawer(&state, &app, |drawer| {
         drawer.remove_snapshots(&collection_id, &item_ids)
-    })?;
-    let _ = app.emit("favorites-updated", ());
-    Ok(result)
-}
-
-#[tauri::command]
-fn list_favorite_items(
-    collection_id: String,
-    state: tauri::State<AppState>,
-) -> Result<Vec<FavoriteItem>, String> {
-    with_drawer(&state, |drawer| drawer.list_items(&collection_id))
+    })
 }
 
 /// Which collections reference this clip (empty when not favorited). Lets the
@@ -854,7 +822,6 @@ fn set_favorite_note(
 ) -> Result<Option<String>, String> {
     let note = normalize_note(note);
     mutate_drawer(&state, &app, |drawer| drawer.set_note(&id, note.as_deref()))?;
-    let _ = app.emit("favorites-updated", ());
     Ok(note)
 }
 
@@ -930,13 +897,6 @@ async fn show_favorite_preview(
     commit_preview_on_main_thread(&app, generation, payload).await
 }
 
-// === Favorites UI state (session-only) ===
-
-#[tauri::command]
-fn get_favorites_ui_state(state: tauri::State<AppState>) -> FavoritesUiState {
-    lock(&state.drawer).ui_state()
-}
-
 /// Open/close the inline drawer pane. Closing clears the selection.
 #[tauri::command]
 fn set_favorites_open(
@@ -944,8 +904,7 @@ fn set_favorites_open(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
-    let ui_state = mutate_drawer(&state, &app, |drawer| drawer.set_open(open))?;
-    let _ = app.emit("favorites-ui-state-changed", &ui_state);
+    mutate_drawer(&state, &app, |drawer| drawer.set_open(open))?;
     Ok(())
 }
 
@@ -954,10 +913,9 @@ fn set_favorites_open(
 fn toggle_favorites_sidebar(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
-) -> Result<FavoritesUiState, String> {
-    let ui_state = mutate_drawer(&state, &app, DrawerState::toggle_open)?;
-    let _ = app.emit("favorites-ui-state-changed", &ui_state);
-    Ok(ui_state)
+) -> Result<(), String> {
+    mutate_drawer(&state, &app, DrawerState::toggle_open)?;
+    Ok(())
 }
 
 /// Select a collection (or `None` for history). Never changes `open`.
@@ -967,8 +925,7 @@ fn set_favorites_selected(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
-    let ui_state = mutate_drawer(&state, &app, |drawer| drawer.set_selected(collection_id))?;
-    let _ = app.emit("favorites-ui-state-changed", &ui_state);
+    mutate_drawer(&state, &app, |drawer| drawer.set_selected(collection_id))?;
     Ok(())
 }
 
@@ -2023,7 +1980,6 @@ pub fn run(_hidden: bool) {
             set_main_modal_open,
             get_active_clip_preview,
             get_drawer_view,
-            list_collections,
             create_collection,
             rename_collection,
             delete_collection,
@@ -2033,13 +1989,11 @@ pub fn run(_hidden: bool) {
             add_favorites,
             remove_favorite,
             remove_favorites,
-            list_favorite_items,
             favorite_collection_ids,
             set_favorite_note,
             paste_favorite,
             copy_favorite,
             show_favorite_preview,
-            get_favorites_ui_state,
             set_favorites_open,
             toggle_favorites_sidebar,
             set_favorites_selected,

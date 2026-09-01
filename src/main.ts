@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
-import { setLanguage, applyI18n, t, localizeBackendError } from "./i18n";
+import { setLanguage, applyI18n, t, localizeBackendError, localizeDrawerError } from "./i18n";
 import { applyTheme } from "./theme";
 import { decidePreviewSync, PreviewController } from "./preview-state";
 import { ShortcutMatcher, FAVORITES_DEFAULT_CODES } from "./shortcut";
@@ -12,22 +12,19 @@ import type { FilterKind } from "./dataset";
 import { MultiSelectState } from "./multi-select";
 import { decideWorkspaceLayout, escapeLayer, tabAfterPreviewIntent } from "./workspace-state";
 import type { WorkspaceTab } from "./workspace-state";
-import { mountDrawer } from "./favorites";
-import type { PanelDrawerController } from "./favorites";
+import { mountDrawerRenderer } from "./favorites";
+import type { PanelDrawerRenderer } from "./favorites";
+import { drawerViewProjection } from "./drawer-view-tauri";
+import type { DrawerView, DrawerViewIntentResult } from "./drawer-view";
 import type { DrawerDragCancelReason, DrawerDragSession } from "./drawer-drag";
 import { mountPreview } from "./preview";
 import { moveOne } from "./reorder";
-import type { BatchMutationResult, Clip, ClipboardUpdate, ClipLocator, CollectionSummary, FavoriteItem, FavoritesUiState } from "./types";
+import type { BatchMutationResult, Clip, ClipboardUpdate, ClipLocator, FavoriteItem } from "./types";
 
 type DisplayItem = Clip | FavoriteItem;
 
-let panelDrawerDrag: PanelDrawerController;
+let panelDrawer: PanelDrawerRenderer;
 let clips: Clip[] = [];
-let favoriteItems: FavoriteItem[] = [];
-let collections: CollectionSummary[] = [];
-let selectedCollection: string | null = null;
-let sidebarOpen = false;
-let sidebarStateRevision = 0;
 let workspaceTab: WorkspaceTab = "drawer";
 let workspaceLayoutRevision = 0;
 // The search-filtered view of the active dataset, in display order. Keyboard
@@ -116,50 +113,39 @@ function sortClips() {
   clips.sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.captured_at - a.captured_at);
 }
 
-function activeDataset(): DisplayItem[] {
-  return selectedCollection === null ? clips : favoriteItems;
+function currentDrawerView(): DrawerView | null {
+  return drawerViewProjection.currentView;
+}
+
+function selectedCollectionId(): string | null {
+  return currentDrawerView()?.selectedCollection ?? null;
+}
+
+function drawerSnapshots(): readonly FavoriteItem[] {
+  return currentDrawerView()?.activeSnapshots ?? [];
+}
+
+function drawerIsOpen(): boolean {
+  return currentDrawerView()?.open ?? false;
+}
+
+function activeDataset(): readonly DisplayItem[] {
+  return selectedCollectionId() === null ? clips : drawerSnapshots();
 }
 
 function favoriteItemReorderEnabled(): boolean {
-  return selectedCollection !== null
+  return selectedCollectionId() !== null
     && searchInput.value.length === 0
     && activeFilter === "all"
     && !multiSelect.active;
 }
 
-async function loadFavoritesContext() {
-  const sidebarRevision = sidebarStateRevision;
-  try {
-    const previousCollection = selectedCollection;
-    const [cols, state] = await Promise.all([
-      invoke<CollectionSummary[]>("list_collections"),
-      invoke<FavoritesUiState>("get_favorites_ui_state"),
-    ]);
-    collections = cols;
-    selectedCollection = state.selected_collection;
-    if (previousCollection !== selectedCollection) multiSelect.exit();
-    // A startup/event snapshot may have begun before a newer user toggle.
-    // Never let that older read overwrite the optimistic state of the click.
-    if (sidebarRevision === sidebarStateRevision) sidebarOpen = state.open;
-    if (selectedCollection !== null) {
-      favoriteItems = await invoke<FavoriteItem[]>("list_favorite_items", { collectionId: selectedCollection });
-    } else {
-      favoriteItems = [];
-    }
-    favoritesToggle.classList.toggle("active", sidebarOpen);
-    favoritesToggle.setAttribute("aria-pressed", String(sidebarOpen));
-    favoritesToggle.title = sidebarOpen ? t("sidebarClose") : t("sidebarOpen");
-    render();
-    void applyWorkspaceLayout();
-  } catch (err) {
-    console.error("Failed to load favorites context:", err);
-  }
-}
-
 function updateFavoritesToggleA11y() {
-  favoritesToggle.classList.toggle("active", sidebarOpen);
-  favoritesToggle.setAttribute("aria-pressed", String(sidebarOpen));
-  favoritesToggle.title = sidebarOpen ? t("sidebarClose") : t("sidebarOpen");
+  const open = drawerIsOpen();
+  favoritesToggle.classList.toggle("active", open);
+  favoritesToggle.setAttribute("aria-pressed", String(open));
+  favoritesToggle.setAttribute("aria-label", t(open ? "sidebarClose" : "sidebarOpen"));
+  favoritesToggle.title = t(open ? "sidebarClose" : "sidebarOpen");
   void applyWorkspaceLayout();
 }
 
@@ -171,7 +157,7 @@ async function applyWorkspaceLayout(): Promise<void> {
     : window.screen.availWidth;
   const layout = decideWorkspaceLayout(
     availableCssWidth,
-    sidebarOpen,
+    drawerIsOpen(),
     previewState.isOpen,
     workspaceTab,
   );
@@ -185,7 +171,7 @@ async function applyWorkspaceLayout(): Promise<void> {
   workspaceTabs.classList.toggle("hidden", layout.mode !== "compact" && layout.mode !== "overlay");
   drawerTab.setAttribute("aria-selected", String(layout.activeTab === "drawer"));
   previewTab.setAttribute("aria-selected", String(layout.activeTab === "preview"));
-  drawerTab.disabled = !sidebarOpen;
+  drawerTab.disabled = !drawerIsOpen();
   previewTab.disabled = !previewState.isOpen;
 
   await invoke("set_main_workspace_layout", {
@@ -194,18 +180,75 @@ async function applyWorkspaceLayout(): Promise<void> {
   }).catch((err) => console.error("Failed to resize workspace:", err));
 }
 
+function renderPanelDrawerView(next: DrawerView, previous: DrawerView | null): void {
+  if (previous?.selectedCollection !== next.selectedCollection) {
+    multiSelect.exit();
+    selectedIndex = 0;
+  }
+  if (next.open && previous?.open !== true) workspaceTab = "drawer";
+  favoritesToggle.disabled = false;
+  updateFavoritesToggleA11y();
+  render();
+}
+
+function publishDrawerView(next: DrawerView, previous: DrawerView | null): void {
+  try {
+    panelDrawer.cancel("source-removed");
+  } catch (error) {
+    console.error("Failed to cancel stale Drawer drag:", error);
+  }
+  try {
+    renderPanelDrawerView(next, previous);
+  } catch (error) {
+    console.error("Failed to render Panel Drawer view:", error);
+  }
+  try {
+    panelDrawer.render(next);
+  } catch (error) {
+    console.error("Failed to render Drawer navigation:", error);
+  }
+}
+
+function reportCommittedStale(
+  context: string,
+  result: DrawerViewIntentResult,
+): void {
+  if (result.status === "committed-stale") {
+    console.error(`[Mnemark] ${context}`, result.error);
+  }
+}
+
+async function refreshDrawerViewAfterMutation(context: string): Promise<boolean> {
+  try {
+    await drawerViewProjection.refresh();
+    return true;
+  } catch (error) {
+    console.error(`[Mnemark] ${context}`, error);
+    return false;
+  }
+}
+
 async function init() {
   await refreshConfig();
   applyI18n();
 
-  clips = await invoke("get_clips");
+  clips = await invoke<Clip[]>("get_clips");
   selectedIndex = 0;
-  await loadFavoritesContext();
   render();
+
+  try {
+    await drawerViewProjection.startup();
+  } catch (error) {
+    console.error("Failed to load initial Drawer view:", error);
+    showToast(t("drawerLoadFailed"));
+  }
 
   await getCurrentWindow().onFocusChanged(({ payload: focused }) => {
     if (!focused) return;
     resyncPreviewState();
+    void drawerViewProjection.retryIfStale().catch((error) => {
+      console.error("Failed to retry stale Drawer view:", error);
+    });
     refreshConfig().then(() => {
       applyI18n();
       updateFavoritesToggleA11y();
@@ -218,6 +261,14 @@ async function init() {
         activeFilter = "all";
       }
       render();
+      const view = currentDrawerView();
+      if (view) {
+        try {
+          panelDrawer.render(view);
+        } catch (error) {
+          console.error("Failed to relocalize Drawer navigation:", error);
+        }
+      }
       clipList.scrollTop = 0;
     });
   });
@@ -237,13 +288,6 @@ async function init() {
     render();
   });
 
-  // Favorites data + selection sync across both windows.
-  await listen<void>("favorites-updated", () => {
-    void loadFavoritesContext();
-  });
-  await listen<FavoritesUiState>("favorites-ui-state-changed", () => {
-    void loadFavoritesContext();
-  });
   await listen<void>("main-panel-reset", () => {
     closeNoteModal();
     exitMultiSelect(false);
@@ -275,16 +319,12 @@ async function init() {
 }
 
 async function toggleSidebar() {
-  const revision = ++sidebarStateRevision;
   try {
-    const state = await invoke<FavoritesUiState>("toggle_favorites_sidebar");
-    if (revision === sidebarStateRevision) {
-      sidebarOpen = state.open;
-      if (sidebarOpen) workspaceTab = "drawer";
-      updateFavoritesToggleA11y();
-    }
+    const result = await drawerViewProjection.toggle();
+    reportCommittedStale("Drawer toggle committed but refresh failed", result);
   } catch (err) {
     console.error("Failed to toggle drawer:", err);
+    showToast(localizeDrawerError(String(err)));
   }
 }
 
@@ -292,6 +332,7 @@ function onFavoritesShortcutKeydown(e: KeyboardEvent) {
   if (shortcutMatcher.keydown(e.code, e.repeat)) {
     e.preventDefault();
     e.stopPropagation();
+    if (currentDrawerView() === null) return;
     void toggleSidebar();
   }
 }
@@ -459,10 +500,11 @@ function updateSelectionToolbar(): void {
   selectionAll.textContent = t(allVisibleSelected ? "clearVisibleSelection" : "selectAllVisible");
   selectionAll.disabled = visibleIds.length === 0;
   selectionCount.textContent = t("selectedCount", { n: String(multiSelect.size) });
-  selectionAdd.textContent = t(selectedCollection === null ? "addToCollection" : "addToOtherCollection");
-  selectionDestructive.textContent = t(selectedCollection === null ? "deleteTitle" : "removeFromCollection");
+  const collectionId = selectedCollectionId();
+  selectionAdd.textContent = t(collectionId === null ? "addToCollection" : "addToOtherCollection");
+  selectionDestructive.textContent = t(collectionId === null ? "deleteTitle" : "removeFromCollection");
   const nothingSelected = multiSelect.size === 0;
-  selectionAdd.disabled = nothingSelected;
+  selectionAdd.disabled = nothingSelected || currentDrawerView() === null;
   selectionDestructive.disabled = nothingSelected;
 }
 
@@ -485,7 +527,7 @@ function render() {
   hideActionMenu();
 
   const scrollTop = clipList.scrollTop;
-  panelDrawerDrag.cancel("source-removed");
+  panelDrawer.cancel("source-removed");
   clipList.replaceChildren();
 
   const searching = query.length > 0;
@@ -496,9 +538,10 @@ function render() {
   emptyState.classList.toggle("hidden", !showEmpty);
   if (showEmpty) {
     if (totalEmpty) {
-      emptyTitle.textContent = selectedCollection === null ? t("emptyTitle") : t("favoritesEmptyTitle");
-      emptyHint.classList.toggle("hidden", selectedCollection !== null);
-      if (selectedCollection !== null) {
+      const collectionId = selectedCollectionId();
+      emptyTitle.textContent = collectionId === null ? t("emptyTitle") : t("favoritesEmptyTitle");
+      emptyHint.classList.toggle("hidden", collectionId !== null);
+      if (collectionId !== null) {
         emptyHint.textContent = t("favoritesEmptyHint");
         emptyHint.classList.remove("hidden");
       }
@@ -735,32 +778,38 @@ function renderActionMenu(item: DisplayItem) {
   }));
 
   if (isFav) {
-    const itemIndex = favoriteItems.findIndex((favorite) => favorite.id === item.id);
+    const snapshots = drawerSnapshots();
+    const itemIndex = snapshots.findIndex((favorite) => favorite.id === item.id);
     const reorderEnabled = favoriteItemReorderEnabled();
     const moveUp = menuItem(t("moveUp"), () => void moveFavoriteItem(item.id, -1));
     moveUp.disabled = !reorderEnabled || itemIndex <= 0;
     actionMenu.appendChild(moveUp);
     const moveDown = menuItem(t("moveDown"), () => void moveFavoriteItem(item.id, 1));
-    moveDown.disabled = !reorderEnabled || itemIndex < 0 || itemIndex >= favoriteItems.length - 1;
+    moveDown.disabled = !reorderEnabled || itemIndex < 0 || itemIndex >= snapshots.length - 1;
     actionMenu.appendChild(moveDown);
     actionMenu.appendChild(menuItem(t("removeFromCollection"), () => {
       const fav = item as FavoriteItem;
-      invoke("remove_favorite", { collectionId: selectedCollection, itemId: fav.id })
-        .then(() => {
-          showToast(t("removedFromFavorites"));
-          void loadFavoritesContext();
+      const collectionId = selectedCollectionId();
+      if (!collectionId) return;
+      void invoke("remove_favorite", { collectionId, itemId: fav.id })
+        .then(async () => {
+          if (await refreshDrawerViewAfterMutation("Drawer removal refresh failed")) {
+            showToast(t("removedFromFavorites"));
+          }
         })
-        .catch((err) => showToast(localizeBackendError(String(err))));
+        .catch((err) => showToast(localizeDrawerError(String(err))));
     }, true));
     actionMenu.appendChild(menuItem(t("addToOtherCollection"), () => {
       hideActionMenu();
       openAddChooser(item);
     }));
   } else {
-    actionMenu.appendChild(menuItem(t("addToCollection"), () => {
+    const addToCollection = menuItem(t("addToCollection"), () => {
       hideActionMenu();
       openAddChooser(item);
-    }));
+    });
+    addToCollection.disabled = currentDrawerView() === null;
+    actionMenu.appendChild(addToCollection);
     actionMenu.appendChild(menuItem(t("deleteTitle"), () => {
       deleteClip(item as Clip);
     }, true));
@@ -780,18 +829,18 @@ function menuItem(label: string, onClick: () => void, danger = false): HTMLButto
 }
 
 async function moveFavoriteItem(itemId: string, delta: number): Promise<void> {
-  const collectionId = selectedCollection;
+  const collectionId = selectedCollectionId();
   if (!collectionId || !favoriteItemReorderEnabled()) return;
-  const currentIds = favoriteItems.map((item) => item.id);
+  const currentIds = drawerSnapshots().map((item) => item.id);
   const nextIds = moveOne(currentIds, currentIds.indexOf(itemId), delta);
   if (nextIds.every((id, index) => id === currentIds[index])) return;
   hideActionMenu();
   try {
     await invoke("reorder_favorite_items", { collectionId, ids: nextIds });
-    await loadFavoritesContext();
+    await refreshDrawerViewAfterMutation("Drawer item reorder refresh failed");
   } catch (err) {
-    showToast(localizeBackendError(String(err)));
-    await loadFavoritesContext();
+    showToast(localizeDrawerError(String(err)));
+    await refreshDrawerViewAfterMutation("Drawer item reorder recovery failed");
   }
 }
 
@@ -836,9 +885,15 @@ async function saveNote(): Promise<void> {
     const isFavorite = target.scope === "favorite";
     const command = isFavorite ? "set_favorite_note" : "set_clip_note";
     const note = await invoke<string | null>(command, { id: target.id, note: noteInput.value });
-    const items = isFavorite ? favoriteItems : clips;
-    const item = items.find((candidate) => candidate.id === target.id);
-    if (item) item.note = note;
+    if (isFavorite) {
+      if (!await refreshDrawerViewAfterMutation("Drawer note refresh failed")) {
+        closeNoteModal();
+        return;
+      }
+    } else {
+      const item = clips.find((candidate) => candidate.id === target.id);
+      if (item) item.note = note;
+    }
     closeNoteModal();
     showToast(t("noteSaved"));
     if (previewState.currentId === target.id) {
@@ -849,7 +904,9 @@ async function saveNote(): Promise<void> {
     }
   } catch (err) {
     noteSave.disabled = false;
-    showToast(localizeBackendError(String(err)));
+    showToast(target.scope === "favorite"
+      ? localizeDrawerError(String(err))
+      : localizeBackendError(String(err)));
   }
 }
 
@@ -870,9 +927,16 @@ noteModal.addEventListener("keydown", (e) => {
 });
 
 // === Add-to-collection chooser ===
-function requestCreateCollection(): void {
-  void invoke("set_favorites_open", { open: true })
-    .then(() => panelDrawerDrag.requestCreateCollection());
+async function requestCreateCollection(): Promise<void> {
+  try {
+    const result = await drawerViewProjection.setOpen(true);
+    reportCommittedStale("Drawer open committed but refresh failed", result);
+    if (result.status === "published" && result.view.open) {
+      panelDrawer.requestCreate();
+    }
+  } catch (error) {
+    showToast(localizeDrawerError(String(error)));
+  }
 }
 
 function openAddChooser(item: DisplayItem) {
@@ -882,16 +946,17 @@ function openAddChooser(item: DisplayItem) {
   invoke<string[]>("favorite_collection_ids", { locator }).then((existing) => {
     if (!chooserGate.isCurrent(item.id, token)) return;
     renderAddChooser(locator, existing);
-  }).catch(() => {});
+  }).catch((error) => showToast(localizeDrawerError(String(error))));
 }
 
 function renderAddChooser(locator: ClipLocator, existing: string[]) {
   addMenu.replaceChildren();
+  const collections = currentDrawerView()?.collections ?? [];
 
   if (collections.length === 0) {
     const create = menuItem(t("createCollection"), () => {
       hideAddChooser();
-      requestCreateCollection();
+      void requestCreateCollection();
     });
     addMenu.appendChild(create);
   } else {
@@ -899,9 +964,13 @@ function renderAddChooser(locator: ClipLocator, existing: string[]) {
       const member = existing.includes(c.id);
       const b = menuItem(`${c.name}${member ? ` · ${t("addedToFavorites")}` : ""}`, () => {
         hideAddChooser();
-        invoke("add_favorite", { collectionId: c.id, locator })
-          .then(() => { showToast(t("addedToFavorites")); void loadFavoritesContext(); })
-          .catch((err) => showToast(localizeBackendError(String(err))));
+        void invoke("add_favorite", { collectionId: c.id, locator })
+          .then(async () => {
+            if (await refreshDrawerViewAfterMutation("Drawer membership refresh failed")) {
+              showToast(t("addedToFavorites"));
+            }
+          })
+          .catch((err) => showToast(localizeDrawerError(String(err))));
       });
       b.disabled = member;
       b.classList.toggle("menu-item-checked", member);
@@ -935,11 +1004,12 @@ function openBatchAddChooser(): void {
   actionMenu.classList.add("hidden");
   addMenu.replaceChildren();
 
-  const targets = collections.filter((collection) => collection.id !== selectedCollection);
+  const collections = currentDrawerView()?.collections ?? [];
+  const targets = collections.filter((collection) => collection.id !== selectedCollectionId());
   if (collections.length === 0) {
     addMenu.appendChild(menuItem(t("createCollection"), () => {
       exitMultiSelect();
-      requestCreateCollection();
+      void requestCreateCollection();
     }));
   } else if (targets.length === 0) {
     const none = menuItem(t("noOtherCollections"), () => {});
@@ -953,14 +1023,15 @@ function openBatchAddChooser(): void {
         void invoke<BatchMutationResult>("add_favorites", {
           collectionId: collection.id,
           locators,
-        }).then((result) => {
+        }).then(async (result) => {
           exitMultiSelect();
-          showToast(t("batchAdded", {
-            changed: String(result.changed),
-            unchanged: String(result.unchanged),
-          }));
-          void loadFavoritesContext();
-        }).catch((err) => showToast(localizeBackendError(String(err))));
+          if (await refreshDrawerViewAfterMutation("Drawer batch membership refresh failed")) {
+            showToast(t("batchAdded", {
+              changed: String(result.changed),
+              unchanged: String(result.unchanged),
+            }));
+          }
+        }).catch((err) => showToast(localizeDrawerError(String(err))));
       }));
     }
   }
@@ -974,7 +1045,7 @@ async function runBatchDestructiveAction(): Promise<void> {
   const items = selectedBatchItems();
   if (items.length === 0) return;
 
-  if (selectedCollection === null) {
+  if (selectedCollectionId() === null) {
     const ids = items.map((item) => item.id);
     try {
       await invoke("delete_clips", { ids });
@@ -996,20 +1067,20 @@ async function runBatchDestructiveAction(): Promise<void> {
     return;
   }
 
-  const collectionId = selectedCollection;
+  const collectionId = selectedCollectionId();
+  if (!collectionId) return;
   const itemIds = items.map((item) => item.id);
   try {
     const result = await invoke<BatchMutationResult>("remove_favorites", {
       collectionId,
       itemIds,
     });
-    const removed = new Set(itemIds);
-    favoriteItems = favoriteItems.filter((item) => !removed.has(item.id));
     exitMultiSelect();
-    showToast(t("batchRemoved", { n: String(result.changed) }));
-    void loadFavoritesContext();
+    if (await refreshDrawerViewAfterMutation("Drawer batch removal refresh failed")) {
+      showToast(t("batchRemoved", { n: String(result.changed) }));
+    }
   } catch (err) {
-    showToast(localizeBackendError(String(err)));
+    showToast(localizeDrawerError(String(err)));
   }
 }
 
@@ -1142,7 +1213,7 @@ async function closePanel() {
 function showPreviewFor(item: DisplayItem) {
   if (!previewEnabled || previewState.currentId === item.id) return;
   const token = previewState.beginShow(item.id);
-  workspaceTab = tabAfterPreviewIntent(workspaceTab, sidebarOpen);
+  workspaceTab = tabAfterPreviewIntent(workspaceTab, drawerIsOpen());
   void applyWorkspaceLayout();
   const cmd = isFavoriteItem(item) ? "show_favorite_preview" : "show_clip_preview";
   invoke(cmd, { id: item.id })
@@ -1205,23 +1276,23 @@ function attachRowDrag(row: HTMLElement, handle: HTMLElement, item: DisplayItem)
     e.preventDefault();
     e.stopPropagation();
     handle.setPointerCapture(e.pointerId);
-    session = panelDrawerDrag.start(item, row, { x: e.clientX, y: e.clientY });
+    session = panelDrawer.start(item, row, { x: e.clientX, y: e.clientY });
   });
   handle.addEventListener("pointermove", (e) => {
     if (session === null) return;
-    panelDrawerDrag.move(session, { x: e.clientX, y: e.clientY });
+    panelDrawer.move(session, { x: e.clientX, y: e.clientY });
   });
   handle.addEventListener("pointerup", (e) => {
     if (session === null) return;
     const ending = session;
     session = null;
-    void panelDrawerDrag.end(ending, { x: e.clientX, y: e.clientY });
+    void panelDrawer.end(ending, { x: e.clientX, y: e.clientY });
   });
   const cancel = (reason: DrawerDragCancelReason) => {
     if (session === null) return;
     const cancelled = session;
     session = null;
-    panelDrawerDrag.cancel(reason, cancelled);
+    panelDrawer.cancel(reason, cancelled);
   };
   handle.addEventListener("pointercancel", () => cancel("pointercancel"));
   handle.addEventListener("lostpointercapture", () => cancel("lostpointercapture"));
@@ -1359,7 +1430,7 @@ document.addEventListener("keydown", (e) => {
       return;
     case "Escape":
       e.preventDefault();
-      if (panelDrawerDrag.cancel("explicit") !== null) return;
+      if (panelDrawer.cancel("explicit") !== null) return;
       const removeModal = document.getElementById("remove-modal")!;
       const favoritesMenu = document.getElementById("favorites-more-menu")!;
       const transientOpen = multiSelect.active
@@ -1369,7 +1440,7 @@ document.addEventListener("keydown", (e) => {
         || batchChooserOpen
         || !removeModal.classList.contains("hidden")
         || !favoritesMenu.classList.contains("hidden");
-      const layer = escapeLayer(transientOpen, previewState.isOpen, sidebarOpen);
+      const layer = escapeLayer(transientOpen, previewState.isOpen, drawerIsOpen());
       if (layer === "modal-or-menu" && multiSelect.active) {
         exitMultiSelect();
         return;
@@ -1392,7 +1463,9 @@ document.addEventListener("keydown", (e) => {
         return;
       }
       if (layer === "drawer") {
-        void invoke("set_favorites_open", { open: false });
+        void drawerViewProjection.setOpen(false)
+          .then((result) => reportCommittedStale("Drawer close committed but refresh failed", result))
+          .catch((error) => showToast(localizeDrawerError(String(error))));
         return;
       }
       if (inSearch && vimMode) {
@@ -1428,7 +1501,7 @@ window.addEventListener("keydown", (e) => {
 // Focus loss (alt-tab, minimize) aborts an in-flight handle drag so the row
 // doesn't stay stuck in a held/dragging state.
 window.addEventListener("blur", () => {
-  panelDrawerDrag.cancel("window-blur");
+  panelDrawer.cancel("window-blur");
 });
 
 searchInput.addEventListener("input", () => {
@@ -1462,7 +1535,8 @@ document.body.addEventListener("click", (e) => {
 
 // === Initialize ===
 window.addEventListener("DOMContentLoaded", () => {
-  panelDrawerDrag = mountDrawer();
+  panelDrawer = mountDrawerRenderer(drawerViewProjection);
+  drawerViewProjection.subscribe(publishDrawerView);
   void mountPreview();
   void init();
 });

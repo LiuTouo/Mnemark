@@ -1,10 +1,8 @@
 // Inline favorites pane: collection list + History button, create/rename,
 // reorder, destructive remove modal, and the item-drop target.
 
-import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { applyI18n, localizeBackendError, setLanguage, t } from "./i18n";
-import { applyTheme } from "./theme";
+import { localizeDrawerError, t } from "./i18n";
 import { computeMenuPlacement } from "./menu";
 import { clipLocator } from "./drag";
 import { rectContains } from "./geometry";
@@ -20,7 +18,11 @@ import type {
 import { createInlineDragCard } from "./drag-overlay";
 import type { InlineDragCard } from "./drag-overlay";
 import { createRenameController } from "./rename-commit";
-import type { Clip, CollectionSummary, FavoriteItem, FavoritesUiState } from "./types";
+import type {
+  DrawerView,
+  DrawerViewIntentResult,
+} from "./drawer-view";
+import type { Clip, CollectionSummary, FavoriteItem } from "./types";
 
 type ProductionDrawerDragAdapter = Parameters<typeof createDrawerDragLifecycle<HTMLElement>>[0];
 type DrawerDragTargetState = Parameters<ProductionDrawerDragAdapter["renderTargets"]>[0];
@@ -32,23 +34,26 @@ export interface PanelDrawerController {
   move(session: DrawerDragSession, point: DrawerDragPoint): void;
   end(session: DrawerDragSession, point: DrawerDragPoint): Promise<DrawerDragTerminalOutcome | null>;
   cancel(reason: DrawerDragCancelReason, session?: DrawerDragSession): DrawerDragTerminalOutcome | null;
-  requestCreateCollection(): void;
+  requestCreate(): void;
 }
 
-interface AppConfig {
-  language?: string;
-  theme?: string;
-  ui_opacity_percent?: number;
+export interface DrawerViewController {
+  readonly currentView: DrawerView | null;
+  refresh(): Promise<DrawerView>;
+  select(collectionId: string | null): Promise<DrawerViewIntentResult>;
+}
+
+export interface PanelDrawerRenderer extends PanelDrawerController {
+  render(view: DrawerView): void;
 }
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
-let collections: CollectionSummary[] = [];
-let selected: string | null = null;
 let moreMenuFor: string | null = null;
 let editingCreate = false;
 let renameCtl: ReturnType<typeof createRenameController>;
 let drawerDrag: DrawerDragLifecycle<HTMLElement>;
+let drawerViewController: DrawerViewController;
 let listEl: HTMLElement;
 let drawerItemList: HTMLElement;
 let emptyEl: HTMLElement;
@@ -87,30 +92,40 @@ const DRAG_HANDLE_D =
   "M8 5a1 1 0 1 0 0 2 1 1 0 0 0 0-2zm0 6a1 1 0 1 0 0 2 1 1 0 0 0 0-2zm0 6a1 1 0 1 0 0 2 1 1 0 0 0 0-2zm8-12a1 1 0 1 0 0 2 1 1 0 0 0 0-2zm0 6a1 1 0 1 0 0 2 1 1 0 0 0 0-2zm0 6a1 1 0 1 0 0 2 1 1 0 0 0 0-2z";
 const MORE_D = "M5 12a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zm7 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zm7 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z";
 
-// === init ===
-async function refreshConfig(): Promise<void> {
-  const config = await invoke<AppConfig>("get_config");
-  setLanguage(config.language || "zh-TW");
-  applyTheme(config.theme || "system");
-  const opacity = Math.min(100, Math.max(50, config.ui_opacity_percent ?? 99));
-  document.documentElement.style.setProperty("--panel-opacity", String(opacity / 100));
+function currentCollections(): readonly CollectionSummary[] {
+  return drawerViewController.currentView?.collections ?? [];
 }
 
-async function loadCollections(): Promise<void> {
-  collections = await invoke<CollectionSummary[]>("list_collections");
-  render();
+function renderCurrentView(): void {
+  const view = drawerViewController.currentView;
+  if (view) render(view);
 }
 
-async function loadUiState(): Promise<void> {
-  const s = await invoke<FavoritesUiState>("get_favorites_ui_state");
-  selected = s.selected_collection;
-  render();
+async function refreshDrawerView(context: string): Promise<boolean> {
+  try {
+    await drawerViewController.refresh();
+    return true;
+  } catch (error) {
+    console.error(`[Mnemark] ${context}`, error);
+    return false;
+  }
+}
+
+function reportCommittedStale(
+  context: string,
+  result: DrawerViewIntentResult,
+): void {
+  if (result.status === "committed-stale") {
+    console.error(`[Mnemark] ${context}`, result.error);
+  }
 }
 
 // === render ===
-function render(): void {
+function render(view: DrawerView): void {
   drawerDrag.cancel("source-removed");
   listEl.replaceChildren();
+  const collections = view.collections;
+  const selected = view.selectedCollection;
   const hasCollections = collections.length > 0;
   emptyEl.classList.toggle("hidden", hasCollections);
 
@@ -205,7 +220,9 @@ function render(): void {
 }
 
 function selectCollection(id: string | null): void {
-  invoke("set_favorites_selected", { collectionId: id }).catch(() => {});
+  void drawerViewController.select(id)
+    .then((result) => reportCommittedStale("Drawer selection committed but refresh failed", result))
+    .catch((error) => showToast(localizeDrawerError(String(error))));
 }
 
 // === name editor ===
@@ -280,7 +297,7 @@ function selectAllContents(el: HTMLElement): void {
 // === create ===
 function startCreate(): void {
   editingCreate = true;
-  render();
+  renderCurrentView();
   createInput.textContent = "";
   createInput.focus();
 }
@@ -289,18 +306,19 @@ function commitCreate(value: string): void {
   if (!editingCreate) return;
   const name = value.trim();
   if (!name) { cancelCreate(); return; }
-  invoke<CollectionSummary>("create_collection", { name })
-    .then(() => {
+  void invoke<CollectionSummary>("create_collection", { name })
+    .then(async () => {
       editingCreate = false;
-      showToast(t("collectionAdded"));
-      return loadCollections();
+      if (await refreshDrawerView("Drawer create refresh failed")) {
+        showToast(t("collectionAdded"));
+      }
     })
-    .catch((err) => showToast(String(err)));
+    .catch((err) => showToast(localizeDrawerError(String(err))));
 }
 
 function cancelCreate(): void {
   editingCreate = false;
-  render();
+  renderCurrentView();
 }
 
 // === more menu ===
@@ -340,6 +358,7 @@ function updateMoreMenu(): void {
   if (!id) { moreMenu.classList.add("hidden"); return; }
   moreMenu.classList.remove("hidden");
 
+  const collections = currentCollections();
   const col = collections.find((c) => c.id === id);
   if (!col) { moreMenu.classList.add("hidden"); return; }
   const index = collections.findIndex((c) => c.id === id);
@@ -402,9 +421,13 @@ function confirmRemove(): void {
   if (!removeTargetId) return;
   const id = removeTargetId;
   closeRemoveModal();
-  invoke("delete_collection", { id })
-    .then(() => { showToast(t("collectionRemoved")); return loadCollections(); })
-    .catch((err) => showToast(String(err)));
+  void invoke("delete_collection", { id })
+    .then(async () => {
+      if (await refreshDrawerView("Drawer delete refresh failed")) {
+        showToast(t("collectionRemoved"));
+      }
+    })
+    .catch((err) => showToast(localizeDrawerError(String(err))));
 }
 
 // === toast ===
@@ -512,18 +535,7 @@ function drawerItemRows(): HTMLElement[] {
 }
 
 function selectedDrawerCollectionId(): string | null {
-  return listEl.querySelector<HTMLElement>(".favorites-row.selected[data-collection-id]")
-    ?.dataset.collectionId ?? null;
-}
-
-async function restoreAuthoritativeItemOrder(collectionId: string): Promise<void> {
-  const items = await invoke<FavoriteItem[]>("list_favorite_items", { collectionId });
-  if (selectedDrawerCollectionId() !== collectionId) return;
-  const rows = new Map(drawerItemRows().map((row) => [row.dataset.clipId ?? "", row]));
-  for (const item of items) {
-    const row = rows.get(item.id);
-    if (row) drawerItemList.append(row);
-  }
+  return drawerViewController.currentView?.selectedCollection ?? null;
 }
 
 function createProductionDrawerDrag(inlineDragCard: InlineDragCard): DrawerDragLifecycle<HTMLElement> {
@@ -582,21 +594,24 @@ function createProductionDrawerDrag(inlineDragCard: InlineDragCard): DrawerDragL
       collectionId,
       ids: orderedItemIds,
     }),
-    showSuccess: restoreAuthoritativeItemOrder,
+    showSuccess: async () => {
+      await refreshDrawerView("Drawer item reorder refresh failed");
+    },
     showFailure: async (error) => {
-      showToast(localizeBackendError(String(error)));
-      const collectionId = selectedDrawerCollectionId();
-      if (collectionId) await restoreAuthoritativeItemOrder(collectionId);
+      showToast(localizeDrawerError(String(error)));
+      await refreshDrawerView("Drawer item reorder recovery failed");
     },
   };
 
   const collectionReorderAdapter: DrawerCollectionReorderAdapter = {
-    context: (collectionId) => collections.some((collection) => collection.id === collectionId)
-      ? {
+    context: (collectionId) => {
+      const collections = currentCollections();
+      return collections.some((collection) => collection.id === collectionId) ? {
         collectionId,
         orderedCollectionIds: collections.map((collection) => collection.id),
       }
-      : null,
+        : null;
+    },
     measure: () => ({
       list: screenRect(listEl),
       items: [...listEl.querySelectorAll<HTMLElement>(".favorites-row[data-collection-id]")]
@@ -620,11 +635,11 @@ function createProductionDrawerDrag(inlineDragCard: InlineDragCard): DrawerDragL
       ids: orderedCollectionIds,
     }),
     showSuccess: async () => {
-      await loadCollections();
+      await refreshDrawerView("Drawer collection reorder refresh failed");
     },
     showFailure: async (error) => {
-      showToast(String(error));
-      await loadCollections();
+      showToast(localizeDrawerError(String(error)));
+      await refreshDrawerView("Drawer collection reorder recovery failed");
     },
   };
 
@@ -659,8 +674,8 @@ function createProductionDrawerDrag(inlineDragCard: InlineDragCard): DrawerDragL
       showToast(t("alreadyInDrawer"));
     },
     showSuccess: async (collectionId) => {
+      if (!await refreshDrawerView("Drawer membership refresh failed")) return;
       showToast(t("addedToFavorites"));
-      await loadCollections();
       const row = listEl.querySelector<HTMLElement>(`.favorites-row[data-collection-id="${collectionId}"]`);
       if (row) {
         row.classList.add("drop-success");
@@ -668,14 +683,17 @@ function createProductionDrawerDrag(inlineDragCard: InlineDragCard): DrawerDragL
       }
     },
     showFailure: async (error) => {
-      showToast(localizeBackendError(String(error)));
-      await loadCollections();
+      showToast(localizeDrawerError(String(error)));
+      await refreshDrawerView("Drawer membership recovery failed");
     },
   });
 }
 
-function createPanelDrawerController(): PanelDrawerController {
+function createPanelDrawerController(): PanelDrawerRenderer {
   return {
+    render(view: DrawerView): void {
+      render(view);
+    },
     start(
       item: Clip | FavoriteItem,
       source: HTMLElement,
@@ -708,23 +726,16 @@ function createPanelDrawerController(): PanelDrawerController {
     ): DrawerDragTerminalOutcome | null {
       return drawerDrag.cancel(reason, session);
     },
-    requestCreateCollection(): void {
+    requestCreate(): void {
       startCreate();
     },
   };
 }
 
-async function initializeDrawer(): Promise<void> {
-  try {
-    await refreshConfig();
-  } catch {
-    setLanguage("zh-TW");
-  }
-  applyI18n();
-  await Promise.all([loadCollections(), loadUiState()]);
-}
-
-export function mountDrawer(): PanelDrawerController {
+export function mountDrawerRenderer(
+  controller: DrawerViewController,
+): PanelDrawerRenderer {
+  drawerViewController = controller;
   listEl = document.getElementById("favorites-list")!;
   drawerItemList = document.getElementById("clip-list")!;
   emptyEl = document.getElementById("favorites-empty")!;
@@ -742,9 +753,11 @@ export function mountDrawer(): PanelDrawerController {
   // the explicit Panel mount instead of module evaluation.
   renameCtl = createRenameController({
     rename: (id, name) => invoke("rename_collection", { id, name }),
-    reload: () => loadCollections(),
-    render: () => render(),
-    showError: (message) => showToast(message),
+    reload: async () => {
+      await refreshDrawerView("Drawer rename refresh failed");
+    },
+    render: renderCurrentView,
+    showError: (message) => showToast(localizeDrawerError(message)),
   });
   const inlineDragCard = createInlineDragCard(document.getElementById("drag-overlay-card")!);
   drawerDrag = createProductionDrawerDrag(inlineDragCard);
@@ -770,26 +783,10 @@ export function mountDrawer(): PanelDrawerController {
     }
   });
   document.addEventListener("click", () => { if (moreMenuFor) { moreMenuFor = null; updateMoreMenu(); } });
-
-  void listen<void>("favorites-updated", () => { void loadCollections(); });
-  void listen<FavoritesUiState>("favorites-ui-state-changed", (e) => {
-    selected = e.payload.selected_collection;
-    render();
-  });
-
-  window.addEventListener("focus", () => {
-    refreshConfig()
-      .then(() => {
-        applyI18n();
-        render();
-      })
-      .catch(() => {});
-  });
   window.addEventListener("blur", () => {
     drawerDrag.cancel("window-blur");
   });
 
-  void initializeDrawer();
   return createPanelDrawerController();
 }
 

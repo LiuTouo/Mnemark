@@ -62,18 +62,6 @@ impl DrawerState {
             .ok_or_else(|| "Favorites unavailable".to_string())
     }
 
-    pub(crate) fn ui_state(&self) -> FavoritesUiState {
-        self.ui.clone()
-    }
-
-    pub(crate) fn list_collections(&self) -> Result<Vec<CollectionSummary>, String> {
-        self.favorites()?.list_collections()
-    }
-
-    pub(crate) fn list_items(&self, collection_id: &str) -> Result<Vec<FavoriteItem>, String> {
-        self.favorites()?.list_items(collection_id)
-    }
-
     pub(crate) fn get_item(&self, id: &str) -> Result<Option<FavoriteItem>, String> {
         self.favorites()?.get_item(id)
     }

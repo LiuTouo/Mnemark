@@ -8,6 +8,6 @@ describe("Drawer renderer module", () => {
 
     const drawerRenderer = await import("./favorites");
 
-    expect(drawerRenderer.mountDrawer).toBeTypeOf("function");
+    expect(drawerRenderer.mountDrawerRenderer).toBeTypeOf("function");
   });
 });

@@ -49,7 +49,7 @@ export interface ClipboardUpdate {
   evicted: string[];
 }
 
-/** A favorites collection, as returned by `list_collections`. */
+/** A Drawer collection summary published in the coherent Drawer view. */
 export interface CollectionSummary {
   id: string;
   name: string;
@@ -71,12 +71,6 @@ export type ClipScope = "history" | "favorite";
 export interface ClipLocator {
   scope: ClipScope;
   id: string;
-}
-
-/** Session-only favorites sidebar state (see backend `FavoritesUiState`). */
-export interface FavoritesUiState {
-  open: boolean;
-  selected_collection: string | null;
 }
 
 /** The favorites toggle chord, stored in AppConfig. */

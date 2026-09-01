@@ -169,6 +169,9 @@ const I18N: Record<string, Record<string, string>> = {
     pressKeysFavorites: "請按下按鍵…",
     sidebarOpen: "開啟抽屜",
     sidebarClose: "關閉抽屜",
+    drawerLoadFailed: "無法載入抽屜；歷史紀錄仍可使用",
+    drawerUnavailable: "抽屜暫時無法使用",
+    drawerActionFailed: "抽屜操作失敗，請再試一次",
     dragToAdd: "拖曳至此加入抽屜",
     draggingItem: "正在拖曳",
     emptyPreview: "無預覽內容",
@@ -367,6 +370,9 @@ const I18N: Record<string, Record<string, string>> = {
     pressKeysFavorites: "Press keys...",
     sidebarOpen: "Open drawer",
     sidebarClose: "Close drawer",
+    drawerLoadFailed: "Drawer could not be loaded; history remains available",
+    drawerUnavailable: "Drawer is temporarily unavailable",
+    drawerActionFailed: "Drawer action failed; please try again",
     dragToAdd: "Drag here to add",
     draggingItem: "Dragging",
     emptyPreview: "No preview available",
@@ -434,7 +440,13 @@ export function localizeBackendError(msg: string): string {
   if (msg.includes("Invalid hotkey")) return t("hotkeyInvalid");
   if (msg.includes("already in use")) return t("hotkeyInUse");
   if (msg.includes("must include")) return t("hotkeyNeedModifier");
+  if (msg.includes("Favorites unavailable")) return t("drawerUnavailable");
   return msg;
+}
+
+export function localizeDrawerError(msg: string): string {
+  const localized = localizeBackendError(msg);
+  return localized === msg ? t("drawerActionFailed") : localized;
 }
 
 /** Apply the current language to all [data-i18n] / [data-i18n-placeholder] /

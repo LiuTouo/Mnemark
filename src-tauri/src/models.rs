@@ -110,7 +110,7 @@ pub struct FavoriteItem {
     pub captured_at: u64,
     pub byte_size: u64,
     /// Membership timestamp (ms) when listed inside a collection; `None` when
-    /// fetched outside one (see `list_favorite_items` vs `get_item`).
+    /// fetched directly outside a collection.
     pub added_at: Option<u64>,
 }
 
