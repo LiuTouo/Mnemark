@@ -91,6 +91,13 @@ While the Panel is open, new clipboard captures from the ClipboardMonitor still 
 ### Drawer
 The user-organized area of the Panel that contains ordered Collections and displays the selected Collection's Drawer snapshots. History is a separate Panel dataset and is not itself a Collection.
 
+**Behavior:** Closing the Drawer clears the selected Collection, so reopening starts on History. Selecting a Collection does not open the Drawer. Deleting the selected Collection returns the view to History without closing the Drawer.
+
+### Drawer view
+The coherent Drawer state currently visible in the Panel: whether the Drawer is open, its ordered Collections and counts, the selected Collection, and that Collection's displayed Drawer snapshots. Every published Drawer view represents one authoritative point in time; a failed refresh leaves the last valid view visible instead of exposing a partial state. If no valid Drawer view has loaded, History remains usable while Drawer controls are unavailable.
+
+_Avoid_: Drawer session, Drawer snapshot.
+
 ### Collection
 A named, ordered membership list inside the Drawer. A Drawer snapshot may belong to multiple Collections, and each Collection owns its own snapshot order.
 
