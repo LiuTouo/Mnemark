@@ -1,3 +1,4 @@
+mod clip_encoding;
 mod clipboard;
 mod drawer;
 mod favorites;

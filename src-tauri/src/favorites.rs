@@ -9,7 +9,11 @@ use std::collections::HashSet;
 
 use rusqlite::{params, Connection};
 
-use crate::models::{BatchMutationResult, ClipKind, CollectionSummary, FavoriteItem};
+use crate::clip_encoding::{
+    column_exists, decode_shared_columns, ensure_column, file_paths_to_json, kind_to_str,
+    SHARED_COLUMNS,
+};
+use crate::models::{BatchMutationResult, CollectionSummary, FavoriteItem};
 
 pub struct FavoritesStore {
     conn: Connection,
@@ -51,20 +55,10 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS idx_memberships_item ON memberships(item_id);",
     )
     .map_err(|e| format!("Failed to initialize favorites schema: {}", e))?;
-    // Idempotent migration for DBs created before structured file paths:
-    // ALTER only when schema introspection says the column is missing —
-    // never by matching on the ALTER error string.
-    if !column_exists(conn, "favorite_items", "file_paths_json")? {
-        conn.execute(
-            "ALTER TABLE favorite_items ADD COLUMN file_paths_json TEXT",
-            [],
-        )
-        .map_err(|e| format!("Failed to migrate favorite_items schema: {}", e))?;
-    }
-    if !column_exists(conn, "favorite_items", "note")? {
-        conn.execute("ALTER TABLE favorite_items ADD COLUMN note TEXT", [])
-            .map_err(|e| format!("Failed to migrate favorite_items note schema: {}", e))?;
-    }
+    // Idempotent migrations for DBs created before structured file paths and
+    // before notes — delegated to the shared encoding module.
+    ensure_column(conn, "favorite_items", "file_paths_json", "TEXT")?;
+    ensure_column(conn, "favorite_items", "note", "TEXT")?;
     if !column_exists(conn, "memberships", "sort_order")? {
         let tx = conn
             .unchecked_transaction()
@@ -102,19 +96,6 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-/// Does `table` have a `column`? Schema introspection via PRAGMA table_info.
-fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
-    let sql = format!(
-        "SELECT 1 FROM pragma_table_info('{}') WHERE name = ?1",
-        table
-    );
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|e| format!("Failed to inspect {} schema: {}", table, e))?;
-    stmt.exists(params![column])
-        .map_err(|e| format!("Failed to inspect {} schema: {}", table, e))
-}
-
 /// Trim a collection name and validate 1..=64 Unicode scalar values.
 pub fn validate_collection_name(name: &str) -> Result<String, String> {
     let trimmed = name.trim();
@@ -123,22 +104,6 @@ pub fn validate_collection_name(name: &str) -> Result<String, String> {
         return Err("Collection name must be 1-64 characters".to_string());
     }
     Ok(trimmed.to_string())
-}
-
-fn kind_str(kind: &ClipKind) -> &'static str {
-    match kind {
-        ClipKind::Text => "Text",
-        ClipKind::Image => "Image",
-        ClipKind::FilePaths => "FilePaths",
-    }
-}
-
-fn kind_from_str(s: &str) -> ClipKind {
-    match s {
-        "Image" => ClipKind::Image,
-        "FilePaths" => ClipKind::FilePaths,
-        _ => ClipKind::Text,
-    }
 }
 
 /// Delete every snapshot no longer referenced by any membership. Run inside the
@@ -214,15 +179,7 @@ fn compact_item_sort_orders(conn: &Connection, collection_id: &str) -> Result<()
 /// Insert-or-refresh one snapshot, deduped by content hash so the same content
 /// is shared across every collection that references it.
 fn upsert_favorite_item(conn: &Connection, item: &FavoriteItem) -> Result<(), String> {
-    // Serialization failure must propagate, never silently drop the canonical
-    // file paths to NULL.
-    let file_paths_json = item
-        .file_paths
-        .as_ref()
-        .map(|p| {
-            serde_json::to_string(p).map_err(|e| format!("Failed to serialize file paths: {}", e))
-        })
-        .transpose()?;
+    let file_paths_json = file_paths_to_json(item.file_paths.as_deref())?;
     conn.execute(
         "INSERT INTO favorite_items (content_hash, kind, text_content, image_data,
                                      thumbnail_base64, preview, truncated, source_exe,
@@ -245,7 +202,7 @@ fn upsert_favorite_item(conn: &Connection, item: &FavoriteItem) -> Result<(), St
             note = COALESCE(excluded.note, favorite_items.note)",
         params![
             item.content_hash,
-            kind_str(&item.kind),
+            kind_to_str(&item.kind),
             item.text_content,
             item.image_data,
             item.thumbnail_base64,
@@ -265,41 +222,36 @@ fn upsert_favorite_item(conn: &Connection, item: &FavoriteItem) -> Result<(), St
 }
 
 fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<FavoriteItem> {
-    let content_hash: String = row.get(0)?;
-    // Corrupt JSON degrades to None (legacy fallback); never panics.
-    let file_paths_json: Option<String> = row.get(12)?;
-    let file_paths = file_paths_json.and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok());
+    let shared = decode_shared_columns(row, 0)?;
     Ok(FavoriteItem {
-        id: content_hash.clone(),
-        kind: kind_from_str(&row.get::<_, String>(1)?),
-        text_content: row.get(2)?,
-        file_paths,
-        image_data: row.get(3)?,
-        thumbnail_base64: row.get(4)?,
-        content_hash,
-        preview: row.get(5)?,
-        note: row.get(13)?,
-        truncated: row.get::<_, i64>(6)? != 0,
-        source_exe: row.get(7)?,
-        source_title: row.get(8)?,
-        source_icon: row.get(9)?,
-        captured_at: row.get::<_, i64>(10)? as u64,
-        byte_size: row.get::<_, i64>(11)? as u64,
+        // The content hash doubles as the Drawer's item id (the table's
+        // primary key).
+        id: shared.content_hash.clone(),
+        kind: shared.kind,
+        text_content: shared.text_content,
+        file_paths: shared.file_paths,
+        image_data: shared.image_data,
+        thumbnail_base64: shared.thumbnail_base64,
+        content_hash: shared.content_hash,
+        preview: shared.preview,
+        note: shared.note,
+        truncated: shared.truncated,
+        source_exe: shared.source_exe,
+        source_title: shared.source_title,
+        source_icon: shared.source_icon,
+        captured_at: shared.captured_at,
+        byte_size: shared.byte_size,
         added_at: None,
     })
 }
 
-/// Like `row_to_item`, but reads the membership `added_at` from column 14 (the
-/// extra column selected by `list_items`).
+/// Like `row_to_item`, but reads the membership `added_at` from the extra
+/// column selected by `list_items` (the first column after the shared span).
 fn row_to_item_with_added(row: &rusqlite::Row<'_>) -> rusqlite::Result<FavoriteItem> {
     let mut item = row_to_item(row)?;
     item.added_at = Some(row.get::<_, i64>(14)? as u64);
     Ok(item)
 }
-
-const ITEM_COLS: &str = "content_hash, kind, text_content, image_data, thumbnail_base64,
-        preview, truncated, source_exe, source_title, source_icon, captured_at, byte_size,
-        file_paths_json, note";
 
 impl FavoritesStore {
     /// Open (creating if necessary) the favorites tables in `mnemark.db`.
@@ -737,7 +689,7 @@ impl FavoritesStore {
         let mut stmt = self
             .conn
             .prepare(&format!(
-                "SELECT {ITEM_COLS}, m.added_at
+                "SELECT {SHARED_COLUMNS}, m.added_at
                  FROM favorite_items f
                  JOIN memberships m ON m.item_id = f.content_hash
                  WHERE m.collection_id = ?1
@@ -758,7 +710,7 @@ impl FavoritesStore {
         let mut stmt = self
             .conn
             .prepare(&format!(
-                "SELECT {ITEM_COLS} FROM favorite_items WHERE content_hash = ?1"
+                "SELECT {SHARED_COLUMNS} FROM favorite_items WHERE content_hash = ?1"
             ))
             .map_err(|e| e.to_string())?;
         let mut rows = stmt

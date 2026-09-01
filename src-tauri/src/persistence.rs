@@ -6,7 +6,10 @@ use std::collections::HashSet;
 
 use rusqlite::{params, Connection};
 
-use crate::models::{Clip, ClipKind};
+use crate::clip_encoding::{
+    decode_shared_columns, ensure_column, file_paths_to_json, kind_to_str, SHARED_COLUMNS,
+};
+use crate::models::Clip;
 
 /// Minimum time between stale-row reconciliations: 72 hours, in milliseconds
 /// (the same unit as `Clip::captured_at` and the monitor's clock).
@@ -44,31 +47,11 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
         );",
     )
     .map_err(|e| format!("Failed to initialize database schema: {}", e))?;
-    // Idempotent migration for DBs created before structured file paths: add
-    // the nullable JSON column only when schema introspection says it is
-    // missing — never by matching on the ALTER error string.
-    if !column_exists(conn, "clips", "file_paths_json")? {
-        conn.execute("ALTER TABLE clips ADD COLUMN file_paths_json TEXT", [])
-            .map_err(|e| format!("Failed to migrate clips schema: {}", e))?;
-    }
-    if !column_exists(conn, "clips", "note")? {
-        conn.execute("ALTER TABLE clips ADD COLUMN note TEXT", [])
-            .map_err(|e| format!("Failed to migrate clips note schema: {}", e))?;
-    }
+    // Idempotent migrations for DBs created before structured file paths and
+    // before notes — delegated to the shared encoding module.
+    ensure_column(conn, "clips", "file_paths_json", "TEXT")?;
+    ensure_column(conn, "clips", "note", "TEXT")?;
     Ok(())
-}
-
-/// Does `table` have a `column`? Schema introspection via PRAGMA table_info.
-fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
-    let sql = format!(
-        "SELECT 1 FROM pragma_table_info('{}') WHERE name = ?1",
-        table
-    );
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|e| format!("Failed to inspect {} schema: {}", table, e))?;
-    stmt.exists(params![column])
-        .map_err(|e| format!("Failed to inspect {} schema: {}", table, e))
 }
 
 impl Persistence {
@@ -161,43 +144,31 @@ impl Persistence {
     pub fn load_all(&self) -> Result<Vec<Clip>, String> {
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT id, kind, text_content, image_data, thumbnail_base64,
-                        content_hash, preview, truncated, source_exe, source_title,
-                        source_icon, captured_at, pinned, byte_size, file_paths_json, note
-                 FROM clips ORDER BY captured_at ASC",
-            )
+            .prepare(&format!(
+                "SELECT id, {SHARED_COLUMNS}, pinned
+                 FROM clips ORDER BY captured_at ASC"
+            ))
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |row| {
-                let kind_str: String = row.get(1)?;
-                let kind = match kind_str.as_str() {
-                    "Image" => ClipKind::Image,
-                    "FilePaths" => ClipKind::FilePaths,
-                    _ => ClipKind::Text,
-                };
-                // Corrupt JSON degrades to None (legacy-row fallback) — a
-                // hand-edited DB row must never panic the loader.
-                let file_paths_json: Option<String> = row.get(14)?;
-                let file_paths =
-                    file_paths_json.and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok());
+                let shared = decode_shared_columns(row, 1)?;
                 Ok(Clip {
                     id: row.get(0)?,
-                    kind,
-                    text_content: row.get(2)?,
-                    file_paths,
-                    image_data: row.get(3)?,
-                    thumbnail_base64: row.get(4)?,
-                    content_hash: row.get(5)?,
-                    preview: row.get(6)?,
-                    note: row.get(15)?,
-                    truncated: row.get::<_, i64>(7)? != 0,
-                    source_exe: row.get(8)?,
-                    source_title: row.get(9)?,
-                    source_icon: row.get(10)?,
-                    captured_at: row.get::<_, i64>(11)? as u64,
-                    pinned: row.get::<_, i64>(12)? != 0,
-                    byte_size: row.get::<_, i64>(13)? as u64,
+                    pinned: row.get::<_, i64>(15)? != 0,
+                    kind: shared.kind,
+                    text_content: shared.text_content,
+                    file_paths: shared.file_paths,
+                    image_data: shared.image_data,
+                    thumbnail_base64: shared.thumbnail_base64,
+                    content_hash: shared.content_hash,
+                    preview: shared.preview,
+                    note: shared.note,
+                    truncated: shared.truncated,
+                    source_exe: shared.source_exe,
+                    source_title: shared.source_title,
+                    source_icon: shared.source_icon,
+                    captured_at: shared.captured_at,
+                    byte_size: shared.byte_size,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -387,26 +358,10 @@ pub fn reconcile_if_due(
     Ok(true)
 }
 
-fn kind_str(kind: &ClipKind) -> &'static str {
-    match kind {
-        ClipKind::Text => "Text",
-        ClipKind::Image => "Image",
-        ClipKind::FilePaths => "FilePaths",
-    }
-}
-
 /// The upsert behind captures/restores and dump, written against
 /// &Connection so a transaction (which derefs to Connection) can use it.
 fn upsert_on(conn: &Connection, clip: &Clip) -> Result<(), String> {
-    // Serialization failure must propagate, never silently drop the canonical
-    // file paths to NULL.
-    let file_paths_json = clip
-        .file_paths
-        .as_ref()
-        .map(|p| {
-            serde_json::to_string(p).map_err(|e| format!("Failed to serialize file paths: {}", e))
-        })
-        .transpose()?;
+    let file_paths_json = file_paths_to_json(clip.file_paths.as_deref())?;
     conn.execute(
         "INSERT INTO clips (id, kind, text_content, image_data, thumbnail_base64,
                             content_hash, preview, truncated, source_exe, source_title,
@@ -419,7 +374,7 @@ fn upsert_on(conn: &Connection, clip: &Clip) -> Result<(), String> {
             file_paths_json = excluded.file_paths_json",
         params![
             clip.id,
-            kind_str(&clip.kind),
+            kind_to_str(&clip.kind),
             clip.text_content,
             clip.image_data,
             clip.thumbnail_base64,
