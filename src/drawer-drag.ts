@@ -1,6 +1,6 @@
-import { DragController, rectContains } from "./drag";
-import type { ItemDragPoint, ItemDragStart } from "./drag";
 import { insertBefore } from "./reorder";
+import { rectContains } from "./geometry";
+import type { Clip, ClipLocator } from "./types";
 
 export type DrawerDragTerminalOutcome =
   | "success"
@@ -15,69 +15,98 @@ export type DrawerDragCancelReason =
   | "lostpointercapture"
   | "window-blur"
   | "explicit"
-  | "source-removed"
-  | "item-reorder";
+  | "source-removed";
 
-export interface DrawerDragStart<Source> extends ItemDragStart {
+const drawerDragSessionBrand: unique symbol = Symbol("drawer-drag-session");
+export interface DrawerDragSession {
+  readonly [drawerDragSessionBrand]: true;
+}
+
+export interface DrawerDragPoint {
+  x: number;
+  y: number;
+}
+
+export interface DrawerDragVisual {
+  kind: Clip["kind"];
+  preview: string;
+  thumbnailBase64: string | null;
+}
+
+export interface DrawerDragStart<Source> {
+  kind: "item";
+  locator: ClipLocator;
+  visual: DrawerDragVisual;
+  x: number;
+  y: number;
   source: Source;
 }
 
 export interface DrawerCollectionDragStart<Source> {
   kind: "collection";
-  sessionId: number;
   collectionId: string;
   x: number;
   y: number;
   source: Source;
 }
 
-export interface DrawerCollectionDragPoint {
-  kind: "collection";
-  sessionId: number;
+export interface DrawerCollectionMoveStart {
+  kind: "collection-move";
   collectionId: string;
+  direction: DrawerCollectionMoveDirection;
+}
+
+interface DrawerDragItemContext {
+  locator: ClipLocator;
+  visual: DrawerDragVisual;
+  x: number;
+  y: number;
+}
+
+interface DrawerDragItemPoint {
+  locator: ClipLocator;
   x: number;
   y: number;
 }
 
 export type DrawerDragStartFact<Source> =
   | DrawerDragStart<Source>
-  | DrawerCollectionDragStart<Source>;
+  | DrawerCollectionDragStart<Source>
+  | DrawerCollectionMoveStart;
 
-export type DrawerDragPoint = ItemDragPoint | DrawerCollectionDragPoint;
-
-export interface DrawerDragTargetState {
+interface DrawerDragTargetState {
   active: boolean;
   membershipReady: boolean;
   membershipIds: readonly string[];
   targetId: string | null;
 }
 
-export interface DrawerDragRect {
+interface DrawerDragRect {
   left: number;
   top: number;
   right: number;
   bottom: number;
 }
 
-export interface DrawerDragReorderContext {
+interface DrawerDragReorderContext {
   collectionId: string;
   itemId: string;
   orderedItemIds: readonly string[];
 }
 
-export interface DrawerDragReorderGeometry {
+interface DrawerDragReorderGeometry {
   list: DrawerDragRect;
   items: ReadonlyArray<{ id: string; rect: DrawerDragRect }>;
 }
 
-export interface DrawerDragReorderState {
+interface DrawerDragReorderState {
   active: boolean;
   inside: boolean;
   beforeId: string | null;
 }
 
-export interface DrawerDragReorderAdapter {
-  context(start: ItemDragStart): DrawerDragReorderContext | null;
+interface DrawerDragReorderAdapter {
+  context(start: DrawerDragItemContext): DrawerDragReorderContext | null;
   measure(): DrawerDragReorderGeometry;
   render(state: DrawerDragReorderState): void;
   scrollBy(amount: number): boolean;
@@ -86,12 +115,12 @@ export interface DrawerDragReorderAdapter {
   showFailure(error: unknown): Promise<void> | void;
 }
 
-export interface DrawerCollectionReorderContext {
+interface DrawerCollectionReorderContext {
   collectionId: string;
   orderedCollectionIds: readonly string[];
 }
 
-export interface DrawerCollectionReorderAdapter {
+interface DrawerCollectionReorderAdapter {
   context(collectionId: string): DrawerCollectionReorderContext | null;
   measure(): DrawerDragReorderGeometry;
   render(state: DrawerDragReorderState): void;
@@ -102,38 +131,39 @@ export interface DrawerCollectionReorderAdapter {
 
 export type DrawerCollectionMoveDirection = -1 | 1;
 
-export interface DrawerDragAdapter<Source> {
+interface DrawerDragAdapter<Source> {
   reorder?: DrawerDragReorderAdapter;
   collectionReorder?: DrawerCollectionReorderAdapter;
-  lookupMembership(start: ItemDragStart): Promise<readonly string[]>;
-  collectionAt(point: ItemDragPoint): string | null;
+  lookupMembership(start: DrawerDragItemContext): Promise<readonly string[]>;
+  collectionAt(point: DrawerDragItemPoint): string | null;
   renderTargets(state: DrawerDragTargetState): void;
   activateSource(source: Source): void;
   releaseSource(source: Source): void;
-  beginVisual(start: ItemDragStart): void;
-  moveVisual(point: ItemDragPoint): void;
+  suppressClick(source: Source): void;
+  beginVisual(start: DrawerDragItemContext): void;
+  moveVisual(point: DrawerDragItemPoint): void;
   finishVisual(
     outcome: DrawerDragTerminalOutcome,
-    reason?: DrawerDragCancelReason,
+    reason?: DrawerDragCancelReason | "item-reorder",
   ): void;
   clearTransientFeedback(): void;
-  commit(collectionId: string, start: ItemDragStart): Promise<void>;
+  commit(collectionId: string, start: DrawerDragItemContext): Promise<void>;
   showUnavailable(collectionId: string): void;
   showSuccess(collectionId: string): Promise<void> | void;
   showFailure(error: unknown): Promise<void> | void;
 }
 
 export interface DrawerDragLifecycle<Source> {
-  nextSessionId(): number;
-  start(start: DrawerDragStartFact<Source>): void;
-  move(point: DrawerDragPoint): void;
-  end(point: DrawerDragPoint): Promise<DrawerDragTerminalOutcome | null>;
-  cancel(sessionId: number, reason: DrawerDragCancelReason): DrawerDragTerminalOutcome | null;
-  consumeClickSuppression(sessionId: number): boolean;
-  moveCollection(
-    collectionId: string,
-    direction: DrawerCollectionMoveDirection,
-  ): Promise<DrawerDragTerminalOutcome>;
+  start(start: DrawerDragStartFact<Source>): DrawerDragSession;
+  move(session: DrawerDragSession, point: DrawerDragPoint): void;
+  end(
+    session: DrawerDragSession,
+    point?: DrawerDragPoint,
+  ): Promise<DrawerDragTerminalOutcome | null>;
+  cancel(
+    reason: DrawerDragCancelReason,
+    session?: DrawerDragSession,
+  ): DrawerDragTerminalOutcome | null;
 }
 
 type MembershipResult =
@@ -142,8 +172,9 @@ type MembershipResult =
 
 interface ActiveSession<Source> {
   kind: "item";
+  token: DrawerDragSession;
   start: DrawerDragStart<Source>;
-  point: ItemDragPoint;
+  point: DrawerDragItemPoint;
   membershipIds: readonly string[] | null;
   membershipResult: Promise<MembershipResult>;
   reorderContext: DrawerDragReorderContext | null;
@@ -154,27 +185,33 @@ interface ActiveSession<Source> {
 
 interface ActiveCollectionSession<Source> {
   kind: "collection";
+  token: DrawerDragSession;
   start: DrawerCollectionDragStart<Source>;
-  point: DrawerCollectionDragPoint;
-  drag: DragController;
+  point: DrawerDragPoint;
+  drag: DragThreshold;
   reorderState: DrawerDragReorderState | null;
   sourceActive: boolean;
   ending: boolean;
 }
 
-type DrawerSession<Source> = ActiveSession<Source> | ActiveCollectionSession<Source>;
+interface ActiveCollectionMoveSession {
+  kind: "collection-move";
+  token: DrawerDragSession;
+  start: DrawerCollectionMoveStart;
+  ending: boolean;
+}
 
-function pointFromStart(start: ItemDragStart): ItemDragPoint {
+type DrawerSession<Source> =
+  | ActiveSession<Source>
+  | ActiveCollectionSession<Source>
+  | ActiveCollectionMoveSession;
+
+function pointFromStart(start: DrawerDragItemContext): DrawerDragItemPoint {
   return {
-    sessionId: start.sessionId,
     locator: start.locator,
     x: start.x,
     y: start.y,
   };
-}
-
-function sameLocator(left: ItemDragPoint["locator"], right: ItemDragPoint["locator"]): boolean {
-  return left.scope === right.scope && left.id === right.id;
 }
 
 function isCollectionStart<Source>(
@@ -183,8 +220,10 @@ function isCollectionStart<Source>(
   return "kind" in start && start.kind === "collection";
 }
 
-function isCollectionPoint(point: DrawerDragPoint): point is DrawerCollectionDragPoint {
-  return "kind" in point && point.kind === "collection";
+function isCollectionMoveStart<Source>(
+  start: DrawerDragStartFact<Source>,
+): start is DrawerCollectionMoveStart {
+  return start.kind === "collection-move";
 }
 
 function sameOrder(left: readonly string[], right: readonly string[]): boolean {
@@ -233,21 +272,34 @@ function reorderStateForPoint(
   };
 }
 
+class DragThreshold {
+  private dragging = false;
+
+  constructor(
+    private readonly startX: number,
+    private readonly startY: number,
+    private readonly thresholdPx = 6,
+  ) {}
+
+  move(x: number, y: number): boolean {
+    if (this.dragging) return false;
+    if (Math.hypot(x - this.startX, y - this.startY) < this.thresholdPx) return false;
+    this.dragging = true;
+    return true;
+  }
+
+  get isDragging(): boolean {
+    return this.dragging;
+  }
+}
+
 export function createDrawerDragLifecycle<Source>(
   adapter: DrawerDragAdapter<Source>,
 ): DrawerDragLifecycle<Source> {
   let active: DrawerSession<Source> | null = null;
-  let newestSessionId: number | null = null;
-  let sessionSequence = 0;
-  let clickSuppressionSessionId: number | null = null;
 
   function isCurrent(session: DrawerSession<Source>): boolean {
     return active === session;
-  }
-
-  function nextSessionId(): number {
-    sessionSequence = Math.max(sessionSequence, newestSessionId ?? 0) + 1;
-    return sessionSequence;
   }
 
   function targetState(session: ActiveSession<Source>): DrawerDragTargetState {
@@ -286,7 +338,7 @@ export function createDrawerDragLifecycle<Source>(
 
   function reorderScrollVelocity(
     geometry: DrawerDragReorderGeometry,
-    point: ItemDragPoint,
+    point: DrawerDragItemPoint,
   ): number {
     if (!rectContains(geometry.list, point.x, point.y)) return 0;
     const edge = 40;
@@ -399,12 +451,12 @@ export function createDrawerDragLifecycle<Source>(
   function finish(
     session: DrawerSession<Source>,
     outcome: DrawerDragTerminalOutcome,
-    reason?: DrawerDragCancelReason,
+    reason?: DrawerDragCancelReason | "item-reorder",
   ): DrawerDragTerminalOutcome | null {
     if (!isCurrent(session)) return null;
     active = null;
     if (session.kind === "item") clearReorder(session);
-    else clearCollectionReorder(session);
+    else if (session.kind === "collection") clearCollectionReorder(session);
     adapter.renderTargets({
       active: false,
       membershipReady: false,
@@ -412,7 +464,8 @@ export function createDrawerDragLifecycle<Source>(
       targetId: null,
     });
     adapter.clearTransientFeedback();
-    if (session.kind === "item" || session.sourceActive) {
+    if (session.kind === "item"
+      || (session.kind === "collection" && session.sourceActive)) {
       adapter.releaseSource(session.start.source);
     }
     if (session.kind === "item") adapter.finishVisual(outcome, reason);
@@ -428,30 +481,37 @@ export function createDrawerDragLifecycle<Source>(
     return outcome;
   }
 
-  function start(startFact: DrawerDragStartFact<Source>): void {
-    if (newestSessionId !== null && startFact.sessionId <= newestSessionId) return;
+  function start(startFact: DrawerDragStartFact<Source>): DrawerDragSession {
     if (active) finish(active, "replaced");
-    newestSessionId = startFact.sessionId;
+    const token: DrawerDragSession = Object.freeze({
+      [drawerDragSessionBrand]: true as const,
+    });
+
+    if (isCollectionMoveStart(startFact)) {
+      active = {
+        kind: "collection-move",
+        token,
+        start: startFact,
+        ending: false,
+      };
+      return token;
+    }
 
     if (isCollectionStart(startFact)) {
-      const drag = new DragController(6);
-      drag.pointerDown(startFact.x, startFact.y);
       active = {
         kind: "collection",
+        token,
         start: startFact,
         point: {
-          kind: "collection",
-          sessionId: startFact.sessionId,
-          collectionId: startFact.collectionId,
           x: startFact.x,
           y: startFact.y,
         },
-        drag,
+        drag: new DragThreshold(startFact.x, startFact.y),
         reorderState: null,
         sourceActive: false,
         ending: false,
       };
-      return;
+      return token;
     }
 
     const membershipResult = adapter.lookupMembership(startFact).then<MembershipResult, MembershipResult>(
@@ -460,6 +520,7 @@ export function createDrawerDragLifecycle<Source>(
     );
     const session: ActiveSession<Source> = {
       kind: "item",
+      token,
       start: startFact,
       point: pointFromStart(startFact),
       membershipIds: null,
@@ -480,42 +541,80 @@ export function createDrawerDragLifecycle<Source>(
       session.membershipIds = result.ids;
       render(session);
     });
+    return token;
   }
 
-  function move(point: DrawerDragPoint): void {
+  function move(token: DrawerDragSession, point: DrawerDragPoint): void {
     const session = active;
-    if (!session || session.ending || point.sessionId !== session.start.sessionId) return;
+    if (!session || session.ending || token !== session.token) return;
+    if (session.kind === "collection-move") return;
     if (session.kind === "collection") {
-      if (!isCollectionPoint(point) || point.collectionId !== session.start.collectionId) return;
-      session.point = point;
-      if (session.drag.pointerMove(point.x, point.y)) {
+      session.point = {
+        x: point.x,
+        y: point.y,
+      };
+      if (session.drag.move(point.x, point.y)) {
         session.sourceActive = true;
-        clickSuppressionSessionId = session.start.sessionId;
         adapter.activateSource(session.start.source);
+        adapter.suppressClick(session.start.source);
       }
       if (session.drag.isDragging) updateCollectionReorder(session);
       return;
     }
-    if (isCollectionPoint(point) || !sameLocator(point.locator, session.start.locator)) return;
-    session.point = point;
-    adapter.moveVisual(point);
+    session.point = {
+      locator: session.start.locator,
+      x: point.x,
+      y: point.y,
+    };
+    adapter.moveVisual(session.point);
     render(session);
     updateReorder(session);
   }
 
-  async function end(point: DrawerDragPoint): Promise<DrawerDragTerminalOutcome | null> {
+  async function end(
+    token: DrawerDragSession,
+    point?: DrawerDragPoint,
+  ): Promise<DrawerDragTerminalOutcome | null> {
     const session = active;
-    if (!session || session.ending || point.sessionId !== session.start.sessionId) return null;
-    if (session.kind === "collection") {
-      if (!isCollectionPoint(point) || point.collectionId !== session.start.collectionId) return null;
+    if (!session || session.ending || token !== session.token) return null;
+    if (session.kind === "collection-move") {
       session.ending = true;
-      session.point = point;
+      const reorder = adapter.collectionReorder;
+      const context = reorder?.context(session.start.collectionId) ?? null;
+      if (!reorder || !context) return finish(session, "no-op");
+      const index = context.orderedCollectionIds.indexOf(session.start.collectionId);
+      const targetIndex = index + session.start.direction;
+      if (index < 0 || targetIndex < 0 || targetIndex >= context.orderedCollectionIds.length) {
+        return finish(session, "no-op");
+      }
+      const beforeId = session.start.direction < 0
+        ? context.orderedCollectionIds[targetIndex]
+        : context.orderedCollectionIds[targetIndex + 1] ?? null;
+      let failureOutcome: DrawerDragTerminalOutcome | null = null;
+      const outcome = await commitCollectionMove(
+        context,
+        beforeId,
+        () => {
+          failureOutcome = finish(session, "failed");
+        },
+      );
+      if (outcome === "failed") return failureOutcome;
+      if (outcome === "no-op") return finish(session, "no-op");
+      if (!isCurrent(session)) return null;
+      return finish(session, "success");
+    }
+    if (!point) return null;
+    if (session.kind === "collection") {
+      session.ending = true;
+      session.point = {
+        x: point.x,
+        y: point.y,
+      };
       const reorderState = session.drag.isDragging
         ? updateCollectionReorder(session)
         : null;
       const reorder = adapter.collectionReorder;
       const context = reorder?.context(session.start.collectionId) ?? null;
-      session.drag.pointerUp();
       if (!reorderState?.inside || !reorder || !context) return finish(session, "no-op");
       let failureOutcome: DrawerDragTerminalOutcome | null = null;
       const outcome = await commitCollectionMove(
@@ -530,11 +629,14 @@ export function createDrawerDragLifecycle<Source>(
       if (!isCurrent(session)) return null;
       return finish(session, "success");
     }
-    if (isCollectionPoint(point) || !sameLocator(point.locator, session.start.locator)) return null;
 
     session.ending = true;
-    session.point = point;
-    adapter.moveVisual(point);
+    session.point = {
+      locator: session.start.locator,
+      x: point.x,
+      y: point.y,
+    };
+    adapter.moveVisual(session.point);
     render(session);
 
     const reorderState = updateReorder(session, false);
@@ -550,12 +652,12 @@ export function createDrawerDragLifecycle<Source>(
       }
       try {
         await adapter.reorder.commit(reorderContext.collectionId, nextIds);
+        await adapter.reorder.showSuccess(reorderContext.collectionId);
       } catch (error) {
         const outcome = finish(session, "failed", "item-reorder");
         await adapter.reorder.showFailure(error);
         return outcome;
       }
-      await adapter.reorder.showSuccess(reorderContext.collectionId);
       if (!isCurrent(session)) return null;
       const outcome = finish(session, "success", "item-reorder");
       return outcome;
@@ -567,7 +669,7 @@ export function createDrawerDragLifecycle<Source>(
 
     session.membershipIds = membership.ids;
     render(session);
-    const collectionId = adapter.collectionAt(point);
+    const collectionId = adapter.collectionAt(session.point);
     if (collectionId === null) return finish(session, "no-op");
     if (membership.ids.includes(collectionId)) {
       const outcome = finish(session, "unavailable");
@@ -587,45 +689,18 @@ export function createDrawerDragLifecycle<Source>(
   }
 
   function cancel(
-    sessionId: number,
     reason: DrawerDragCancelReason,
+    token?: DrawerDragSession,
   ): DrawerDragTerminalOutcome | null {
     const session = active;
-    if (!session || session.start.sessionId !== sessionId) return null;
+    if (!session || session.ending || (token !== undefined && token !== session.token)) return null;
     return finish(session, "cancelled", reason);
   }
 
-  function consumeClickSuppression(sessionId: number): boolean {
-    if (clickSuppressionSessionId !== sessionId) return false;
-    clickSuppressionSessionId = null;
-    return true;
-  }
-
-  async function moveCollection(
-    collectionId: string,
-    direction: DrawerCollectionMoveDirection,
-  ): Promise<DrawerDragTerminalOutcome> {
-    const reorder = adapter.collectionReorder;
-    const context = reorder?.context(collectionId) ?? null;
-    if (!reorder || !context) return "no-op";
-    const index = context.orderedCollectionIds.indexOf(collectionId);
-    const targetIndex = index + direction;
-    if (index < 0 || targetIndex < 0 || targetIndex >= context.orderedCollectionIds.length) {
-      return "no-op";
-    }
-    const beforeId = direction < 0
-      ? context.orderedCollectionIds[targetIndex]
-      : context.orderedCollectionIds[targetIndex + 1] ?? null;
-    return commitCollectionMove(context, beforeId);
-  }
-
   return {
-    nextSessionId,
     start,
     move,
     end,
     cancel,
-    consumeClickSuppression,
-    moveCollection,
   };
 }

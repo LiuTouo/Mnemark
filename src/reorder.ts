@@ -3,7 +3,7 @@
 
 /** New array with the item at `fromIndex` moved to `toIndex` (indices in the
  * source array, before removal). Out-of-range indices return a clone unchanged. */
-export function moveItem<T>(items: readonly T[], fromIndex: number, toIndex: number): T[] {
+function moveItem<T>(items: readonly T[], fromIndex: number, toIndex: number): T[] {
   if (fromIndex === toIndex) return [...items];
   if (fromIndex < 0 || fromIndex >= items.length) return [...items];
   const out = [...items];
@@ -30,14 +30,6 @@ export function insertBefore(ids: readonly string[], movedId: string, beforeId: 
   }
   rest.splice(idx, 0, movedId);
   return rest;
-}
-
-/** Index `movedId` should occupy to sit before `beforeId` in the filtered list. */
-export function insertionIndex(ids: readonly string[], movedId: string, beforeId: string | null): number {
-  const rest = ids.filter((id) => id !== movedId);
-  if (beforeId === null) return rest.length;
-  const idx = rest.indexOf(beforeId);
-  return idx === -1 ? rest.length : idx;
 }
 
 /**

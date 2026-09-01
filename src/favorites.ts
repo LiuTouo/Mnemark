@@ -6,23 +6,24 @@ import { invoke } from "@tauri-apps/api/core";
 import { applyI18n, localizeBackendError, setLanguage, t } from "./i18n";
 import { applyTheme } from "./theme";
 import { computeMenuPlacement } from "./menu";
-import { rectContains } from "./drag";
+import { clipLocator } from "./drag";
+import { rectContains } from "./geometry";
 import { createDrawerDragLifecycle } from "./drawer-drag";
 import type {
-  DrawerCollectionDragPoint,
-  DrawerCollectionDragStart,
   DrawerCollectionMoveDirection,
-  DrawerCollectionReorderAdapter,
   DrawerDragCancelReason,
   DrawerDragPoint,
-  DrawerDragReorderAdapter,
-  DrawerDragStartFact,
-  DrawerDragTargetState,
+  DrawerDragSession,
   DrawerDragTerminalOutcome,
 } from "./drawer-drag";
 import { beginInlineDragCard, finishInlineDragCard, moveInlineDragCard } from "./drag-overlay";
 import { createRenameController } from "./rename-commit";
-import type { CollectionSummary, FavoritesUiState } from "./types";
+import type { Clip, CollectionSummary, FavoriteItem, FavoritesUiState } from "./types";
+
+type ProductionDrawerDragAdapter = Parameters<typeof createDrawerDragLifecycle<HTMLElement>>[0];
+type DrawerDragTargetState = Parameters<ProductionDrawerDragAdapter["renderTargets"]>[0];
+type DrawerDragReorderAdapter = NonNullable<ProductionDrawerDragAdapter["reorder"]>;
+type DrawerCollectionReorderAdapter = NonNullable<ProductionDrawerDragAdapter["collectionReorder"]>;
 
 interface AppConfig {
   language?: string;
@@ -44,16 +45,8 @@ const renameCtl = createRenameController({
   render: () => render(),
   showError: (message) => showToast(message),
 });
-let drawerTargetState: DrawerDragTargetState = {
-  active: false,
-  membershipReady: false,
-  membershipIds: [],
-  targetId: null,
-};
-let drawerReorderAdapter: DrawerDragReorderAdapter | undefined;
-let activeCollectionDragSessionId: number | null = null;
-
 const listEl = document.getElementById("favorites-list")!;
+const drawerItemList = document.getElementById("clip-list")!;
 const emptyEl = document.getElementById("favorites-empty")!;
 const createRow = document.getElementById("favorites-create-row")!;
 const createInput = document.getElementById("favorites-create-input") as HTMLElement;
@@ -112,10 +105,7 @@ async function loadUiState(): Promise<void> {
 
 // === render ===
 function render(): void {
-  if (activeCollectionDragSessionId !== null) {
-    drawerDrag.cancel(activeCollectionDragSessionId, "source-removed");
-    activeCollectionDragSessionId = null;
-  }
+  drawerDrag.cancel("source-removed");
   listEl.replaceChildren();
   const hasCollections = collections.length > 0;
   emptyEl.classList.toggle("hidden", hasCollections);
@@ -208,7 +198,6 @@ function render(): void {
 
   createRow.classList.toggle("hidden", !editingCreate);
   updateMoreMenu();
-  renderDrawerTargets(drawerTargetState);
 }
 
 function selectCollection(id: string | null): void {
@@ -378,7 +367,12 @@ async function moveCollection(
   id: string,
   direction: DrawerCollectionMoveDirection,
 ): Promise<void> {
-  await drawerDrag.moveCollection(id, direction);
+  const session = drawerDrag.start({
+    kind: "collection-move",
+    collectionId: id,
+    direction,
+  });
+  await drawerDrag.end(session);
 }
 
 // === remove modal ===
@@ -420,58 +414,37 @@ function showToast(message: string): void {
 
 // === collection reorder drag ===
 function attachReorderDrag(handle: HTMLElement, id: string): void {
-  let sessionId: number | null = null;
+  let session: DrawerDragSession | null = null;
   handle.addEventListener("pointerdown", (e) => {
     e.preventDefault();
     e.stopPropagation();
-    sessionId = drawerDrag.nextSessionId();
-    activeCollectionDragSessionId = sessionId;
-    const start: DrawerCollectionDragStart<HTMLElement> = {
+    session = drawerDrag.start({
       kind: "collection",
-      sessionId,
       collectionId: id,
       x: e.clientX,
       y: e.clientY,
       source: handle.closest<HTMLElement>(".favorites-row") ?? handle,
-    };
-    drawerDrag.start(start);
+    });
     handle.setPointerCapture(e.pointerId);
   });
   handle.addEventListener("pointermove", (e) => {
-    if (sessionId === null || activeCollectionDragSessionId !== sessionId) return;
-    const point: DrawerCollectionDragPoint = {
-      kind: "collection",
-      sessionId,
-      collectionId: id,
-      x: e.clientX,
-      y: e.clientY,
-    };
-    drawerDrag.move(point);
+    if (session === null) return;
+    drawerDrag.move(session, { x: e.clientX, y: e.clientY });
   });
   handle.addEventListener("pointerup", (e) => {
-    if (sessionId === null || activeCollectionDragSessionId !== sessionId) return;
-    activeCollectionDragSessionId = null;
-    const point: DrawerCollectionDragPoint = {
-      kind: "collection",
-      sessionId,
-      collectionId: id,
-      x: e.clientX,
-      y: e.clientY,
-    };
-    void drawerDrag.end(point);
+    if (session === null) return;
+    const ending = session;
+    session = null;
+    void drawerDrag.end(ending, { x: e.clientX, y: e.clientY });
   });
   const cancel = (reason: DrawerDragCancelReason) => {
-    if (sessionId === null || activeCollectionDragSessionId !== sessionId) return;
-    activeCollectionDragSessionId = null;
-    drawerDrag.cancel(sessionId, reason);
+    if (session === null) return;
+    const cancelled = session;
+    session = null;
+    drawerDrag.cancel(reason, cancelled);
   };
   handle.addEventListener("pointercancel", () => cancel("pointercancel"));
   handle.addEventListener("lostpointercapture", () => cancel("lostpointercapture"));
-  handle.addEventListener("click", (e) => {
-    if (sessionId === null || !drawerDrag.consumeClickSuppression(sessionId)) return;
-    e.preventDefault();
-    e.stopImmediatePropagation();
-  });
 }
 
 // === inline item drop target ===
@@ -488,7 +461,10 @@ function screenRect(el: HTMLElement): { left: number; top: number; right: number
 function collectionUnderPoint(x: number, y: number): string | null {
   const rows = [...listEl.querySelectorAll<HTMLElement>(".favorites-row[data-collection-id]")];
   for (const row of rows) {
-    if (rectContains(screenRect(row), x, y)) return row.dataset.collectionId ?? null;
+    const rect = screenRect(row);
+    if (rectContains(rect, x, y)) {
+      return row.dataset.collectionId ?? null;
+    }
   }
   return null;
 }
@@ -511,7 +487,6 @@ function clearDrawerFeedback(): void {
 }
 
 function renderDrawerTargets(state: DrawerDragTargetState): void {
-  drawerTargetState = { ...state, membershipIds: [...state.membershipIds] };
   document.body.classList.toggle("item-drag-active", state.active);
   listEl.querySelector(".favorites-history-return")?.classList.toggle("drag-disabled", state.active);
   listEl.querySelectorAll<HTMLElement>(".favorites-row[data-collection-id]").forEach((row) => {
@@ -530,6 +505,85 @@ function renderDrawerTargets(state: DrawerDragTargetState): void {
 
 const collectionReorderIndicator = document.createElement("div");
 collectionReorderIndicator.className = "drop-indicator";
+
+const itemReorderIndicator = document.createElement("div");
+itemReorderIndicator.className = "clip-reorder-indicator";
+itemReorderIndicator.setAttribute("aria-hidden", "true");
+
+function drawerItemRows(): HTMLElement[] {
+  return [...drawerItemList.querySelectorAll<HTMLElement>(".clip-item[data-is-favorite='1']")];
+}
+
+function selectedDrawerCollectionId(): string | null {
+  return listEl.querySelector<HTMLElement>(".favorites-row.selected[data-collection-id]")
+    ?.dataset.collectionId ?? null;
+}
+
+async function restoreAuthoritativeItemOrder(collectionId: string): Promise<void> {
+  const items = await invoke<FavoriteItem[]>("list_favorite_items", { collectionId });
+  if (selectedDrawerCollectionId() !== collectionId) return;
+  const rows = new Map(drawerItemRows().map((row) => [row.dataset.clipId ?? "", row]));
+  for (const item of items) {
+    const row = rows.get(item.id);
+    if (row) drawerItemList.append(row);
+  }
+}
+
+const drawerReorderAdapter: DrawerDragReorderAdapter = {
+  context: (start) => {
+    const collectionId = selectedDrawerCollectionId();
+    const filter = document.querySelector<HTMLElement>(".filter-btn.active")?.dataset.filter;
+    const selectionActive = document.getElementById("selection-toggle")?.classList.contains("active") ?? false;
+    const orderedItemIds = drawerItemRows()
+      .map((row) => row.dataset.clipId ?? "")
+      .filter((id) => id.length > 0);
+    if (start.locator.scope !== "favorite"
+      || !collectionId
+      || (document.getElementById("search-input") as HTMLInputElement).value.length > 0
+      || filter !== "all"
+      || selectionActive
+      || !orderedItemIds.includes(start.locator.id)) return null;
+    return {
+      collectionId,
+      itemId: start.locator.id,
+      orderedItemIds,
+    };
+  },
+  measure: () => ({
+    list: drawerItemList.getBoundingClientRect(),
+    items: drawerItemRows()
+      .map((row) => ({
+        id: row.dataset.clipId ?? "",
+        rect: row.getBoundingClientRect(),
+      }))
+      .filter((item) => item.id.length > 0),
+  }),
+  render: (state) => {
+    drawerItemList.classList.toggle("reordering-items", state.active);
+    itemReorderIndicator.remove();
+    if (!state.active || !state.inside) return;
+    const beforeRow = state.beforeId === null
+      ? null
+      : drawerItemRows().find((row) => row.dataset.clipId === state.beforeId) ?? null;
+    if (beforeRow) drawerItemList.insertBefore(itemReorderIndicator, beforeRow);
+    else drawerItemList.appendChild(itemReorderIndicator);
+  },
+  scrollBy: (amount) => {
+    const previous = drawerItemList.scrollTop;
+    drawerItemList.scrollTop += amount;
+    return drawerItemList.scrollTop !== previous;
+  },
+  commit: (collectionId, orderedItemIds) => invoke("reorder_favorite_items", {
+    collectionId,
+    ids: orderedItemIds,
+  }),
+  showSuccess: restoreAuthoritativeItemOrder,
+  showFailure: async (error) => {
+    showToast(localizeBackendError(String(error)));
+    const collectionId = selectedDrawerCollectionId();
+    if (collectionId) await restoreAuthoritativeItemOrder(collectionId);
+  },
+};
 
 const collectionReorderAdapter: DrawerCollectionReorderAdapter = {
   context: (collectionId) => collections.some((collection) => collection.id === collectionId)
@@ -570,15 +624,19 @@ const collectionReorderAdapter: DrawerCollectionReorderAdapter = {
 };
 
 const drawerDrag = createDrawerDragLifecycle<HTMLElement>({
-  get reorder() {
-    return drawerReorderAdapter;
-  },
+  reorder: drawerReorderAdapter,
   collectionReorder: collectionReorderAdapter,
   lookupMembership: (start) => invoke<string[]>("favorite_collection_ids", { locator: start.locator }),
   collectionAt: (point) => collectionUnderPoint(point.x, point.y),
   renderTargets: renderDrawerTargets,
   activateSource: (source) => source.classList.add("dragging-source"),
   releaseSource: (source) => source.classList.remove("dragging-source", "drag-held"),
+  suppressClick: (source) => {
+    source.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }, { capture: true, once: true });
+  },
   beginVisual: beginInlineDragCard,
   moveVisual: moveInlineDragCard,
   finishVisual: (outcome, reason) => finishInlineDragCard(
@@ -610,32 +668,40 @@ const drawerDrag = createDrawerDragLifecycle<HTMLElement>({
   },
 });
 
-export function configureDrawerItemReorder(adapter: DrawerDragReorderAdapter): void {
-  drawerReorderAdapter = adapter;
-}
-
-export function nextDrawerDragSessionId(): number {
-  return drawerDrag.nextSessionId();
-}
-
-export function startDrawerDrag(start: DrawerDragStartFact<HTMLElement>): void {
-  drawerDrag.start(start);
-}
-
-export function moveDrawerDrag(point: DrawerDragPoint): void {
-  drawerDrag.move(point);
-}
-
-export function endDrawerDrag(point: DrawerDragPoint): Promise<DrawerDragTerminalOutcome | null> {
-  return drawerDrag.end(point);
-}
-
-export function cancelDrawerDrag(
-  sessionId: number,
-  reason: DrawerDragCancelReason,
-): void {
-  drawerDrag.cancel(sessionId, reason);
-}
+export const panelDrawerDrag = {
+  start(
+    item: Clip | FavoriteItem,
+    source: HTMLElement,
+    point: DrawerDragPoint,
+  ): DrawerDragSession {
+    return drawerDrag.start({
+      kind: "item",
+      locator: clipLocator(item),
+      visual: {
+        kind: item.kind,
+        preview: item.preview,
+        thumbnailBase64: item.kind === "Image" ? item.thumbnail_base64 : null,
+      },
+      source,
+      ...point,
+    });
+  },
+  move(session: DrawerDragSession, point: DrawerDragPoint): void {
+    drawerDrag.move(session, point);
+  },
+  end(
+    session: DrawerDragSession,
+    point: DrawerDragPoint,
+  ): Promise<DrawerDragTerminalOutcome | null> {
+    return drawerDrag.end(session, point);
+  },
+  cancel(
+    reason: DrawerDragCancelReason,
+    session?: DrawerDragSession,
+  ): DrawerDragTerminalOutcome | null {
+    return drawerDrag.cancel(reason, session);
+  },
+};
 
 // === init ===
 async function init(): Promise<void> {
@@ -660,9 +726,8 @@ async function init(): Promise<void> {
     else if (e.key === "Tab") trapFocus(e);
   });
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && activeCollectionDragSessionId !== null) {
-      drawerDrag.cancel(activeCollectionDragSessionId, "explicit");
-      activeCollectionDragSessionId = null;
+    if (e.key === "Escape" && drawerDrag.cancel("explicit") !== null) {
+      return;
     } else if (e.key === "Escape" && moreMenuFor) {
       moreMenuFor = null;
       updateMoreMenu();
@@ -687,9 +752,7 @@ async function init(): Promise<void> {
       .catch(() => {});
   });
   window.addEventListener("blur", () => {
-    if (activeCollectionDragSessionId === null) return;
-    drawerDrag.cancel(activeCollectionDragSessionId, "window-blur");
-    activeCollectionDragSessionId = null;
+    drawerDrag.cancel("window-blur");
   });
 }
 

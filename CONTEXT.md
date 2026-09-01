@@ -88,6 +88,17 @@ The floating WebView window that displays the History. Created on first invocati
 
 While the Panel is open, new clipboard captures from the ClipboardMonitor still arrive in real time. The list updates without scrolling to the top, preserving the user's current scroll position. Delete, pin, and other in-session actions likewise preserve scroll position — only a close/reopen resets to the top.
 
+### Drawer
+The user-organized area of the Panel that contains ordered Collections and displays the selected Collection's Drawer snapshots. History is a separate Panel dataset and is not itself a Collection.
+
+### Collection
+A named, ordered membership list inside the Drawer. A Drawer snapshot may belong to multiple Collections, and each Collection owns its own snapshot order.
+
+### Drawer snapshot
+A durable, content-hash-deduplicated copy of a Clip's content and metadata that is independent of History. Collections share the same Drawer snapshot through memberships; the snapshot exists while at least one Collection references it.
+
+_Avoid_: Favorite, favorite snapshot.
+
 ### Filter
 A five-button segmented control below the search box categorizes Clips by type: **All / Text / Image / Files / Links.** The classification is mutually exclusive — each Clip belongs to exactly one filter category.
 

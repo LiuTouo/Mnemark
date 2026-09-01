@@ -6,22 +6,14 @@ import { applyTheme } from "./theme";
 import { decidePreviewSync, PreviewController } from "./preview-state";
 import { ShortcutMatcher, FAVORITES_DEFAULT_CODES } from "./shortcut";
 import { ChooserGate, computeMenuPlacement } from "./menu";
-import { DragController, itemDragStartPayload, isFavoriteItem, clipLocator } from "./drag";
-import type { ItemDragPoint } from "./drag";
+import { isFavoriteItem, clipLocator } from "./drag";
 import { classifyClip, filterItems } from "./dataset";
 import type { FilterKind } from "./dataset";
 import { MultiSelectState } from "./multi-select";
 import { decideWorkspaceLayout, escapeLayer, tabAfterPreviewIntent } from "./workspace-state";
 import type { WorkspaceTab } from "./workspace-state";
-import {
-  cancelDrawerDrag,
-  configureDrawerItemReorder,
-  endDrawerDrag,
-  moveDrawerDrag,
-  nextDrawerDragSessionId,
-  startDrawerDrag,
-} from "./favorites";
-import type { DrawerDragCancelReason } from "./drawer-drag";
+import { panelDrawerDrag } from "./favorites";
+import type { DrawerDragCancelReason, DrawerDragSession } from "./drawer-drag";
 import "./preview";
 import { moveOne } from "./reorder";
 import type { BatchMutationResult, Clip, ClipboardUpdate, ClipLocator, CollectionSummary, FavoriteItem, FavoritesUiState } from "./types";
@@ -50,10 +42,6 @@ let noteTarget: ClipLocator | null = null;
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 const previewState = new PreviewController();
 let shortcutMatcher = new ShortcutMatcher(FAVORITES_DEFAULT_CODES);
-// The row currently being dragged toward another Drawer collection, so a
-// mid-drag re-render can clear its source feedback and cancel the session.
-let activeDragSource: HTMLElement | null = null;
-let activeDragSessionId: number | null = null;
 const chooserGate = new ChooserGate();
 let lastMenuPos = { anchorTop: 0, anchorBottom: 0, right: 0 };
 const multiSelect = new MultiSelectState();
@@ -62,9 +50,6 @@ let batchChooserOpen = false;
 const searchInput = document.getElementById("search-input") as HTMLInputElement;
 const filterBar = document.getElementById("filter-bar")!;
 const clipList = document.getElementById("clip-list")!;
-const itemReorderIndicator = document.createElement("div");
-itemReorderIndicator.className = "clip-reorder-indicator";
-itemReorderIndicator.setAttribute("aria-hidden", "true");
 const emptyState = document.getElementById("empty-state")!;
 const emptyTitle = document.getElementById("empty-title")!;
 const emptyHint = document.getElementById("empty-hint")!;
@@ -89,57 +74,6 @@ const previewPane = document.getElementById("workspace-preview")!;
 const workspaceTabs = document.getElementById("workspace-tabs")!;
 const drawerTab = document.getElementById("workspace-tab-drawer") as HTMLButtonElement;
 const previewTab = document.getElementById("workspace-tab-preview") as HTMLButtonElement;
-
-configureDrawerItemReorder({
-  context: (start) => {
-    const collectionId = selectedCollection;
-    if (start.locator.scope !== "favorite"
-      || !collectionId
-      || !favoriteItemReorderEnabled()
-      || !favoriteItems.some((item) => item.id === start.locator.id)) return null;
-    return {
-      collectionId,
-      itemId: start.locator.id,
-      orderedItemIds: favoriteItems.map((item) => item.id),
-    };
-  },
-  measure: () => ({
-    list: clipList.getBoundingClientRect(),
-    items: [...clipList.querySelectorAll<HTMLElement>(".clip-item[data-is-favorite='1']")]
-      .map((row) => ({
-        id: row.dataset.clipId ?? "",
-        rect: row.getBoundingClientRect(),
-      }))
-      .filter((item) => item.id.length > 0),
-  }),
-  render: (state) => {
-    clipList.classList.toggle("reordering-items", state.active);
-    itemReorderIndicator.remove();
-    if (!state.active || !state.inside) return;
-    const rows = [...clipList.querySelectorAll<HTMLElement>(".clip-item[data-is-favorite='1']")];
-    const beforeRow = state.beforeId === null
-      ? null
-      : rows.find((row) => row.dataset.clipId === state.beforeId) ?? null;
-    if (beforeRow) clipList.insertBefore(itemReorderIndicator, beforeRow);
-    else clipList.appendChild(itemReorderIndicator);
-  },
-  scrollBy: (amount) => {
-    const previous = clipList.scrollTop;
-    clipList.scrollTop += amount;
-    return clipList.scrollTop !== previous;
-  },
-  commit: (collectionId, orderedItemIds) => invoke("reorder_favorite_items", {
-    collectionId,
-    ids: orderedItemIds,
-  }),
-  showSuccess: async () => {
-    await loadFavoritesContext();
-  },
-  showFailure: async (error) => {
-    showToast(localizeBackendError(String(error)));
-    await loadFavoritesContext();
-  },
-});
 
 // Bind the primary drawer action synchronously while the deferred script is
 // evaluated. The panel can become clickable before async init finishes, so
@@ -549,9 +483,7 @@ function render() {
   hideActionMenu();
 
   const scrollTop = clipList.scrollTop;
-  if (activeDragSource) {
-    releaseDragSource(activeDragSource, activeDragSessionId !== null, "source-removed");
-  }
+  panelDrawerDrag.cancel("source-removed");
   clipList.replaceChildren();
 
   const searching = query.length > 0;
@@ -1260,59 +1192,32 @@ function isSpaceKey(e: KeyboardEvent): boolean {
 // Pointer events provide session facts only. Drawer drag owns reorder
 // precedence, insertion state, auto-scroll, mutation, and terminal cleanup.
 
-function releaseDragSource(
-  el: HTMLElement,
-  cancel: boolean,
-  reason: DrawerDragCancelReason = "explicit",
-): void {
-  if (activeDragSource === el) {
-    activeDragSource = null;
-    if (cancel && activeDragSessionId !== null) {
-      cancelDrawerDrag(activeDragSessionId, reason);
-    }
-    activeDragSessionId = null;
-  }
-}
-
 function attachRowDrag(row: HTMLElement, handle: HTMLElement, item: DisplayItem) {
-  const drag = new DragController(6);
-  const locator = clipLocator(item);
+  let session: DrawerDragSession | null = null;
   handle.addEventListener("pointerdown", (e) => {
     e.preventDefault();
     e.stopPropagation();
-    drag.beginImmediately(e.clientX, e.clientY);
-    activeDragSessionId = nextDrawerDragSessionId();
-    activeDragSource = row;
     handle.setPointerCapture(e.pointerId);
-    const point = { x: e.clientX, y: e.clientY };
-    const start = itemDragStartPayload(activeDragSessionId, item, point);
-    startDrawerDrag({ ...start, source: row });
+    session = panelDrawerDrag.start(item, row, { x: e.clientX, y: e.clientY });
   });
   handle.addEventListener("pointermove", (e) => {
-    if (!drag.isDragging || activeDragSessionId === null) return;
-    const p = { x: e.clientX, y: e.clientY };
-    const payload: ItemDragPoint = { sessionId: activeDragSessionId, locator, x: p.x, y: p.y };
-    moveDrawerDrag(payload);
+    if (session === null) return;
+    panelDrawerDrag.move(session, { x: e.clientX, y: e.clientY });
   });
   handle.addEventListener("pointerup", (e) => {
-    if (drag.didDrag && activeDragSessionId !== null) {
-      const p = { x: e.clientX, y: e.clientY };
-      const payload: ItemDragPoint = { sessionId: activeDragSessionId, locator, x: p.x, y: p.y };
-      void endDrawerDrag(payload);
-    }
-    releaseDragSource(row, false);
-    drag.pointerUp();
+    if (session === null) return;
+    const ending = session;
+    session = null;
+    void panelDrawerDrag.end(ending, { x: e.clientX, y: e.clientY });
   });
-  handle.addEventListener("pointercancel", () => {
-    const didDrag = drag.didDrag;
-    releaseDragSource(row, didDrag, "pointercancel");
-    drag.pointerUp();
-  });
-  handle.addEventListener("lostpointercapture", () => {
-    const didDrag = drag.didDrag;
-    releaseDragSource(row, didDrag, "lostpointercapture");
-    drag.pointerUp();
-  });
+  const cancel = (reason: DrawerDragCancelReason) => {
+    if (session === null) return;
+    const cancelled = session;
+    session = null;
+    panelDrawerDrag.cancel(reason, cancelled);
+  };
+  handle.addEventListener("pointercancel", () => cancel("pointercancel"));
+  handle.addEventListener("lostpointercapture", () => cancel("lostpointercapture"));
   handle.addEventListener("click", (e) => {
     e.stopPropagation();
     e.preventDefault();
@@ -1447,10 +1352,7 @@ document.addEventListener("keydown", (e) => {
       return;
     case "Escape":
       e.preventDefault();
-      if (activeDragSource) {
-        releaseDragSource(activeDragSource, true, "explicit");
-        return;
-      }
+      if (panelDrawerDrag.cancel("explicit") !== null) return;
       const removeModal = document.getElementById("remove-modal")!;
       const favoritesMenu = document.getElementById("favorites-more-menu")!;
       const transientOpen = multiSelect.active
@@ -1519,7 +1421,7 @@ window.addEventListener("keydown", (e) => {
 // Focus loss (alt-tab, minimize) aborts an in-flight handle drag so the row
 // doesn't stay stuck in a held/dragging state.
 window.addEventListener("blur", () => {
-  if (activeDragSource) releaseDragSource(activeDragSource, true, "window-blur");
+  panelDrawerDrag.cancel("window-blur");
 });
 
 searchInput.addEventListener("input", () => {

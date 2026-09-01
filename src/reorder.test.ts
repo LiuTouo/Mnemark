@@ -1,24 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { insertBefore, insertionIndex, moveItem, moveOne } from "./reorder";
-
-describe("moveItem", () => {
-  it("moves an item forward", () => {
-    expect(moveItem(["a", "b", "c", "d"], 1, 3)).toEqual(["a", "c", "d", "b"]);
-  });
-
-  it("moves an item backward", () => {
-    expect(moveItem(["a", "b", "c", "d"], 3, 0)).toEqual(["d", "a", "b", "c"]);
-  });
-
-  it("is a no-op for same index", () => {
-    expect(moveItem(["a", "b", "c"], 1, 1)).toEqual(["a", "b", "c"]);
-  });
-
-  it("returns a clone unchanged for out-of-range", () => {
-    expect(moveItem(["a", "b"], -1, 0)).toEqual(["a", "b"]);
-    expect(moveItem(["a", "b"], 5, 0)).toEqual(["a", "b"]);
-  });
-});
+import { insertBefore, moveOne } from "./reorder";
 
 describe("moveOne up/down boundaries", () => {
   const abc = ["A", "B", "C"];
@@ -48,7 +29,7 @@ describe("moveOne up/down boundaries", () => {
   });
 });
 
-describe("insertBefore / insertionIndex", () => {
+describe("insertBefore", () => {
   it("moves an id before a target", () => {
     expect(insertBefore(["a", "b", "c", "d"], "d", "b")).toEqual(["a", "d", "b", "c"]);
   });
@@ -68,10 +49,5 @@ describe("insertBefore / insertionIndex", () => {
   it("moves an item to either edge", () => {
     expect(insertBefore(["a", "b", "c"], "c", "a")).toEqual(["c", "a", "b"]);
     expect(insertBefore(["a", "b", "c"], "a", null)).toEqual(["b", "c", "a"]);
-  });
-
-  it("reports the insertion index for a drop before a row", () => {
-    expect(insertionIndex(["a", "b", "c", "d"], "d", "b")).toBe(1);
-    expect(insertionIndex(["a", "b", "c"], "a", null)).toBe(2);
   });
 });

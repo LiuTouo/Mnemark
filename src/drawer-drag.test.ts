@@ -3,20 +3,29 @@ import {
   createDrawerDragLifecycle,
 } from "./drawer-drag";
 import type {
-  DrawerCollectionDragPoint,
   DrawerCollectionDragStart,
-  DrawerCollectionReorderAdapter,
-  DrawerCollectionReorderContext,
-  DrawerDragAdapter,
   DrawerDragCancelReason,
-  DrawerDragReorderAdapter,
-  DrawerDragReorderGeometry,
-  DrawerDragReorderState,
+  DrawerDragPoint,
   DrawerDragStart,
-  DrawerDragTargetState,
   DrawerDragTerminalOutcome,
+  DrawerDragVisual,
 } from "./drawer-drag";
-import type { ItemDragPoint, ItemDragStart, ItemDragVisual } from "./drag";
+
+type DrawerDragAdapter = Parameters<typeof createDrawerDragLifecycle<string>>[0];
+type DrawerDragItemContext = Parameters<DrawerDragAdapter["lookupMembership"]>[0];
+type DrawerDragItemPoint = Parameters<DrawerDragAdapter["collectionAt"]>[0];
+type DrawerDragTargetState = Parameters<DrawerDragAdapter["renderTargets"]>[0];
+type DrawerDragReorderAdapter = NonNullable<DrawerDragAdapter["reorder"]>;
+type DrawerDragReorderGeometry = ReturnType<DrawerDragReorderAdapter["measure"]>;
+type DrawerDragReorderState = Parameters<DrawerDragReorderAdapter["render"]>[0];
+type DrawerCollectionReorderAdapter = NonNullable<DrawerDragAdapter["collectionReorder"]>;
+type DrawerCollectionReorderContext = NonNullable<
+  ReturnType<DrawerCollectionReorderAdapter["context"]>
+>;
+
+type FixtureItemStart = DrawerDragStart<string>;
+type FixtureCollectionStart = DrawerCollectionDragStart<string>;
+type FixturePoint = DrawerDragPoint;
 
 function deferred<T>(): {
   promise: Promise<T>;
@@ -33,34 +42,33 @@ function deferred<T>(): {
 }
 
 function startFact(
-  sessionId: number,
-  visual: ItemDragVisual = { kind: "Text", preview: "clip", thumbnailBase64: null },
-): DrawerDragStart<string> {
+  fixtureId: number,
+  visual: DrawerDragVisual = { kind: "Text", preview: "clip", thumbnailBase64: null },
+): FixtureItemStart {
   return {
-    sessionId,
-    locator: { scope: "history", id: `clip-${sessionId}` },
+    kind: "item",
+    locator: { scope: "history", id: `clip-${fixtureId}` },
     visual,
     x: 10,
     y: 20,
-    source: `row-${sessionId}`,
+    source: `row-${fixtureId}`,
   };
 }
 
-function favoriteStartFact(sessionId: number, snapshotId: string): DrawerDragStart<string> {
+function favoriteStartFact(fixtureId: number, snapshotId: string): FixtureItemStart {
   return {
-    ...startFact(sessionId),
+    ...startFact(fixtureId),
     locator: { scope: "favorite", id: snapshotId },
     source: `drawer-row-${snapshotId}`,
   };
 }
 
 function collectionStartFact(
-  sessionId: number,
+  _fixtureId: number,
   collectionId = "drawer-b",
-): DrawerCollectionDragStart<string> {
+): FixtureCollectionStart {
   return {
     kind: "collection",
-    sessionId,
     collectionId,
     x: 10,
     y: 120,
@@ -69,23 +77,18 @@ function collectionStartFact(
 }
 
 function collectionPoint(
-  start: DrawerCollectionDragStart<unknown>,
+  start: FixtureCollectionStart,
   x = start.x,
   y = start.y,
-): DrawerCollectionDragPoint {
+): FixturePoint {
   return {
-    kind: "collection",
-    sessionId: start.sessionId,
-    collectionId: start.collectionId,
     x,
     y,
   };
 }
 
-function point(start: ItemDragStart, x = start.x, y = start.y): ItemDragPoint {
+function point(start: FixtureItemStart, x = start.x, y = start.y): FixturePoint {
   return {
-    sessionId: start.sessionId,
-    locator: start.locator,
     x,
     y,
   };
@@ -116,7 +119,7 @@ class MemoryDrawerReorderAdapter implements DrawerDragReorderAdapter {
   successRecovery: Promise<void> | null = null;
   failureRecovery: Promise<void> | null = null;
 
-  context(start: ItemDragStart) {
+  context(start: DrawerDragItemContext) {
     if (this.projection !== "all" || start.locator.scope !== "favorite") return null;
     return {
       collectionId: this.collectionId,
@@ -209,19 +212,20 @@ class MemoryCollectionReorderAdapter implements DrawerCollectionReorderAdapter {
   }
 }
 
-class MemoryDrawerDragAdapter implements DrawerDragAdapter<string> {
-  readonly memberships = new Map<number, ReturnType<typeof deferred<readonly string[]>>>();
+class MemoryDrawerDragAdapter implements DrawerDragAdapter {
+  readonly memberships = new Map<string, ReturnType<typeof deferred<readonly string[]>>>();
   readonly targetStates: DrawerDragTargetState[] = [];
   readonly activatedSources: string[] = [];
   readonly releasedSources: string[] = [];
-  readonly begunVisuals: ItemDragStart[] = [];
-  readonly movedVisuals: ItemDragPoint[] = [];
+  readonly begunVisuals: DrawerDragItemContext[] = [];
+  readonly movedVisuals: DrawerDragItemPoint[] = [];
   readonly finishedVisuals: DrawerDragTerminalOutcome[] = [];
-  readonly finishedVisualReasons: Array<DrawerDragCancelReason | undefined> = [];
+  readonly finishedVisualReasons: Array<DrawerDragCancelReason | "item-reorder" | undefined> = [];
   readonly commits: Array<{ collectionId: string; locatorId: string }> = [];
   readonly unavailable: string[] = [];
   readonly successes: string[] = [];
   readonly failures: unknown[] = [];
+  readonly suppressedSources: string[] = [];
   collectionId: string | null = "drawer-a";
   commitError: unknown | null = null;
   commitGate: Promise<void> | null = null;
@@ -232,13 +236,13 @@ class MemoryDrawerDragAdapter implements DrawerDragAdapter<string> {
   indicatorVisible = false;
   frameScheduled = false;
 
-  lookupMembership(start: ItemDragStart): Promise<readonly string[]> {
+  lookupMembership(start: DrawerDragItemContext): Promise<readonly string[]> {
     const request = deferred<readonly string[]>();
-    this.memberships.set(start.sessionId, request);
+    this.memberships.set(start.locator.id, request);
     return request.promise;
   }
 
-  collectionAt(_point: ItemDragPoint): string | null {
+  collectionAt(_point: DrawerDragItemPoint): string | null {
     return this.collectionId;
   }
 
@@ -256,17 +260,21 @@ class MemoryDrawerDragAdapter implements DrawerDragAdapter<string> {
     this.releasedSources.push(source);
   }
 
-  beginVisual(start: ItemDragStart): void {
+  suppressClick(source: string): void {
+    this.suppressedSources.push(source);
+  }
+
+  beginVisual(start: DrawerDragItemContext): void {
     this.begunVisuals.push(start);
   }
 
-  moveVisual(nextPoint: ItemDragPoint): void {
+  moveVisual(nextPoint: DrawerDragItemPoint): void {
     this.movedVisuals.push(nextPoint);
   }
 
   finishVisual(
     outcome: DrawerDragTerminalOutcome,
-    reason?: DrawerDragCancelReason,
+    reason?: DrawerDragCancelReason | "item-reorder",
   ): void {
     this.finishedVisuals.push(outcome);
     this.finishedVisualReasons.push(reason);
@@ -278,7 +286,7 @@ class MemoryDrawerDragAdapter implements DrawerDragAdapter<string> {
     this.frameScheduled = false;
   }
 
-  async commit(collectionId: string, start: ItemDragStart): Promise<void> {
+  async commit(collectionId: string, start: DrawerDragItemContext): Promise<void> {
     this.commits.push({ collectionId, locatorId: start.locator.id });
     if (this.commitError !== null) throw this.commitError;
     if (this.commitGate !== null) await this.commitGate;
@@ -300,10 +308,10 @@ class MemoryDrawerDragAdapter implements DrawerDragAdapter<string> {
 
 async function resolveMembership(
   adapter: MemoryDrawerDragAdapter,
-  sessionId: number,
+  start: FixtureItemStart,
   ids: readonly string[],
 ): Promise<void> {
-  adapter.memberships.get(sessionId)!.resolve(ids);
+  adapter.memberships.get(start.locator.id)!.resolve(ids);
   await Promise.resolve();
 }
 
@@ -335,36 +343,52 @@ afterEach(() => {
 });
 
 describe("Drawer drag lifecycle", () => {
-  it("allocates monotonic session ids across item and collection callers", () => {
+  it("owns session identity and rejects cancellation from a replaced session", () => {
     const adapter = new MemoryDrawerDragAdapter();
-    const lifecycle = createDrawerDragLifecycle(adapter);
+    const lifecycle = createDrawerDragLifecycle<string>(adapter);
+    const first = lifecycle.start({
+      kind: "item",
+      locator: { scope: "history", id: "clip-first" },
+      visual: { kind: "Text", preview: "first", thumbnailBase64: null },
+      x: 10,
+      y: 20,
+      source: "row-first",
+    });
+    const second = lifecycle.start({
+      kind: "item",
+      locator: { scope: "history", id: "clip-second" },
+      visual: { kind: "Text", preview: "second", thumbnailBase64: null },
+      x: 30,
+      y: 40,
+      source: "row-second",
+    });
 
-    expect(lifecycle.nextSessionId()).toBe(1);
-    expect(lifecycle.nextSessionId()).toBe(2);
-    lifecycle.start(collectionStartFact(10));
-    expect(lifecycle.nextSessionId()).toBe(11);
+    expect(first).not.toBe(second);
+    expect(lifecycle.cancel("explicit", first)).toBeNull();
+    expect(lifecycle.cancel("explicit", second)).toBe("cancelled");
   });
 
   it("keeps collection reorder pending below the movement threshold", async () => {
     const { adapter, collectionReorder, lifecycle } = collectionLifecycleFixture();
     const start = collectionStartFact(30);
 
-    lifecycle.start(start);
-    lifecycle.move(collectionPoint(start, 13, 124));
+    const session = lifecycle.start(start);
+    lifecycle.move(session, collectionPoint(start, 13, 124));
 
     expect(collectionReorder.states).toEqual([]);
     expect(adapter.activatedSources).toEqual([]);
-    expect(lifecycle.consumeClickSuppression(30)).toBe(false);
-    await expect(lifecycle.end(collectionPoint(start, 13, 124))).resolves.toBe("no-op");
+    expect(adapter.suppressedSources).toEqual([]);
+    await expect(lifecycle.end(session, collectionPoint(start, 13, 124))).resolves.toBe("no-op");
     expect(collectionReorder.commits).toEqual([]);
   });
 
-  it("suppresses one synthetic click after collection drag completes", async () => {
+  it("requests synthetic-click suppression once when collection drag begins", async () => {
     const { adapter, collectionReorder, lifecycle } = collectionLifecycleFixture();
     const start = collectionStartFact(31);
 
-    lifecycle.start(start);
-    lifecycle.move(collectionPoint(start, 20, 120));
+    const session = lifecycle.start(start);
+    lifecycle.move(session, collectionPoint(start, 20, 120));
+    lifecycle.move(session, collectionPoint(start, 30, 130));
 
     expect(adapter.activatedSources).toEqual(["collection-row-drawer-b"]);
     expect(collectionReorder.states[collectionReorder.states.length - 1]).toEqual({
@@ -372,9 +396,8 @@ describe("Drawer drag lifecycle", () => {
       inside: true,
       beforeId: "drawer-c",
     });
-    await expect(lifecycle.end(collectionPoint(start, 20, 120))).resolves.toBe("no-op");
-    expect(lifecycle.consumeClickSuppression(31)).toBe(true);
-    expect(lifecycle.consumeClickSuppression(31)).toBe(false);
+    await expect(lifecycle.end(session, collectionPoint(start, 20, 120))).resolves.toBe("no-op");
+    expect(adapter.suppressedSources).toEqual(["collection-row-drawer-b"]);
     expect(collectionReorder.states[collectionReorder.states.length - 1]).toEqual({
       active: false,
       inside: false,
@@ -386,10 +409,10 @@ describe("Drawer drag lifecycle", () => {
     const { adapter, collectionReorder, lifecycle } = collectionLifecycleFixture();
     const start = collectionStartFact(32);
 
-    lifecycle.start(start);
-    lifecycle.move(collectionPoint(start, 20, 120));
+    const session = lifecycle.start(start);
+    lifecycle.move(session, collectionPoint(start, 20, 120));
 
-    await expect(lifecycle.end(collectionPoint(start, 20, 10))).resolves.toBe("success");
+    await expect(lifecycle.end(session, collectionPoint(start, 20, 10))).resolves.toBe("success");
     expect(collectionReorder.commits).toEqual([
       ["drawer-b", "drawer-a", "drawer-c", "drawer-d"],
     ]);
@@ -410,10 +433,10 @@ describe("Drawer drag lifecycle", () => {
     collectionReorder.successRecovery = recovery.promise;
     const start = collectionStartFact(41);
 
-    lifecycle.start(start);
-    lifecycle.move(collectionPoint(start, 20, 10));
+    const session = lifecycle.start(start);
+    lifecycle.move(session, collectionPoint(start, 20, 10));
     let settled = false;
-    const outcome = lifecycle.end(collectionPoint(start, 20, 10)).then((result) => {
+    const outcome = lifecycle.end(session, collectionPoint(start, 20, 10)).then((result) => {
       settled = true;
       return result;
     });
@@ -434,9 +457,9 @@ describe("Drawer drag lifecycle", () => {
     collectionReorder.successRecovery = recovery.promise;
     const start = collectionStartFact(42);
 
-    lifecycle.start(start);
-    lifecycle.move(collectionPoint(start, 20, 10));
-    const outcome = lifecycle.end(collectionPoint(start, 20, 10));
+    const session = lifecycle.start(start);
+    lifecycle.move(session, collectionPoint(start, 20, 10));
+    const outcome = lifecycle.end(session, collectionPoint(start, 20, 10));
     await new Promise((resolve) => setTimeout(resolve, 0));
     recovery.reject(error);
 
@@ -454,25 +477,25 @@ describe("Drawer drag lifecycle", () => {
     const { collectionReorder, lifecycle } = collectionLifecycleFixture();
     const start = collectionStartFact(33);
 
-    lifecycle.start(start);
-    lifecycle.move(collectionPoint(start, 20, y));
+    const session = lifecycle.start(start);
+    lifecycle.move(session, collectionPoint(start, 20, y));
 
     expect(collectionReorder.states[collectionReorder.states.length - 1]).toEqual({
       active: true,
       inside: true,
       beforeId,
     });
-    lifecycle.cancel(33, "explicit");
+    lifecycle.cancel("explicit", session);
   });
 
   it("treats the current collection insertion position as a no-op", async () => {
     const { adapter, collectionReorder, lifecycle } = collectionLifecycleFixture();
     const start = collectionStartFact(34);
 
-    lifecycle.start(start);
-    lifecycle.move(collectionPoint(start, 20, 120));
+    const session = lifecycle.start(start);
+    lifecycle.move(session, collectionPoint(start, 20, 120));
 
-    await expect(lifecycle.end(collectionPoint(start, 20, 120))).resolves.toBe("no-op");
+    await expect(lifecycle.end(session, collectionPoint(start, 20, 120))).resolves.toBe("no-op");
     expect(collectionReorder.commits).toEqual([]);
     expect(collectionReorder.successes).toEqual([]);
     expectClean(adapter, "collection-row-drawer-b");
@@ -484,15 +507,20 @@ describe("Drawer drag lifecycle", () => {
       lifecycle: dragLifecycle,
     } = collectionLifecycleFixture();
     const start = collectionStartFact(35);
-    dragLifecycle.start(start);
-    dragLifecycle.move(collectionPoint(start, 20, 10));
-    await dragLifecycle.end(collectionPoint(start, 20, 10));
+    const dragSession = dragLifecycle.start(start);
+    dragLifecycle.move(dragSession, collectionPoint(start, 20, 10));
+    await dragLifecycle.end(dragSession, collectionPoint(start, 20, 10));
 
     const {
       collectionReorder: menuReorder,
       lifecycle: menuLifecycle,
     } = collectionLifecycleFixture();
-    await expect(menuLifecycle.moveCollection("drawer-b", -1)).resolves.toBe("success");
+    const menuSession = menuLifecycle.start({
+      kind: "collection-move",
+      collectionId: "drawer-b",
+      direction: -1,
+    });
+    await expect(menuLifecycle.end(menuSession)).resolves.toBe("success");
 
     expect(menuReorder.commits).toEqual(dragReorder.commits);
   });
@@ -503,15 +531,20 @@ describe("Drawer drag lifecycle", () => {
       lifecycle: dragLifecycle,
     } = collectionLifecycleFixture();
     const start = collectionStartFact(36);
-    dragLifecycle.start(start);
-    dragLifecycle.move(collectionPoint(start, 20, 300));
-    await dragLifecycle.end(collectionPoint(start, 20, 300));
+    const dragSession = dragLifecycle.start(start);
+    dragLifecycle.move(dragSession, collectionPoint(start, 20, 300));
+    await dragLifecycle.end(dragSession, collectionPoint(start, 20, 300));
 
     const {
       collectionReorder: menuReorder,
       lifecycle: menuLifecycle,
     } = collectionLifecycleFixture();
-    await expect(menuLifecycle.moveCollection("drawer-b", 1)).resolves.toBe("success");
+    const menuSession = menuLifecycle.start({
+      kind: "collection-move",
+      collectionId: "drawer-b",
+      direction: 1,
+    });
+    await expect(menuLifecycle.end(menuSession)).resolves.toBe("success");
 
     expect(menuReorder.commits).toEqual(dragReorder.commits);
   });
@@ -519,8 +552,18 @@ describe("Drawer drag lifecycle", () => {
   it("treats collection Move Up and Move Down boundaries as no-ops", async () => {
     const { collectionReorder, lifecycle } = collectionLifecycleFixture();
 
-    await expect(lifecycle.moveCollection("drawer-a", -1)).resolves.toBe("no-op");
-    await expect(lifecycle.moveCollection("drawer-d", 1)).resolves.toBe("no-op");
+    const firstSession = lifecycle.start({
+      kind: "collection-move",
+      collectionId: "drawer-a",
+      direction: -1,
+    });
+    await expect(lifecycle.end(firstSession)).resolves.toBe("no-op");
+    const lastSession = lifecycle.start({
+      kind: "collection-move",
+      collectionId: "drawer-d",
+      direction: 1,
+    });
+    await expect(lifecycle.end(lastSession)).resolves.toBe("no-op");
     expect(collectionReorder.commits).toEqual([]);
     expect(collectionReorder.successes).toEqual([]);
   });
@@ -533,10 +576,10 @@ describe("Drawer drag lifecycle", () => {
     collectionReorder.failureRecovery = recovery.promise;
     const start = collectionStartFact(37);
 
-    lifecycle.start(start);
-    lifecycle.move(collectionPoint(start, 20, 10));
+    const session = lifecycle.start(start);
+    lifecycle.move(session, collectionPoint(start, 20, 10));
     let settled = false;
-    const outcome = lifecycle.end(collectionPoint(start, 20, 10)).then((result) => {
+    const outcome = lifecycle.end(session, collectionPoint(start, 20, 10)).then((result) => {
       settled = true;
       return result;
     });
@@ -562,11 +605,11 @@ describe("Drawer drag lifecycle", () => {
     const { adapter, collectionReorder, lifecycle } = collectionLifecycleFixture();
     const start = collectionStartFact(38);
 
-    lifecycle.start(start);
-    lifecycle.move(collectionPoint(start, 20, 10));
+    const session = lifecycle.start(start);
+    lifecycle.move(session, collectionPoint(start, 20, 10));
 
-    expect(lifecycle.cancel(38, reason)).toBe("cancelled");
-    expect(lifecycle.cancel(38, reason)).toBeNull();
+    expect(lifecycle.cancel(reason, session)).toBe("cancelled");
+    expect(lifecycle.cancel(reason, session)).toBeNull();
     expect(collectionReorder.commits).toEqual([]);
     expect(adapter.releasedSources).toEqual(["collection-row-drawer-b"]);
     expectClean(adapter, "collection-row-drawer-b");
@@ -577,17 +620,17 @@ describe("Drawer drag lifecycle", () => {
     const stale = collectionStartFact(39, "drawer-b");
     const current = collectionStartFact(40, "drawer-c");
 
-    lifecycle.start(stale);
-    lifecycle.move(collectionPoint(stale, 20, 10));
-    lifecycle.start(current);
+    const staleSession = lifecycle.start(stale);
+    lifecycle.move(staleSession, collectionPoint(stale, 20, 10));
+    const currentSession = lifecycle.start(current);
     const stateCount = collectionReorder.states.length;
 
-    lifecycle.move(collectionPoint(stale, 20, 390));
-    await expect(lifecycle.end(collectionPoint(stale, 20, 390))).resolves.toBeNull();
-    expect(lifecycle.cancel(39, "explicit")).toBeNull();
+    lifecycle.move(staleSession, collectionPoint(stale, 20, 390));
+    await expect(lifecycle.end(staleSession, collectionPoint(stale, 20, 390))).resolves.toBeNull();
+    expect(lifecycle.cancel("explicit", staleSession)).toBeNull();
     expect(collectionReorder.states).toHaveLength(stateCount);
     expect(collectionReorder.commits).toEqual([]);
-    lifecycle.cancel(40, "explicit");
+    lifecycle.cancel("explicit", currentSession);
   });
 
   it("prioritizes an active-list reorder over a collection drop", async () => {
@@ -598,9 +641,9 @@ describe("Drawer drag lifecycle", () => {
     const lifecycle = createDrawerDragLifecycle(adapter);
     const start = favoriteStartFact(18, "snapshot-d");
 
-    lifecycle.start(start);
+    const session = lifecycle.start(start);
 
-    await expect(lifecycle.end(point(start, 50, 125))).resolves.toBe("success");
+    await expect(lifecycle.end(session, point(start, 50, 125))).resolves.toBe("success");
     expect(reorder.commits).toEqual([{
       collectionId: "drawer-a",
       orderedItemIds: ["snapshot-a", "snapshot-d", "snapshot-b", "snapshot-c"],
@@ -652,8 +695,8 @@ describe("Drawer drag lifecycle", () => {
     const lifecycle = createDrawerDragLifecycle(adapter);
     const start = favoriteStartFact(19, "snapshot-a");
 
-    lifecycle.start(start);
-    lifecycle.move(point(start, 50, 370));
+    const session = lifecycle.start(start);
+    lifecycle.move(session, point(start, 50, 370));
     expect(reorder.states[reorder.states.length - 1]).toMatchObject({ beforeId: "snapshot-e" });
 
     const firstFrameId = [...frames.keys()][0];
@@ -664,10 +707,52 @@ describe("Drawer drag lifecycle", () => {
     expect(reorder.scrollAmounts[0]).toBeGreaterThan(0);
     expect(reorder.states[reorder.states.length - 1]).toMatchObject({ beforeId: null });
     const pendingFrameId = [...frames.keys()][0];
-    lifecycle.move(point(start, 50, 200));
+    lifecycle.move(session, point(start, 50, 200));
     expect(cancelled).toContain(pendingFrameId);
 
-    lifecycle.cancel(19, "explicit");
+    lifecycle.cancel("explicit", session);
+    vi.unstubAllGlobals();
+  });
+
+  it("auto-scrolls upward faster as the pointer approaches the top edge", () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 1;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      const id = nextFrame++;
+      frames.set(id, callback);
+      return id;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => {
+      frames.delete(id);
+    });
+    const adapter = new MemoryDrawerDragAdapter();
+    const reorder = new MemoryDrawerReorderAdapter();
+    reorder.geometry = {
+      ...reorder.geometry,
+      list: { left: 0, top: 0, right: 100, bottom: 400 },
+    };
+    adapter.reorder = reorder;
+    const lifecycle = createDrawerDragLifecycle(adapter);
+    const nearStart = favoriteStartFact(43, "snapshot-a");
+    const nearSession = lifecycle.start(nearStart);
+    lifecycle.move(nearSession, point(nearStart, 50, 30));
+    const nearFrameId = [...frames.keys()][0];
+    const nearFrame = frames.get(nearFrameId)!;
+    frames.delete(nearFrameId);
+    nearFrame(0);
+    lifecycle.cancel("explicit", nearSession);
+
+    const farStart = favoriteStartFact(44, "snapshot-b");
+    const farSession = lifecycle.start(farStart);
+    lifecycle.move(farSession, point(farStart, 50, 0));
+    const farFrameId = [...frames.keys()][0];
+    const farFrame = frames.get(farFrameId)!;
+    frames.delete(farFrameId);
+    farFrame(0);
+
+    expect(reorder.scrollAmounts[0]).toBeLessThan(0);
+    expect(reorder.scrollAmounts[1]).toBeLessThan(reorder.scrollAmounts[0]);
+    lifecycle.cancel("explicit", farSession);
     vi.unstubAllGlobals();
   });
 
@@ -692,11 +777,11 @@ describe("Drawer drag lifecycle", () => {
     const lifecycle = createDrawerDragLifecycle(adapter);
     const start = favoriteStartFact(27, "snapshot-a");
 
-    lifecycle.start(start);
-    lifecycle.move(point(start, 50, 390));
+    const session = lifecycle.start(start);
+    lifecycle.move(session, point(start, 50, 390));
     expect(frames.has(1)).toBe(true);
 
-    expect(lifecycle.cancel(27, "explicit")).toBe("cancelled");
+    expect(lifecycle.cancel("explicit", session)).toBe("cancelled");
     expect(cancelled).toEqual([1]);
     expect(frames.size).toBe(0);
     expect(reorder.states[reorder.states.length - 1]).toMatchObject({ active: false });
@@ -712,8 +797,8 @@ describe("Drawer drag lifecycle", () => {
     const staleStart = favoriteStartFact(20, "snapshot-d");
     const currentStart = favoriteStartFact(21, "snapshot-c");
 
-    lifecycle.start(staleStart);
-    const staleEnd = lifecycle.end(point(staleStart, 50, 125));
+    const staleSession = lifecycle.start(staleStart);
+    const staleEnd = lifecycle.end(staleSession, point(staleStart, 50, 125));
     await Promise.resolve();
     lifecycle.start(currentStart);
     commit.resolve();
@@ -733,38 +818,71 @@ describe("Drawer drag lifecycle", () => {
     const staleStart = favoriteStartFact(28, "snapshot-d");
     const currentStart = favoriteStartFact(29, "snapshot-c");
 
-    lifecycle.start(staleStart);
+    const staleSession = lifecycle.start(staleStart);
     lifecycle.start(currentStart);
     const stateCount = reorder.states.length;
-    lifecycle.move(point(staleStart, 50, 125));
+    lifecycle.move(staleSession, point(staleStart, 50, 125));
 
-    await expect(lifecycle.end(point(staleStart, 50, 125))).resolves.toBeNull();
-    expect(lifecycle.cancel(28, "explicit")).toBeNull();
+    await expect(lifecycle.end(staleSession, point(staleStart, 50, 125))).resolves.toBeNull();
+    expect(lifecycle.cancel("explicit", staleSession)).toBeNull();
     expect(reorder.states).toHaveLength(stateCount);
     expect(reorder.commits).toEqual([]);
   });
 
   it.each([
-    { label: "first", y: 0, beforeId: "snapshot-b" },
-    { label: "middle", y: 200, beforeId: "snapshot-c" },
-    { label: "last", y: 300, beforeId: "snapshot-d" },
-    { label: "list-end", y: 450, beforeId: null },
-  ])("renders the $label insertion position", ({ y, beforeId }) => {
+    {
+      label: "first",
+      movedId: "snapshot-d",
+      y: 0,
+      beforeId: "snapshot-a",
+      expected: ["snapshot-d", "snapshot-a", "snapshot-b", "snapshot-c"],
+    },
+    {
+      label: "middle",
+      movedId: "snapshot-a",
+      y: 200,
+      beforeId: "snapshot-c",
+      expected: ["snapshot-b", "snapshot-a", "snapshot-c", "snapshot-d"],
+    },
+    {
+      label: "last",
+      movedId: "snapshot-a",
+      y: 300,
+      beforeId: "snapshot-d",
+      expected: ["snapshot-b", "snapshot-c", "snapshot-a", "snapshot-d"],
+    },
+    {
+      label: "list-end",
+      movedId: "snapshot-a",
+      y: 450,
+      beforeId: null,
+      expected: ["snapshot-b", "snapshot-c", "snapshot-d", "snapshot-a"],
+    },
+  ])("commits the $label insertion position through the lifecycle", async ({
+    movedId,
+    y,
+    beforeId,
+    expected,
+  }) => {
     const adapter = new MemoryDrawerDragAdapter();
     const reorder = new MemoryDrawerReorderAdapter();
     adapter.reorder = reorder;
     const lifecycle = createDrawerDragLifecycle(adapter);
-    const start = favoriteStartFact(22, "snapshot-a");
+    const start = favoriteStartFact(22, movedId);
 
-    lifecycle.start(start);
-    lifecycle.move(point(start, 50, y));
+    const session = lifecycle.start(start);
+    lifecycle.move(session, point(start, 50, y));
 
     expect(reorder.states[reorder.states.length - 1]).toMatchObject({
       active: true,
       inside: true,
       beforeId,
     });
-    lifecycle.cancel(22, "explicit");
+    await expect(lifecycle.end(session, point(start, 50, y))).resolves.toBe("success");
+    expect(reorder.commits).toEqual([{
+      collectionId: "drawer-a",
+      orderedItemIds: expected,
+    }]);
   });
 
   it.each([
@@ -781,9 +899,9 @@ describe("Drawer drag lifecycle", () => {
       const lifecycle = createDrawerDragLifecycle(adapter);
       const start = favoriteStartFact(23, "snapshot-a");
 
-      lifecycle.start(start);
-      await resolveMembership(adapter, 23, []);
-      await expect(lifecycle.end(point(start, 50, 200))).resolves.toBe("no-op");
+      const session = lifecycle.start(start);
+      await resolveMembership(adapter, start, []);
+      await expect(lifecycle.end(session, point(start, 50, 200))).resolves.toBe("no-op");
 
       expect(reorder.commits).toEqual([]);
     },
@@ -797,8 +915,8 @@ describe("Drawer drag lifecycle", () => {
     const lifecycle = createDrawerDragLifecycle(adapter);
     const start = favoriteStartFact(24, "snapshot-b");
 
-    lifecycle.start(start);
-    await expect(lifecycle.end(point(start, 50, 200))).resolves.toBe("no-op");
+    const session = lifecycle.start(start);
+    await expect(lifecycle.end(session, point(start, 50, 200))).resolves.toBe("no-op");
 
     expect(reorder.commits).toEqual([]);
     expect(adapter.commits).toEqual([]);
@@ -834,9 +952,9 @@ describe("Drawer drag lifecycle", () => {
     const start = favoriteStartFact(25, "snapshot-d");
     let settled = false;
 
-    lifecycle.start(start);
+    const session = lifecycle.start(start);
     expect(frames.has(1)).toBe(true);
-    const outcome = lifecycle.end(point(start, 50, 125)).then((result) => {
+    const outcome = lifecycle.end(session, point(start, 50, 125)).then((result) => {
       settled = true;
       return result;
     });
@@ -848,6 +966,23 @@ describe("Drawer drag lifecycle", () => {
     expect(settled).toBe(false);
     recovery.resolve();
     await expect(outcome).resolves.toBe("success");
+    expectClean(adapter, "drawer-row-snapshot-d");
+  });
+
+  it("fails and cleans up when authoritative reload rejects after item reorder", async () => {
+    const adapter = new MemoryDrawerDragAdapter();
+    const reorder = new MemoryDrawerReorderAdapter();
+    const error = new Error("reload rejected");
+    reorder.successRecovery = Promise.reject(error);
+    adapter.reorder = reorder;
+    const lifecycle = createDrawerDragLifecycle(adapter);
+    const start = favoriteStartFact(26, "snapshot-d");
+    const session = lifecycle.start(start);
+
+    await expect(lifecycle.end(session, point(start, 50, 125))).resolves.toBe("failed");
+
+    expect(reorder.commits).toHaveLength(1);
+    expect(reorder.failures).toEqual([error]);
     expectClean(adapter, "drawer-row-snapshot-d");
   });
 
@@ -863,8 +998,8 @@ describe("Drawer drag lifecycle", () => {
     const start = favoriteStartFact(26, "snapshot-d");
     let settled = false;
 
-    lifecycle.start(start);
-    const outcome = lifecycle.end(point(start, 50, 125)).then((result) => {
+    const session = lifecycle.start(start);
+    const outcome = lifecycle.end(session, point(start, 50, 125)).then((result) => {
       settled = true;
       return result;
     });
@@ -883,12 +1018,12 @@ describe("Drawer drag lifecycle", () => {
     const lifecycle = createDrawerDragLifecycle(adapter);
     const start = startFact(1);
 
-    lifecycle.start(start);
-    lifecycle.move(point(start, 30, 40));
-    await resolveMembership(adapter, 1, []);
+    const session = lifecycle.start(start);
+    lifecycle.move(session, point(start, 30, 40));
+    await resolveMembership(adapter, start, []);
 
-    const firstEnd = lifecycle.end(point(start, 50, 60));
-    const duplicateEnd = lifecycle.end(point(start, 50, 60));
+    const firstEnd = lifecycle.end(session, point(start, 50, 60));
+    const duplicateEnd = lifecycle.end(session, point(start, 50, 60));
     await expect(duplicateEnd).resolves.toBeNull();
     await expect(firstEnd).resolves.toBe("success");
     expect(adapter.commits).toEqual([{ collectionId: "drawer-a", locatorId: "clip-1" }]);
@@ -903,15 +1038,15 @@ describe("Drawer drag lifecycle", () => {
     const firstCopy = favoriteStartFact(11, "snapshot-a");
 
     adapter.collectionId = "drawer-b";
-    lifecycle.start(firstCopy);
-    await resolveMembership(adapter, 11, ["drawer-a"]);
-    await expect(lifecycle.end(point(firstCopy))).resolves.toBe("success");
+    const firstSession = lifecycle.start(firstCopy);
+    await resolveMembership(adapter, firstCopy, ["drawer-a"]);
+    await expect(lifecycle.end(firstSession, point(firstCopy))).resolves.toBe("success");
 
     const secondCopy = favoriteStartFact(12, "snapshot-a");
     adapter.collectionId = "drawer-c";
-    lifecycle.start(secondCopy);
-    await resolveMembership(adapter, 12, ["drawer-a", "drawer-b"]);
-    await expect(lifecycle.end(point(secondCopy))).resolves.toBe("success");
+    const secondSession = lifecycle.start(secondCopy);
+    await resolveMembership(adapter, secondCopy, ["drawer-a", "drawer-b"]);
+    await expect(lifecycle.end(secondSession, point(secondCopy))).resolves.toBe("success");
 
     expect(adapter.commits).toEqual([
       { collectionId: "drawer-b", locatorId: "snapshot-a" },
@@ -924,15 +1059,15 @@ describe("Drawer drag lifecycle", () => {
     const lifecycle = createDrawerDragLifecycle(adapter);
     const start = startFact(2);
 
-    lifecycle.start(start);
-    await resolveMembership(adapter, 2, ["drawer-a"]);
+    const session = lifecycle.start(start);
+    await resolveMembership(adapter, start, ["drawer-a"]);
     expect(adapter.targetStates[adapter.targetStates.length - 1]).toMatchObject({
       active: true,
       membershipReady: true,
       targetId: null,
     });
 
-    await expect(lifecycle.end(point(start))).resolves.toBe("unavailable");
+    await expect(lifecycle.end(session, point(start))).resolves.toBe("unavailable");
     expect(adapter.commits).toEqual([]);
     expect(adapter.unavailable).toEqual(["drawer-a"]);
     expectClean(adapter, "row-2");
@@ -943,10 +1078,10 @@ describe("Drawer drag lifecycle", () => {
     const lifecycle = createDrawerDragLifecycle(adapter);
     const start = favoriteStartFact(15, "snapshot-member");
 
-    lifecycle.start(start);
-    await resolveMembership(adapter, 15, ["drawer-a"]);
+    const session = lifecycle.start(start);
+    await resolveMembership(adapter, start, ["drawer-a"]);
 
-    await expect(lifecycle.end(point(start))).resolves.toBe("unavailable");
+    await expect(lifecycle.end(session, point(start))).resolves.toBe("unavailable");
     expect(adapter.commits).toEqual([]);
     expect(adapter.unavailable).toEqual(["drawer-a"]);
     expectClean(adapter, "drawer-row-snapshot-member");
@@ -958,10 +1093,10 @@ describe("Drawer drag lifecycle", () => {
     const lifecycle = createDrawerDragLifecycle(adapter);
     const start = startFact(3);
 
-    lifecycle.start(start);
-    await resolveMembership(adapter, 3, []);
+    const session = lifecycle.start(start);
+    await resolveMembership(adapter, start, []);
 
-    await expect(lifecycle.end(point(start))).resolves.toBe("no-op");
+    await expect(lifecycle.end(session, point(start))).resolves.toBe("no-op");
     expect(adapter.commits).toEqual([]);
     expect(adapter.finishedVisuals).toEqual(["no-op"]);
     expectClean(adapter, "row-3");
@@ -973,20 +1108,20 @@ describe("Drawer drag lifecycle", () => {
     const oldStart = startFact(4);
     const freshStart = startFact(5);
 
-    lifecycle.start(oldStart);
-    lifecycle.start(freshStart);
+    const oldSession = lifecycle.start(oldStart);
+    const freshSession = lifecycle.start(freshStart);
     const stateCountAfterReplacement = adapter.targetStates.length;
-    await resolveMembership(adapter, 4, []);
-    lifecycle.move(point(oldStart, 99, 99));
-    await expect(lifecycle.end(point(oldStart))).resolves.toBeNull();
-    expect(lifecycle.cancel(4, "explicit")).toBeNull();
+    await resolveMembership(adapter, oldStart, []);
+    lifecycle.move(oldSession, point(oldStart, 99, 99));
+    await expect(lifecycle.end(oldSession, point(oldStart))).resolves.toBeNull();
+    expect(lifecycle.cancel("explicit", oldSession)).toBeNull();
 
     expect(adapter.targetStates).toHaveLength(stateCountAfterReplacement);
     expect(adapter.commits).toEqual([]);
     expect(adapter.finishedVisuals).toEqual(["replaced"]);
 
-    await resolveMembership(adapter, 5, []);
-    await expect(lifecycle.end(point(freshStart))).resolves.toBe("success");
+    await resolveMembership(adapter, freshStart, []);
+    await expect(lifecycle.end(freshSession, point(freshStart))).resolves.toBe("success");
     expect(adapter.commits).toEqual([{ collectionId: "drawer-a", locatorId: "clip-5" }]);
   });
 
@@ -996,16 +1131,16 @@ describe("Drawer drag lifecycle", () => {
     const staleStart = favoriteStartFact(13, "snapshot-stale");
     const currentStart = favoriteStartFact(14, "snapshot-current");
 
-    lifecycle.start(staleStart);
-    const staleEnd = lifecycle.end(point(staleStart));
-    lifecycle.start(currentStart);
-    await resolveMembership(adapter, 13, []);
+    const staleSession = lifecycle.start(staleStart);
+    const staleEnd = lifecycle.end(staleSession, point(staleStart));
+    const currentSession = lifecycle.start(currentStart);
+    await resolveMembership(adapter, staleStart, []);
 
     await expect(staleEnd).resolves.toBeNull();
     expect(adapter.commits).toEqual([]);
 
-    await resolveMembership(adapter, 14, []);
-    await expect(lifecycle.end(point(currentStart))).resolves.toBe("success");
+    await resolveMembership(adapter, currentStart, []);
+    await expect(lifecycle.end(currentSession, point(currentStart))).resolves.toBe("success");
     expect(adapter.commits).toEqual([
       { collectionId: "drawer-a", locatorId: "snapshot-current" },
     ]);
@@ -1020,9 +1155,9 @@ describe("Drawer drag lifecycle", () => {
     const error = new Error("late mutation rejection");
     adapter.commitGate = commit.promise;
 
-    lifecycle.start(staleStart);
-    await resolveMembership(adapter, 16, []);
-    const staleEnd = lifecycle.end(point(staleStart));
+    const staleSession = lifecycle.start(staleStart);
+    await resolveMembership(adapter, staleStart, []);
+    const staleEnd = lifecycle.end(staleSession, point(staleStart));
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(adapter.commits).toEqual([
       { collectionId: "drawer-a", locatorId: "snapshot-stale-commit" },
@@ -1051,27 +1186,14 @@ describe("Drawer drag lifecycle", () => {
     const lifecycle = createDrawerDragLifecycle(adapter);
     const start = startFact(6);
 
-    lifecycle.start(start);
-    expect(lifecycle.cancel(6, reason)).toBe("cancelled");
-    expect(lifecycle.cancel(6, reason)).toBeNull();
+    const session = lifecycle.start(start);
+    expect(lifecycle.cancel(reason, session)).toBe("cancelled");
+    expect(lifecycle.cancel(reason, session)).toBeNull();
 
     expect(adapter.transientCleanupCount).toBe(1);
     expect(adapter.finishedVisuals).toEqual(["cancelled"]);
     expect(adapter.commits).toEqual([]);
     expectClean(adapter, "row-6");
-  });
-
-  it("forwards item reorder as the visual completion reason", () => {
-    const adapter = new MemoryDrawerDragAdapter();
-    const lifecycle = createDrawerDragLifecycle(adapter);
-    const start = startFact(7);
-
-    lifecycle.start(start);
-    expect(lifecycle.cancel(7, "item-reorder")).toBe("cancelled");
-
-    expect(adapter.finishedVisuals).toEqual(["cancelled"]);
-    expect(adapter.finishedVisualReasons).toEqual(["item-reorder"]);
-    expectClean(adapter, "row-7");
   });
 
   it("fails closed when authoritative membership lookup fails", async () => {
@@ -1080,10 +1202,10 @@ describe("Drawer drag lifecycle", () => {
     const start = startFact(8);
     const error = new Error("membership unavailable");
 
-    lifecycle.start(start);
-    adapter.memberships.get(8)!.reject(error);
+    const session = lifecycle.start(start);
+    adapter.memberships.get(start.locator.id)!.reject(error);
 
-    await expect(lifecycle.end(point(start))).resolves.toBe("failed");
+    await expect(lifecycle.end(session, point(start))).resolves.toBe("failed");
     expect(adapter.commits).toEqual([]);
     expect(adapter.failures).toEqual([error]);
     expectClean(adapter, "row-8");
@@ -1098,10 +1220,10 @@ describe("Drawer drag lifecycle", () => {
     adapter.commitError = error;
     adapter.failureRecovery = recovery.promise;
 
-    lifecycle.start(start);
-    await resolveMembership(adapter, 9, []);
+    const session = lifecycle.start(start);
+    await resolveMembership(adapter, start, []);
     let settled = false;
-    const outcome = lifecycle.end(point(start)).then((result) => {
+    const outcome = lifecycle.end(session, point(start)).then((result) => {
       settled = true;
       return result;
     });
@@ -1115,7 +1237,7 @@ describe("Drawer drag lifecycle", () => {
     await expect(outcome).resolves.toBe("failed");
   });
 
-  it.each<ItemDragVisual>([
+  it.each<DrawerDragVisual>([
     { kind: "Text", preview: "selected text", thumbnailBase64: null },
     { kind: "Image", preview: "image", thumbnailBase64: "data:image/jpeg;base64,thumb" },
     { kind: "FilePaths", preview: "C:\\notes.txt", thumbnailBase64: null },
@@ -1124,11 +1246,15 @@ describe("Drawer drag lifecycle", () => {
     const lifecycle = createDrawerDragLifecycle(adapter);
     const start = startFact(10, visual);
 
-    lifecycle.start(start);
-    lifecycle.move(point(start, 40, 50));
+    const session = lifecycle.start(start);
+    lifecycle.move(session, point(start, 40, 50));
 
     expect(adapter.begunVisuals).toHaveLength(1);
     expect(adapter.begunVisuals[0].visual).toEqual(visual);
-    expect(adapter.movedVisuals).toEqual([point(start, 40, 50)]);
+    expect(adapter.movedVisuals).toEqual([{
+      locator: start.locator,
+      x: 40,
+      y: 50,
+    }]);
   });
 });

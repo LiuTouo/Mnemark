@@ -1,10 +1,12 @@
-// Inline drag card for the single main WebView. Existing Tauri event payloads
-// remain during the migration, but physical screen points are mapped back into
-// this window instead of moving another native window.
+// Inline drag card for the single main WebView. Drawer drag owns session
+// freshness; this adapter only renders the visual facts it receives.
 
 import { invoke } from "@tauri-apps/api/core";
-import { acceptDropSession } from "./drag";
-import type { ItemDragPoint, ItemDragStart, ItemDragVisual } from "./drag";
+import type {
+  DrawerDragPoint,
+  DrawerDragStart,
+  DrawerDragVisual,
+} from "./drawer-drag";
 import { setLanguage, t } from "./i18n";
 import { applyTheme } from "./theme";
 
@@ -17,11 +19,9 @@ const CARD_WIDTH = 288;
 const CARD_HEIGHT = 112;
 const CURSOR_OFFSET = 14;
 const card = document.getElementById("drag-overlay-card")!;
-let activeSessionId: number | null = null;
-let cancelledSessionId: number | null = null;
 let hideTimer: ReturnType<typeof setTimeout> | null = null;
 
-function renderVisual(visual: ItemDragVisual): void {
+function renderVisual(visual: DrawerDragVisual): void {
   card.replaceChildren();
   const visualEl = document.createElement("div");
   if (visual.kind === "Image" && visual.thumbnailBase64) {
@@ -56,23 +56,20 @@ function moveCard(point: { x: number; y: number }): void {
   card.style.top = `${Math.min(maxY, Math.max(0, point.y + CURSOR_OFFSET))}px`;
 }
 
-export function beginInlineDragCard(start: ItemDragStart): void {
-  if (!acceptDropSession(start.sessionId, activeSessionId, cancelledSessionId)) return;
+export function beginInlineDragCard(
+  start: Pick<DrawerDragStart<unknown>, "visual" | "x" | "y">,
+): void {
   if (hideTimer) clearTimeout(hideTimer);
-  activeSessionId = start.sessionId;
-  cancelledSessionId = null;
   renderVisual(start.visual);
   moveCard(start);
   card.classList.remove("hidden", "dropping", "leaving");
 }
 
-export function moveInlineDragCard(point: ItemDragPoint): void {
-  if (!acceptDropSession(point.sessionId, activeSessionId, cancelledSessionId)) return;
+export function moveInlineDragCard(point: DrawerDragPoint): void {
   moveCard(point);
 }
 
 export function finishInlineDragCard(cancelled: boolean): void {
-  activeSessionId = null;
   if (hideTimer) clearTimeout(hideTimer);
   const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
   if (cancelled || reduceMotion) {
