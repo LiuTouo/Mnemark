@@ -18,6 +18,7 @@ import {
   configureDrawerItemReorder,
   endDrawerDrag,
   moveDrawerDrag,
+  nextDrawerDragSessionId,
   startDrawerDrag,
 } from "./favorites";
 import type { DrawerDragCancelReason } from "./drawer-drag";
@@ -52,9 +53,6 @@ let shortcutMatcher = new ShortcutMatcher(FAVORITES_DEFAULT_CODES);
 // The row currently being dragged toward another Drawer collection, so a
 // mid-drag re-render can clear its source feedback and cancel the session.
 let activeDragSource: HTMLElement | null = null;
-// Monotonic session id + the active one, carried on every move/end/cancel so
-// the sidebar can reject stale or cancelled drags.
-let dragSessionSeq = 0;
 let activeDragSessionId: number | null = null;
 const chooserGate = new ChooserGate();
 let lastMenuPos = { anchorTop: 0, anchorBottom: 0, right: 0 };
@@ -1283,8 +1281,7 @@ function attachRowDrag(row: HTMLElement, handle: HTMLElement, item: DisplayItem)
     e.preventDefault();
     e.stopPropagation();
     drag.beginImmediately(e.clientX, e.clientY);
-    dragSessionSeq += 1;
-    activeDragSessionId = dragSessionSeq;
+    activeDragSessionId = nextDrawerDragSessionId();
     activeDragSource = row;
     handle.setPointerCapture(e.pointerId);
     const point = { x: e.clientX, y: e.clientY };

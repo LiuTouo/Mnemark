@@ -6,18 +6,21 @@ import { invoke } from "@tauri-apps/api/core";
 import { applyI18n, localizeBackendError, setLanguage, t } from "./i18n";
 import { applyTheme } from "./theme";
 import { computeMenuPlacement } from "./menu";
-import { DragController, rectContains } from "./drag";
-import type { ItemDragPoint } from "./drag";
+import { rectContains } from "./drag";
 import { createDrawerDragLifecycle } from "./drawer-drag";
 import type {
+  DrawerCollectionDragPoint,
+  DrawerCollectionDragStart,
+  DrawerCollectionMoveDirection,
+  DrawerCollectionReorderAdapter,
   DrawerDragCancelReason,
+  DrawerDragPoint,
   DrawerDragReorderAdapter,
-  DrawerDragStart,
+  DrawerDragStartFact,
   DrawerDragTargetState,
   DrawerDragTerminalOutcome,
 } from "./drawer-drag";
 import { beginInlineDragCard, finishInlineDragCard, moveInlineDragCard } from "./drag-overlay";
-import { insertBefore, moveOne } from "./reorder";
 import { createRenameController } from "./rename-commit";
 import type { CollectionSummary, FavoritesUiState } from "./types";
 
@@ -48,6 +51,7 @@ let drawerTargetState: DrawerDragTargetState = {
   targetId: null,
 };
 let drawerReorderAdapter: DrawerDragReorderAdapter | undefined;
+let activeCollectionDragSessionId: number | null = null;
 
 const listEl = document.getElementById("favorites-list")!;
 const emptyEl = document.getElementById("favorites-empty")!;
@@ -108,6 +112,10 @@ async function loadUiState(): Promise<void> {
 
 // === render ===
 function render(): void {
+  if (activeCollectionDragSessionId !== null) {
+    drawerDrag.cancel(activeCollectionDragSessionId, "source-removed");
+    activeCollectionDragSessionId = null;
+  }
   listEl.replaceChildren();
   const hasCollections = collections.length > 0;
   emptyEl.classList.toggle("hidden", hasCollections);
@@ -366,10 +374,11 @@ function menuItem(label: string, onClick: () => void, disabled = false, danger =
   return b;
 }
 
-async function moveCollection(id: string, delta: number): Promise<void> {
-  const fromIndex = collections.findIndex((c) => c.id === id);
-  const order = moveOne(collections.map((c) => c.id), fromIndex, delta);
-  await invoke("reorder_collections", { ids: order }).then(() => loadCollections()).catch((err) => { showToast(String(err)); loadCollections(); });
+async function moveCollection(
+  id: string,
+  direction: DrawerCollectionMoveDirection,
+): Promise<void> {
+  await drawerDrag.moveCollection(id, direction);
 }
 
 // === remove modal ===
@@ -409,65 +418,60 @@ function showToast(message: string): void {
   toastTimer = setTimeout(() => toast.classList.add("hidden"), 2500);
 }
 
-// === collection reorder drag (local to this window) ===
+// === collection reorder drag ===
 function attachReorderDrag(handle: HTMLElement, id: string): void {
-  const drag = new DragController(6);
+  let sessionId: number | null = null;
   handle.addEventListener("pointerdown", (e) => {
     e.preventDefault();
     e.stopPropagation();
-    drag.pointerDown(e.clientX, e.clientY);
+    sessionId = drawerDrag.nextSessionId();
+    activeCollectionDragSessionId = sessionId;
+    const start: DrawerCollectionDragStart<HTMLElement> = {
+      kind: "collection",
+      sessionId,
+      collectionId: id,
+      x: e.clientX,
+      y: e.clientY,
+      source: handle.closest<HTMLElement>(".favorites-row") ?? handle,
+    };
+    drawerDrag.start(start);
     handle.setPointerCapture(e.pointerId);
   });
   handle.addEventListener("pointermove", (e) => {
-    if (!drag.isDragging && drag.pointerMove(e.clientX, e.clientY)) {
-      beginReorder();
-    }
-    if (drag.isDragging) updateReorderIndicator(id, e.clientY);
+    if (sessionId === null || activeCollectionDragSessionId !== sessionId) return;
+    const point: DrawerCollectionDragPoint = {
+      kind: "collection",
+      sessionId,
+      collectionId: id,
+      x: e.clientX,
+      y: e.clientY,
+    };
+    drawerDrag.move(point);
   });
-  handle.addEventListener("pointerup", () => {
-    if (drag.didDrag) commitReorder(id);
-    else drag.pointerUp();
-    clearIndicator();
+  handle.addEventListener("pointerup", (e) => {
+    if (sessionId === null || activeCollectionDragSessionId !== sessionId) return;
+    activeCollectionDragSessionId = null;
+    const point: DrawerCollectionDragPoint = {
+      kind: "collection",
+      sessionId,
+      collectionId: id,
+      x: e.clientX,
+      y: e.clientY,
+    };
+    void drawerDrag.end(point);
   });
-  handle.addEventListener("pointercancel", () => { drag.pointerUp(); clearIndicator(); });
-}
-
-let indicator: HTMLDivElement | null = null;
-
-function beginReorder(): void {
-  listEl.classList.add("reordering");
-}
-
-function clearIndicator(): void {
-  listEl.classList.remove("reordering");
-  indicator?.remove();
-  indicator = null;
-}
-
-function updateReorderIndicator(id: string, clientY: number): void {
-  // Find the insertion point among the OTHER collection rows.
-  const rows = [...listEl.querySelectorAll<HTMLElement>(".favorites-row[data-collection-id]")];
-  let beforeId: string | null = null;
-  for (const row of rows) {
-    if (row.dataset.collectionId === id) continue;
-    const r = row.getBoundingClientRect();
-    if (clientY < r.top + r.height / 2) { beforeId = row.dataset.collectionId!; break; }
-  }
-  if (!indicator) {
-    indicator = document.createElement("div");
-    indicator.className = "drop-indicator";
-    listEl.append(indicator);
-  }
-  const beforeRow = beforeId ? listEl.querySelector<HTMLElement>(`.favorites-row[data-collection-id="${beforeId}"]`) : null;
-  if (beforeRow) beforeRow.before(indicator);
-  else listEl.append(indicator);
-}
-
-async function commitReorder(id: string): Promise<void> {
-  const before = indicator?.nextElementSibling as HTMLElement | null;
-  const beforeId = before?.dataset.collectionId ?? null;
-  const order = insertBefore(collections.map((c) => c.id), id, beforeId);
-  await invoke("reorder_collections", { ids: order }).then(() => loadCollections()).catch((err) => { showToast(String(err)); loadCollections(); });
+  const cancel = (reason: DrawerDragCancelReason) => {
+    if (sessionId === null || activeCollectionDragSessionId !== sessionId) return;
+    activeCollectionDragSessionId = null;
+    drawerDrag.cancel(sessionId, reason);
+  };
+  handle.addEventListener("pointercancel", () => cancel("pointercancel"));
+  handle.addEventListener("lostpointercapture", () => cancel("lostpointercapture"));
+  handle.addEventListener("click", (e) => {
+    if (sessionId === null || !drawerDrag.consumeClickSuppression(sessionId)) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  });
 }
 
 // === inline item drop target ===
@@ -524,10 +528,52 @@ function renderDrawerTargets(state: DrawerDragTargetState): void {
   });
 }
 
+const collectionReorderIndicator = document.createElement("div");
+collectionReorderIndicator.className = "drop-indicator";
+
+const collectionReorderAdapter: DrawerCollectionReorderAdapter = {
+  context: (collectionId) => collections.some((collection) => collection.id === collectionId)
+    ? {
+      collectionId,
+      orderedCollectionIds: collections.map((collection) => collection.id),
+    }
+    : null,
+  measure: () => ({
+    list: screenRect(listEl),
+    items: [...listEl.querySelectorAll<HTMLElement>(".favorites-row[data-collection-id]")]
+      .map((row) => ({
+        id: row.dataset.collectionId ?? "",
+        rect: screenRect(row),
+      }))
+      .filter((collection) => collection.id.length > 0),
+  }),
+  render: (state) => {
+    listEl.classList.toggle("reordering", state.active);
+    collectionReorderIndicator.remove();
+    if (!state.active || !state.inside) return;
+    const beforeRow = state.beforeId === null
+      ? null
+      : listEl.querySelector<HTMLElement>(`.favorites-row[data-collection-id="${state.beforeId}"]`);
+    if (beforeRow) beforeRow.before(collectionReorderIndicator);
+    else listEl.append(collectionReorderIndicator);
+  },
+  commit: (orderedCollectionIds) => invoke("reorder_collections", {
+    ids: orderedCollectionIds,
+  }),
+  showSuccess: async () => {
+    await loadCollections();
+  },
+  showFailure: async (error) => {
+    showToast(String(error));
+    await loadCollections();
+  },
+};
+
 const drawerDrag = createDrawerDragLifecycle<HTMLElement>({
   get reorder() {
     return drawerReorderAdapter;
   },
+  collectionReorder: collectionReorderAdapter,
   lookupMembership: (start) => invoke<string[]>("favorite_collection_ids", { locator: start.locator }),
   collectionAt: (point) => collectionUnderPoint(point.x, point.y),
   renderTargets: renderDrawerTargets,
@@ -568,15 +614,19 @@ export function configureDrawerItemReorder(adapter: DrawerDragReorderAdapter): v
   drawerReorderAdapter = adapter;
 }
 
-export function startDrawerDrag(start: DrawerDragStart<HTMLElement>): void {
+export function nextDrawerDragSessionId(): number {
+  return drawerDrag.nextSessionId();
+}
+
+export function startDrawerDrag(start: DrawerDragStartFact<HTMLElement>): void {
   drawerDrag.start(start);
 }
 
-export function moveDrawerDrag(point: ItemDragPoint): void {
+export function moveDrawerDrag(point: DrawerDragPoint): void {
   drawerDrag.move(point);
 }
 
-export function endDrawerDrag(point: ItemDragPoint): Promise<DrawerDragTerminalOutcome | null> {
+export function endDrawerDrag(point: DrawerDragPoint): Promise<DrawerDragTerminalOutcome | null> {
   return drawerDrag.end(point);
 }
 
@@ -610,7 +660,13 @@ async function init(): Promise<void> {
     else if (e.key === "Tab") trapFocus(e);
   });
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && moreMenuFor) { moreMenuFor = null; updateMoreMenu(); }
+    if (e.key === "Escape" && activeCollectionDragSessionId !== null) {
+      drawerDrag.cancel(activeCollectionDragSessionId, "explicit");
+      activeCollectionDragSessionId = null;
+    } else if (e.key === "Escape" && moreMenuFor) {
+      moreMenuFor = null;
+      updateMoreMenu();
+    }
   });
   document.addEventListener("click", () => { if (moreMenuFor) { moreMenuFor = null; updateMoreMenu(); } });
 
@@ -629,6 +685,11 @@ async function init(): Promise<void> {
         render();
       })
       .catch(() => {});
+  });
+  window.addEventListener("blur", () => {
+    if (activeCollectionDragSessionId === null) return;
+    drawerDrag.cancel(activeCollectionDragSessionId, "window-blur");
+    activeCollectionDragSessionId = null;
   });
 }
 

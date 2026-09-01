@@ -3,6 +3,10 @@ import {
   createDrawerDragLifecycle,
 } from "./drawer-drag";
 import type {
+  DrawerCollectionDragPoint,
+  DrawerCollectionDragStart,
+  DrawerCollectionReorderAdapter,
+  DrawerCollectionReorderContext,
   DrawerDragAdapter,
   DrawerDragCancelReason,
   DrawerDragReorderAdapter,
@@ -47,6 +51,34 @@ function favoriteStartFact(sessionId: number, snapshotId: string): DrawerDragSta
     ...startFact(sessionId),
     locator: { scope: "favorite", id: snapshotId },
     source: `drawer-row-${snapshotId}`,
+  };
+}
+
+function collectionStartFact(
+  sessionId: number,
+  collectionId = "drawer-b",
+): DrawerCollectionDragStart<string> {
+  return {
+    kind: "collection",
+    sessionId,
+    collectionId,
+    x: 10,
+    y: 120,
+    source: `collection-row-${collectionId}`,
+  };
+}
+
+function collectionPoint(
+  start: DrawerCollectionDragStart<unknown>,
+  x = start.x,
+  y = start.y,
+): DrawerCollectionDragPoint {
+  return {
+    kind: "collection",
+    sessionId: start.sessionId,
+    collectionId: start.collectionId,
+    x,
+    y,
   };
 }
 
@@ -124,6 +156,59 @@ class MemoryDrawerReorderAdapter implements DrawerDragReorderAdapter {
   }
 }
 
+class MemoryCollectionReorderAdapter implements DrawerCollectionReorderAdapter {
+  orderedCollectionIds = ["drawer-a", "drawer-b", "drawer-c", "drawer-d"];
+  geometry: DrawerDragReorderGeometry = {
+    list: { left: 0, top: 0, right: 100, bottom: 400 },
+    items: [
+      { id: "drawer-a", rect: { left: 0, top: 0, right: 100, bottom: 100 } },
+      { id: "drawer-b", rect: { left: 0, top: 100, right: 100, bottom: 200 } },
+      { id: "drawer-c", rect: { left: 0, top: 200, right: 100, bottom: 300 } },
+      { id: "drawer-d", rect: { left: 0, top: 300, right: 100, bottom: 400 } },
+    ],
+  };
+  readonly states: DrawerDragReorderState[] = [];
+  readonly commits: ReadonlyArray<string>[] = [];
+  readonly successes: string[] = [];
+  readonly failures: unknown[] = [];
+  commitGate: Promise<void> | null = null;
+  commitError: unknown | null = null;
+  successRecovery: Promise<void> | null = null;
+  failureRecovery: Promise<void> | null = null;
+
+  context(collectionId: string): DrawerCollectionReorderContext | null {
+    if (!this.orderedCollectionIds.includes(collectionId)) return null;
+    return {
+      collectionId,
+      orderedCollectionIds: [...this.orderedCollectionIds],
+    };
+  }
+
+  measure(): DrawerDragReorderGeometry {
+    return this.geometry;
+  }
+
+  render(state: DrawerDragReorderState): void {
+    this.states.push({ ...state });
+  }
+
+  async commit(orderedCollectionIds: readonly string[]): Promise<void> {
+    this.commits.push([...orderedCollectionIds]);
+    if (this.commitGate) await this.commitGate;
+    if (this.commitError) throw this.commitError;
+  }
+
+  showSuccess(collectionId: string): Promise<void> | void {
+    this.successes.push(collectionId);
+    return this.successRecovery ?? undefined;
+  }
+
+  showFailure(error: unknown): Promise<void> | void {
+    this.failures.push(error);
+    return this.failureRecovery ?? undefined;
+  }
+}
+
 class MemoryDrawerDragAdapter implements DrawerDragAdapter<string> {
   readonly memberships = new Map<number, ReturnType<typeof deferred<readonly string[]>>>();
   readonly targetStates: DrawerDragTargetState[] = [];
@@ -142,6 +227,7 @@ class MemoryDrawerDragAdapter implements DrawerDragAdapter<string> {
   commitGate: Promise<void> | null = null;
   failureRecovery: Promise<void> | null = null;
   reorder: DrawerDragReorderAdapter | undefined;
+  collectionReorder: DrawerCollectionReorderAdapter | undefined;
   transientCleanupCount = 0;
   indicatorVisible = false;
   frameScheduled = false;
@@ -233,11 +319,277 @@ function expectClean(adapter: MemoryDrawerDragAdapter, source: string): void {
   expect(adapter.frameScheduled).toBe(false);
 }
 
+function collectionLifecycleFixture() {
+  const adapter = new MemoryDrawerDragAdapter();
+  const collectionReorder = new MemoryCollectionReorderAdapter();
+  adapter.collectionReorder = collectionReorder;
+  return {
+    adapter,
+    collectionReorder,
+    lifecycle: createDrawerDragLifecycle(adapter),
+  };
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
 describe("Drawer drag lifecycle", () => {
+  it("allocates monotonic session ids across item and collection callers", () => {
+    const adapter = new MemoryDrawerDragAdapter();
+    const lifecycle = createDrawerDragLifecycle(adapter);
+
+    expect(lifecycle.nextSessionId()).toBe(1);
+    expect(lifecycle.nextSessionId()).toBe(2);
+    lifecycle.start(collectionStartFact(10));
+    expect(lifecycle.nextSessionId()).toBe(11);
+  });
+
+  it("keeps collection reorder pending below the movement threshold", async () => {
+    const { adapter, collectionReorder, lifecycle } = collectionLifecycleFixture();
+    const start = collectionStartFact(30);
+
+    lifecycle.start(start);
+    lifecycle.move(collectionPoint(start, 13, 124));
+
+    expect(collectionReorder.states).toEqual([]);
+    expect(adapter.activatedSources).toEqual([]);
+    expect(lifecycle.consumeClickSuppression(30)).toBe(false);
+    await expect(lifecycle.end(collectionPoint(start, 13, 124))).resolves.toBe("no-op");
+    expect(collectionReorder.commits).toEqual([]);
+  });
+
+  it("suppresses one synthetic click after collection drag completes", async () => {
+    const { adapter, collectionReorder, lifecycle } = collectionLifecycleFixture();
+    const start = collectionStartFact(31);
+
+    lifecycle.start(start);
+    lifecycle.move(collectionPoint(start, 20, 120));
+
+    expect(adapter.activatedSources).toEqual(["collection-row-drawer-b"]);
+    expect(collectionReorder.states[collectionReorder.states.length - 1]).toEqual({
+      active: true,
+      inside: true,
+      beforeId: "drawer-c",
+    });
+    await expect(lifecycle.end(collectionPoint(start, 20, 120))).resolves.toBe("no-op");
+    expect(lifecycle.consumeClickSuppression(31)).toBe(true);
+    expect(lifecycle.consumeClickSuppression(31)).toBe(false);
+    expect(collectionReorder.states[collectionReorder.states.length - 1]).toEqual({
+      active: false,
+      inside: false,
+      beforeId: null,
+    });
+  });
+
+  it("commits collection reorder, reloads authoritative order, and cleans terminal state", async () => {
+    const { adapter, collectionReorder, lifecycle } = collectionLifecycleFixture();
+    const start = collectionStartFact(32);
+
+    lifecycle.start(start);
+    lifecycle.move(collectionPoint(start, 20, 120));
+
+    await expect(lifecycle.end(collectionPoint(start, 20, 10))).resolves.toBe("success");
+    expect(collectionReorder.commits).toEqual([
+      ["drawer-b", "drawer-a", "drawer-c", "drawer-d"],
+    ]);
+    expect(collectionReorder.successes).toEqual(["drawer-b"]);
+    expect(collectionReorder.states[collectionReorder.states.length - 1]).toEqual({
+      active: false,
+      inside: false,
+      beforeId: null,
+    });
+    expect(adapter.releasedSources).toEqual(["collection-row-drawer-b"]);
+    expect(adapter.finishedVisuals).toEqual([]);
+    expectClean(adapter, "collection-row-drawer-b");
+  });
+
+  it("awaits authoritative collection reload before successful terminal cleanup", async () => {
+    const { adapter, collectionReorder, lifecycle } = collectionLifecycleFixture();
+    const recovery = deferred<void>();
+    collectionReorder.successRecovery = recovery.promise;
+    const start = collectionStartFact(41);
+
+    lifecycle.start(start);
+    lifecycle.move(collectionPoint(start, 20, 10));
+    let settled = false;
+    const outcome = lifecycle.end(collectionPoint(start, 20, 10)).then((result) => {
+      settled = true;
+      return result;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(collectionReorder.successes).toEqual(["drawer-b"]);
+    expect(settled).toBe(false);
+
+    recovery.resolve();
+    await expect(outcome).resolves.toBe("success");
+    expectClean(adapter, "collection-row-drawer-b");
+  });
+
+  it("cleans and recovers when authoritative collection reload rejects", async () => {
+    const { adapter, collectionReorder, lifecycle } = collectionLifecycleFixture();
+    const recovery = deferred<void>();
+    const error = new Error("authoritative collection reload failed");
+    collectionReorder.successRecovery = recovery.promise;
+    const start = collectionStartFact(42);
+
+    lifecycle.start(start);
+    lifecycle.move(collectionPoint(start, 20, 10));
+    const outcome = lifecycle.end(collectionPoint(start, 20, 10));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    recovery.reject(error);
+
+    await expect(outcome).resolves.toBe("failed");
+    expect(collectionReorder.failures).toEqual([error]);
+    expectClean(adapter, "collection-row-drawer-b");
+  });
+
+  it.each([
+    { label: "first", y: 10, beforeId: "drawer-a" },
+    { label: "middle", y: 120, beforeId: "drawer-c" },
+    { label: "last", y: 300, beforeId: "drawer-d" },
+    { label: "list-end", y: 390, beforeId: null },
+  ])("renders the $label collection insertion position", ({ y, beforeId }) => {
+    const { collectionReorder, lifecycle } = collectionLifecycleFixture();
+    const start = collectionStartFact(33);
+
+    lifecycle.start(start);
+    lifecycle.move(collectionPoint(start, 20, y));
+
+    expect(collectionReorder.states[collectionReorder.states.length - 1]).toEqual({
+      active: true,
+      inside: true,
+      beforeId,
+    });
+    lifecycle.cancel(33, "explicit");
+  });
+
+  it("treats the current collection insertion position as a no-op", async () => {
+    const { adapter, collectionReorder, lifecycle } = collectionLifecycleFixture();
+    const start = collectionStartFact(34);
+
+    lifecycle.start(start);
+    lifecycle.move(collectionPoint(start, 20, 120));
+
+    await expect(lifecycle.end(collectionPoint(start, 20, 120))).resolves.toBe("no-op");
+    expect(collectionReorder.commits).toEqual([]);
+    expect(collectionReorder.successes).toEqual([]);
+    expectClean(adapter, "collection-row-drawer-b");
+  });
+
+  it("uses the same canonical order for drag and Move Up", async () => {
+    const {
+      collectionReorder: dragReorder,
+      lifecycle: dragLifecycle,
+    } = collectionLifecycleFixture();
+    const start = collectionStartFact(35);
+    dragLifecycle.start(start);
+    dragLifecycle.move(collectionPoint(start, 20, 10));
+    await dragLifecycle.end(collectionPoint(start, 20, 10));
+
+    const {
+      collectionReorder: menuReorder,
+      lifecycle: menuLifecycle,
+    } = collectionLifecycleFixture();
+    await expect(menuLifecycle.moveCollection("drawer-b", -1)).resolves.toBe("success");
+
+    expect(menuReorder.commits).toEqual(dragReorder.commits);
+  });
+
+  it("uses the same canonical order for drag and Move Down", async () => {
+    const {
+      collectionReorder: dragReorder,
+      lifecycle: dragLifecycle,
+    } = collectionLifecycleFixture();
+    const start = collectionStartFact(36);
+    dragLifecycle.start(start);
+    dragLifecycle.move(collectionPoint(start, 20, 300));
+    await dragLifecycle.end(collectionPoint(start, 20, 300));
+
+    const {
+      collectionReorder: menuReorder,
+      lifecycle: menuLifecycle,
+    } = collectionLifecycleFixture();
+    await expect(menuLifecycle.moveCollection("drawer-b", 1)).resolves.toBe("success");
+
+    expect(menuReorder.commits).toEqual(dragReorder.commits);
+  });
+
+  it("treats collection Move Up and Move Down boundaries as no-ops", async () => {
+    const { collectionReorder, lifecycle } = collectionLifecycleFixture();
+
+    await expect(lifecycle.moveCollection("drawer-a", -1)).resolves.toBe("no-op");
+    await expect(lifecycle.moveCollection("drawer-d", 1)).resolves.toBe("no-op");
+    expect(collectionReorder.commits).toEqual([]);
+    expect(collectionReorder.successes).toEqual([]);
+  });
+
+  it("cleans collection visuals before awaiting authoritative failure recovery", async () => {
+    const { adapter, collectionReorder, lifecycle } = collectionLifecycleFixture();
+    const error = new Error("collection reorder rejected");
+    const recovery = deferred<void>();
+    collectionReorder.commitError = error;
+    collectionReorder.failureRecovery = recovery.promise;
+    const start = collectionStartFact(37);
+
+    lifecycle.start(start);
+    lifecycle.move(collectionPoint(start, 20, 10));
+    let settled = false;
+    const outcome = lifecycle.end(collectionPoint(start, 20, 10)).then((result) => {
+      settled = true;
+      return result;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(collectionReorder.failures).toEqual([error]);
+    expect(adapter.releasedSources).toEqual(["collection-row-drawer-b"]);
+    expect(collectionReorder.states[collectionReorder.states.length - 1]).toMatchObject({
+      active: false,
+    });
+    expect(settled).toBe(false);
+
+    recovery.resolve();
+    await expect(outcome).resolves.toBe("failed");
+  });
+
+  it.each<DrawerDragCancelReason>([
+    "pointercancel",
+    "lostpointercapture",
+    "window-blur",
+    "explicit",
+  ])("cancels collection reorder without mutation for %s", (reason) => {
+    const { adapter, collectionReorder, lifecycle } = collectionLifecycleFixture();
+    const start = collectionStartFact(38);
+
+    lifecycle.start(start);
+    lifecycle.move(collectionPoint(start, 20, 10));
+
+    expect(lifecycle.cancel(38, reason)).toBe("cancelled");
+    expect(lifecycle.cancel(38, reason)).toBeNull();
+    expect(collectionReorder.commits).toEqual([]);
+    expect(adapter.releasedSources).toEqual(["collection-row-drawer-b"]);
+    expectClean(adapter, "collection-row-drawer-b");
+  });
+
+  it("rejects stale collection move, end, and cancel after session replacement", async () => {
+    const { collectionReorder, lifecycle } = collectionLifecycleFixture();
+    const stale = collectionStartFact(39, "drawer-b");
+    const current = collectionStartFact(40, "drawer-c");
+
+    lifecycle.start(stale);
+    lifecycle.move(collectionPoint(stale, 20, 10));
+    lifecycle.start(current);
+    const stateCount = collectionReorder.states.length;
+
+    lifecycle.move(collectionPoint(stale, 20, 390));
+    await expect(lifecycle.end(collectionPoint(stale, 20, 390))).resolves.toBeNull();
+    expect(lifecycle.cancel(39, "explicit")).toBeNull();
+    expect(collectionReorder.states).toHaveLength(stateCount);
+    expect(collectionReorder.commits).toEqual([]);
+    lifecycle.cancel(40, "explicit");
+  });
+
   it("prioritizes an active-list reorder over a collection drop", async () => {
     const adapter = new MemoryDrawerDragAdapter();
     const reorder = new MemoryDrawerReorderAdapter();
