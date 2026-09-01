@@ -18,10 +18,8 @@ import type {
 import { createInlineDragCard } from "./drag-overlay";
 import type { InlineDragCard } from "./drag-overlay";
 import { createRenameController } from "./rename-commit";
-import type {
-  DrawerView,
-  DrawerViewIntentResult,
-} from "./drawer-view";
+import type { DrawerView } from "./drawer-view";
+import type { DrawerViewCoordinator } from "./drawer-view-coordinator";
 import type { Clip, CollectionSummary, FavoriteItem } from "./types";
 
 type ProductionDrawerDragAdapter = Parameters<typeof createDrawerDragLifecycle<HTMLElement>>[0];
@@ -37,11 +35,10 @@ export interface PanelDrawerController {
   requestCreate(): void;
 }
 
-export interface DrawerViewController {
-  readonly currentView: DrawerView | null;
-  refresh(): Promise<DrawerView>;
-  select(collectionId: string | null): Promise<DrawerViewIntentResult>;
-}
+export type DrawerViewController = Pick<
+  DrawerViewCoordinator,
+  "currentView" | "refreshAfterMutation" | "retryAfterFailure" | "select"
+>;
 
 export interface PanelDrawerRenderer extends PanelDrawerController {
   render(view: DrawerView): void;
@@ -99,25 +96,6 @@ function currentCollections(): readonly CollectionSummary[] {
 function renderCurrentView(): void {
   const view = drawerViewController.currentView;
   if (view) render(view);
-}
-
-async function refreshDrawerView(context: string): Promise<boolean> {
-  try {
-    await drawerViewController.refresh();
-    return true;
-  } catch (error) {
-    console.error(`[Mnemark] ${context}`, error);
-    return false;
-  }
-}
-
-function reportCommittedStale(
-  context: string,
-  result: DrawerViewIntentResult,
-): void {
-  if (result.status === "committed-stale") {
-    console.error(`[Mnemark] ${context}`, result.error);
-  }
 }
 
 // === render ===
@@ -220,9 +198,7 @@ function render(view: DrawerView): void {
 }
 
 function selectCollection(id: string | null): void {
-  void drawerViewController.select(id)
-    .then((result) => reportCommittedStale("Drawer selection committed but refresh failed", result))
-    .catch((error) => showToast(localizeDrawerError(String(error))));
+  void drawerViewController.select(id);
 }
 
 // === name editor ===
@@ -309,7 +285,7 @@ function commitCreate(value: string): void {
   void invoke<CollectionSummary>("create_collection", { name })
     .then(async () => {
       editingCreate = false;
-      if (await refreshDrawerView("Drawer create refresh failed")) {
+      if (await drawerViewController.refreshAfterMutation("Drawer create refresh failed")) {
         showToast(t("collectionAdded"));
       }
     })
@@ -423,7 +399,7 @@ function confirmRemove(): void {
   closeRemoveModal();
   void invoke("delete_collection", { id })
     .then(async () => {
-      if (await refreshDrawerView("Drawer delete refresh failed")) {
+      if (await drawerViewController.refreshAfterMutation("Drawer delete refresh failed")) {
         showToast(t("collectionRemoved"));
       }
     })
@@ -595,11 +571,11 @@ function createProductionDrawerDrag(inlineDragCard: InlineDragCard): DrawerDragL
       ids: orderedItemIds,
     }),
     showSuccess: async () => {
-      await refreshDrawerView("Drawer item reorder refresh failed");
+      await drawerViewController.refreshAfterMutation("Drawer item reorder refresh failed");
     },
     showFailure: async (error) => {
       showToast(localizeDrawerError(String(error)));
-      await refreshDrawerView("Drawer item reorder recovery failed");
+      await drawerViewController.retryAfterFailure("Drawer item reorder recovery failed");
     },
   };
 
@@ -635,11 +611,11 @@ function createProductionDrawerDrag(inlineDragCard: InlineDragCard): DrawerDragL
       ids: orderedCollectionIds,
     }),
     showSuccess: async () => {
-      await refreshDrawerView("Drawer collection reorder refresh failed");
+      await drawerViewController.refreshAfterMutation("Drawer collection reorder refresh failed");
     },
     showFailure: async (error) => {
       showToast(localizeDrawerError(String(error)));
-      await refreshDrawerView("Drawer collection reorder recovery failed");
+      await drawerViewController.retryAfterFailure("Drawer collection reorder recovery failed");
     },
   };
 
@@ -674,7 +650,7 @@ function createProductionDrawerDrag(inlineDragCard: InlineDragCard): DrawerDragL
       showToast(t("alreadyInDrawer"));
     },
     showSuccess: async (collectionId) => {
-      if (!await refreshDrawerView("Drawer membership refresh failed")) return;
+      if (!await drawerViewController.refreshAfterMutation("Drawer membership refresh failed")) return;
       showToast(t("addedToFavorites"));
       const row = listEl.querySelector<HTMLElement>(`.favorites-row[data-collection-id="${collectionId}"]`);
       if (row) {
@@ -684,7 +660,7 @@ function createProductionDrawerDrag(inlineDragCard: InlineDragCard): DrawerDragL
     },
     showFailure: async (error) => {
       showToast(localizeDrawerError(String(error)));
-      await refreshDrawerView("Drawer membership recovery failed");
+      await drawerViewController.retryAfterFailure("Drawer membership recovery failed");
     },
   });
 }
@@ -754,7 +730,7 @@ export function mountDrawerRenderer(
   renameCtl = createRenameController({
     rename: (id, name) => invoke("rename_collection", { id, name }),
     reload: async () => {
-      await refreshDrawerView("Drawer rename refresh failed");
+      await drawerViewController.refreshAfterMutation("Drawer rename refresh failed");
     },
     render: renderCurrentView,
     showError: (message) => showToast(localizeDrawerError(message)),

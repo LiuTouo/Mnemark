@@ -15,7 +15,8 @@ import type { WorkspaceTab } from "./workspace-state";
 import { mountDrawerRenderer } from "./favorites";
 import type { PanelDrawerRenderer } from "./favorites";
 import { drawerViewProjection } from "./drawer-view-tauri";
-import type { DrawerView, DrawerViewIntentResult } from "./drawer-view";
+import { DrawerViewCoordinator } from "./drawer-view-coordinator";
+import type { DrawerView } from "./drawer-view";
 import type { DrawerDragCancelReason, DrawerDragSession } from "./drawer-drag";
 import { mountPreview } from "./preview";
 import { moveOne } from "./reorder";
@@ -45,6 +46,11 @@ const chooserGate = new ChooserGate();
 let lastMenuPos = { anchorTop: 0, anchorBottom: 0, right: 0 };
 const multiSelect = new MultiSelectState();
 let batchChooserOpen = false;
+const drawerViewCoordinator = new DrawerViewCoordinator(drawerViewProjection, {
+  presentError: (error) => showToast(localizeDrawerError(String(error))),
+  presentStale: () => showToast(t("drawerRefreshFailed")),
+  reportDiagnostic: (context, error) => console.error(`[Mnemark] ${context}`, error),
+});
 
 const searchInput = document.getElementById("search-input") as HTMLInputElement;
 const filterBar = document.getElementById("filter-bar")!;
@@ -114,7 +120,7 @@ function sortClips() {
 }
 
 function currentDrawerView(): DrawerView | null {
-  return drawerViewProjection.currentView;
+  return drawerViewCoordinator.currentView;
 }
 
 function selectedCollectionId(): string | null {
@@ -189,43 +195,6 @@ function renderPanelDrawerView(next: DrawerView, previous: DrawerView | null): v
   favoritesToggle.disabled = false;
   updateFavoritesToggleA11y();
   render();
-}
-
-function publishDrawerView(next: DrawerView, previous: DrawerView | null): void {
-  try {
-    panelDrawer.cancel("source-removed");
-  } catch (error) {
-    console.error("Failed to cancel stale Drawer drag:", error);
-  }
-  try {
-    renderPanelDrawerView(next, previous);
-  } catch (error) {
-    console.error("Failed to render Panel Drawer view:", error);
-  }
-  try {
-    panelDrawer.render(next);
-  } catch (error) {
-    console.error("Failed to render Drawer navigation:", error);
-  }
-}
-
-function reportCommittedStale(
-  context: string,
-  result: DrawerViewIntentResult,
-): void {
-  if (result.status === "committed-stale") {
-    console.error(`[Mnemark] ${context}`, result.error);
-  }
-}
-
-async function refreshDrawerViewAfterMutation(context: string): Promise<boolean> {
-  try {
-    await drawerViewProjection.refresh();
-    return true;
-  } catch (error) {
-    console.error(`[Mnemark] ${context}`, error);
-    return false;
-  }
 }
 
 async function init() {
@@ -319,13 +288,7 @@ async function init() {
 }
 
 async function toggleSidebar() {
-  try {
-    const result = await drawerViewProjection.toggle();
-    reportCommittedStale("Drawer toggle committed but refresh failed", result);
-  } catch (err) {
-    console.error("Failed to toggle drawer:", err);
-    showToast(localizeDrawerError(String(err)));
-  }
+  await drawerViewCoordinator.toggle();
 }
 
 function onFavoritesShortcutKeydown(e: KeyboardEvent) {
@@ -793,7 +756,7 @@ function renderActionMenu(item: DisplayItem) {
       if (!collectionId) return;
       void invoke("remove_favorite", { collectionId, itemId: fav.id })
         .then(async () => {
-          if (await refreshDrawerViewAfterMutation("Drawer removal refresh failed")) {
+          if (await drawerViewCoordinator.refreshAfterMutation("Drawer removal refresh failed")) {
             showToast(t("removedFromFavorites"));
           }
         })
@@ -837,10 +800,10 @@ async function moveFavoriteItem(itemId: string, delta: number): Promise<void> {
   hideActionMenu();
   try {
     await invoke("reorder_favorite_items", { collectionId, ids: nextIds });
-    await refreshDrawerViewAfterMutation("Drawer item reorder refresh failed");
+    await drawerViewCoordinator.refreshAfterMutation("Drawer item reorder refresh failed");
   } catch (err) {
     showToast(localizeDrawerError(String(err)));
-    await refreshDrawerViewAfterMutation("Drawer item reorder recovery failed");
+    await drawerViewCoordinator.retryAfterFailure("Drawer item reorder recovery failed");
   }
 }
 
@@ -886,7 +849,7 @@ async function saveNote(): Promise<void> {
     const command = isFavorite ? "set_favorite_note" : "set_clip_note";
     const note = await invoke<string | null>(command, { id: target.id, note: noteInput.value });
     if (isFavorite) {
-      if (!await refreshDrawerViewAfterMutation("Drawer note refresh failed")) {
+      if (!await drawerViewCoordinator.refreshAfterMutation("Drawer note refresh failed")) {
         closeNoteModal();
         return;
       }
@@ -928,14 +891,8 @@ noteModal.addEventListener("keydown", (e) => {
 
 // === Add-to-collection chooser ===
 async function requestCreateCollection(): Promise<void> {
-  try {
-    const result = await drawerViewProjection.setOpen(true);
-    reportCommittedStale("Drawer open committed but refresh failed", result);
-    if (result.status === "published" && result.view.open) {
-      panelDrawer.requestCreate();
-    }
-  } catch (error) {
-    showToast(localizeDrawerError(String(error)));
+  if (await drawerViewCoordinator.setOpen(true)) {
+    panelDrawer.requestCreate();
   }
 }
 
@@ -966,7 +923,7 @@ function renderAddChooser(locator: ClipLocator, existing: string[]) {
         hideAddChooser();
         void invoke("add_favorite", { collectionId: c.id, locator })
           .then(async () => {
-            if (await refreshDrawerViewAfterMutation("Drawer membership refresh failed")) {
+            if (await drawerViewCoordinator.refreshAfterMutation("Drawer membership refresh failed")) {
               showToast(t("addedToFavorites"));
             }
           })
@@ -1025,7 +982,7 @@ function openBatchAddChooser(): void {
           locators,
         }).then(async (result) => {
           exitMultiSelect();
-          if (await refreshDrawerViewAfterMutation("Drawer batch membership refresh failed")) {
+          if (await drawerViewCoordinator.refreshAfterMutation("Drawer batch membership refresh failed")) {
             showToast(t("batchAdded", {
               changed: String(result.changed),
               unchanged: String(result.unchanged),
@@ -1076,7 +1033,7 @@ async function runBatchDestructiveAction(): Promise<void> {
       itemIds,
     });
     exitMultiSelect();
-    if (await refreshDrawerViewAfterMutation("Drawer batch removal refresh failed")) {
+    if (await drawerViewCoordinator.refreshAfterMutation("Drawer batch removal refresh failed")) {
       showToast(t("batchRemoved", { n: String(result.changed) }));
     }
   } catch (err) {
@@ -1463,9 +1420,7 @@ document.addEventListener("keydown", (e) => {
         return;
       }
       if (layer === "drawer") {
-        void drawerViewProjection.setOpen(false)
-          .then((result) => reportCommittedStale("Drawer close committed but refresh failed", result))
-          .catch((error) => showToast(localizeDrawerError(String(error))));
+        void drawerViewCoordinator.setOpen(false);
         return;
       }
       if (inSearch && vimMode) {
@@ -1535,8 +1490,14 @@ document.body.addEventListener("click", (e) => {
 
 // === Initialize ===
 window.addEventListener("DOMContentLoaded", () => {
-  panelDrawer = mountDrawerRenderer(drawerViewProjection);
-  drawerViewProjection.subscribe(publishDrawerView);
+  panelDrawer = mountDrawerRenderer(drawerViewCoordinator);
+  drawerViewCoordinator.subscribe({
+    cancelDrag: () => {
+      panelDrawer.cancel("source-removed");
+    },
+    renderPanel: renderPanelDrawerView,
+    renderDrawer: (view) => panelDrawer.render(view),
+  });
   void mountPreview();
   void init();
 });
