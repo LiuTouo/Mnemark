@@ -3,11 +3,11 @@
 
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { applyI18n, setLanguage, t } from "./i18n";
+import { applyI18n, localizeBackendError, setLanguage, t } from "./i18n";
 import { applyTheme } from "./theme";
 import { computeMenuPlacement } from "./menu";
-import { DragController, rectContains, acceptDropSession, isAvailableDropTarget } from "./drag";
-import type { ItemDragPoint, ItemDragStart } from "./drag";
+import { DragController, rectContains } from "./drag";
+import type { ItemDragPoint } from "./drag";
 import { createDrawerDragLifecycle } from "./drawer-drag";
 import type {
   DrawerDragCancelReason,
@@ -40,17 +40,7 @@ const renameCtl = createRenameController({
   render: () => render(),
   showError: (message) => showToast(message),
 });
-// Cross-window item drop state. move/end payloads carry their own locator, so
-// no start event is required; these track the newest session and the last
-// cancelled one so stale or aborted drags are rejected.
-let activeSessionId: number | null = null;
-let cancelledSessionId: number | null = null;
-let activeDragStart: ItemDragStart | null = null;
-let activeDragPoint: ItemDragPoint | null = null;
-let dragMembershipIds: string[] = [];
-let dragMembershipReady = false;
-let dragMembershipPromise: Promise<string[]> | null = null;
-let historyDrawerTargetState: DrawerDragTargetState = {
+let drawerTargetState: DrawerDragTargetState = {
   active: false,
   membershipReady: false,
   membershipIds: [],
@@ -208,8 +198,7 @@ function render(): void {
 
   createRow.classList.toggle("hidden", !editingCreate);
   updateMoreMenu();
-  if (historyDrawerTargetState.active) renderHistoryDrawerTargets(historyDrawerTargetState);
-  else applyItemDragState();
+  renderDrawerTargets(drawerTargetState);
 }
 
 function selectCollection(id: string | null): void {
@@ -498,20 +487,6 @@ function collectionUnderPoint(x: number, y: number): string | null {
   return null;
 }
 
-function targetUnderPoint(x: number, y: number): string | null {
-  const id = collectionUnderPoint(x, y);
-  if (!id) return null;
-  return dragMembershipReady && !isAvailableDropTarget(id, dragMembershipIds) ? null : id;
-}
-
-function highlightTarget(x: number, y: number): string | null {
-  const id = targetUnderPoint(x, y);
-  listEl.querySelectorAll(".favorites-row[data-collection-id]").forEach((row) => {
-    row.classList.toggle("drop-target", row.getAttribute("data-collection-id") === id);
-  });
-  return id;
-}
-
 function clearDropFeedback(): void {
   document.body.classList.remove("item-drag-active");
   listEl.querySelectorAll(".favorites-row.drop-target, .favorites-row.drop-available, .favorites-row.drop-unavailable").forEach((row) => {
@@ -520,7 +495,7 @@ function clearDropFeedback(): void {
   listEl.querySelector(".favorites-history-return")?.classList.remove("drag-disabled");
 }
 
-function clearHistoryDrawerFeedback(): void {
+function clearDrawerFeedback(): void {
   clearDropFeedback();
   listEl.querySelectorAll<HTMLElement>(".favorites-row[data-collection-id]").forEach((row) => {
     row.setAttribute("aria-disabled", "false");
@@ -529,8 +504,8 @@ function clearHistoryDrawerFeedback(): void {
   });
 }
 
-function renderHistoryDrawerTargets(state: DrawerDragTargetState): void {
-  historyDrawerTargetState = { ...state, membershipIds: [...state.membershipIds] };
+function renderDrawerTargets(state: DrawerDragTargetState): void {
+  drawerTargetState = { ...state, membershipIds: [...state.membershipIds] };
   document.body.classList.toggle("item-drag-active", state.active);
   listEl.querySelector(".favorites-history-return")?.classList.toggle("drag-disabled", state.active);
   listEl.querySelectorAll<HTMLElement>(".favorites-row[data-collection-id]").forEach((row) => {
@@ -547,16 +522,18 @@ function renderHistoryDrawerTargets(state: DrawerDragTargetState): void {
   });
 }
 
-const historyDrawerDrag = createDrawerDragLifecycle<HTMLElement>({
+const drawerDrag = createDrawerDragLifecycle<HTMLElement>({
   lookupMembership: (start) => invoke<string[]>("favorite_collection_ids", { locator: start.locator }),
   collectionAt: (point) => collectionUnderPoint(point.x, point.y),
-  renderTargets: renderHistoryDrawerTargets,
+  renderTargets: renderDrawerTargets,
   activateSource: (source) => source.classList.add("dragging-source"),
   releaseSource: (source) => source.classList.remove("dragging-source", "drag-held"),
   beginVisual: beginInlineDragCard,
   moveVisual: moveInlineDragCard,
-  finishVisual: (outcome) => finishInlineDragCard(outcome === "cancelled" || outcome === "replaced"),
-  clearTransientFeedback: clearHistoryDrawerFeedback,
+  finishVisual: (outcome, reason) => finishInlineDragCard(
+    reason !== "item-reorder" && (outcome === "cancelled" || outcome === "replaced"),
+  ),
+  clearTransientFeedback: clearDrawerFeedback,
   commit: (collectionId, start) => invoke("add_favorite", {
     collectionId,
     locator: start.locator,
@@ -576,149 +553,29 @@ const historyDrawerDrag = createDrawerDragLifecycle<HTMLElement>({
       setTimeout(() => row.classList.remove("drop-success"), 600);
     }
   },
-  showFailure: (error) => showToast(String(error)),
+  showFailure: async (error) => {
+    showToast(localizeBackendError(String(error)));
+    await loadCollections();
+  },
 });
 
-export function startHistoryDrawerDrag(start: DrawerDragStart<HTMLElement>): void {
-  historyDrawerDrag.start(start);
+export function startDrawerDrag(start: DrawerDragStart<HTMLElement>): void {
+  drawerDrag.start(start);
 }
 
-export function moveHistoryDrawerDrag(point: ItemDragPoint): void {
-  historyDrawerDrag.move(point);
+export function moveDrawerDrag(point: ItemDragPoint): void {
+  drawerDrag.move(point);
 }
 
-export function endHistoryDrawerDrag(point: ItemDragPoint): Promise<DrawerDragTerminalOutcome | null> {
-  return historyDrawerDrag.end(point);
+export function endDrawerDrag(point: ItemDragPoint): Promise<DrawerDragTerminalOutcome | null> {
+  return drawerDrag.end(point);
 }
 
-export function cancelHistoryDrawerDrag(
+export function cancelDrawerDrag(
   sessionId: number,
   reason: DrawerDragCancelReason,
 ): void {
-  historyDrawerDrag.cancel(sessionId, reason);
-}
-
-function applyItemDragState(): void {
-  const active = activeSessionId !== null && activeDragStart !== null;
-  document.body.classList.toggle("item-drag-active", active);
-  listEl.querySelector(".favorites-history-return")?.classList.toggle("drag-disabled", active);
-  listEl.querySelectorAll<HTMLElement>(".favorites-row[data-collection-id]").forEach((row) => {
-    const id = row.dataset.collectionId!;
-    const unavailable = active && dragMembershipReady && !isAvailableDropTarget(id, dragMembershipIds);
-    row.classList.toggle("drop-available", active && !unavailable);
-    row.classList.toggle("drop-unavailable", unavailable);
-    row.setAttribute("aria-disabled", String(unavailable));
-    const label = row.querySelector<HTMLElement>(".favorites-row-drop-label");
-    if (label) label.textContent = unavailable ? t("alreadyInDrawer") : t("dropHere");
-  });
-  if (activeDragPoint) highlightTarget(activeDragPoint.x, activeDragPoint.y);
-}
-
-function finishItemDrag(): void {
-  clearDropFeedback();
-  activeSessionId = null;
-  activeDragStart = null;
-  activeDragPoint = null;
-  dragMembershipIds = [];
-  dragMembershipReady = false;
-  dragMembershipPromise = null;
-}
-
-function beginMembershipLookup(start: ItemDragStart): void {
-  dragMembershipIds = [];
-  dragMembershipReady = false;
-  const sessionId = start.sessionId;
-  const pending = invoke<string[]>("favorite_collection_ids", { locator: start.locator }).catch(() => []);
-  dragMembershipPromise = pending;
-  void pending.then((ids) => {
-    if (activeSessionId !== sessionId) return;
-    dragMembershipIds = ids;
-    dragMembershipReady = true;
-    applyItemDragState();
-  });
-}
-
-function beginItemDrag(start: ItemDragStart): void {
-  if (!acceptDropSession(start.sessionId, activeSessionId, cancelledSessionId)) return;
-  if (activeSessionId !== null && activeSessionId !== start.sessionId) finishItemDrag();
-  activeSessionId = start.sessionId;
-  cancelledSessionId = null;
-  activeDragStart = start;
-  activeDragPoint = {
-    sessionId: start.sessionId,
-    locator: start.locator,
-    x: start.x,
-    y: start.y,
-  };
-  beginMembershipLookup(start);
-  applyItemDragState();
-}
-
-function ensureItemDragFromPoint(point: ItemDragPoint): void {
-  if (activeDragStart?.sessionId === point.sessionId) return;
-  beginItemDrag({
-    sessionId: point.sessionId,
-    locator: point.locator,
-    visual: { kind: "Text", preview: t("draggingItem"), thumbnailBase64: null },
-    x: point.x,
-    y: point.y,
-  });
-}
-
-export function beginInlineItemDrag(start: ItemDragStart): void {
-  beginItemDrag(start);
-}
-
-export function moveInlineItemDrag(point: ItemDragPoint): void {
-  if (!acceptDropSession(point.sessionId, activeSessionId, cancelledSessionId)) return;
-  ensureItemDragFromPoint(point);
-  activeSessionId = point.sessionId;
-  activeDragPoint = point;
-  highlightTarget(point.x, point.y);
-}
-
-export async function endInlineItemDrag(point: ItemDragPoint): Promise<void> {
-  if (!acceptDropSession(point.sessionId, activeSessionId, cancelledSessionId)) return;
-  ensureItemDragFromPoint(point);
-  activeSessionId = point.sessionId;
-  activeDragPoint = point;
-  const rawTargetId = collectionUnderPoint(point.x, point.y);
-  const membershipIds = await (dragMembershipPromise ?? Promise.resolve([]));
-  if (activeSessionId !== point.sessionId) return;
-  dragMembershipIds = membershipIds;
-  dragMembershipReady = true;
-  applyItemDragState();
-  const targetId = targetUnderPoint(point.x, point.y);
-  if (!targetId) {
-    const duplicate = rawTargetId !== null && !isAvailableDropTarget(rawTargetId, membershipIds);
-    finishItemDrag();
-    if (duplicate) {
-      const row = listEl.querySelector<HTMLElement>(`.favorites-row[data-collection-id="${rawTargetId}"]`);
-      row?.classList.add("drop-invalid");
-      setTimeout(() => row?.classList.remove("drop-invalid"), 450);
-      showToast(t("alreadyInDrawer"));
-    }
-    return;
-  }
-  try {
-    await invoke("add_favorite", { collectionId: targetId, locator: point.locator });
-    showToast(t("addedToFavorites"));
-    finishItemDrag();
-    await loadCollections();
-    const row = listEl.querySelector<HTMLElement>(`.favorites-row[data-collection-id="${targetId}"]`);
-    if (row) {
-      row.classList.add("drop-success");
-      setTimeout(() => row.classList.remove("drop-success"), 600);
-    }
-  } catch (err) {
-    finishItemDrag();
-    showToast(String(err));
-  }
-}
-
-export function cancelInlineItemDrag(sessionId: number): void {
-  cancelledSessionId = sessionId;
-  finishItemDrag();
+  drawerDrag.cancel(sessionId, reason);
 }
 
 // === init ===

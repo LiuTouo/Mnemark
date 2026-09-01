@@ -13,7 +13,8 @@ export type DrawerDragCancelReason =
   | "lostpointercapture"
   | "window-blur"
   | "explicit"
-  | "source-removed";
+  | "source-removed"
+  | "item-reorder";
 
 export interface DrawerDragStart<Source> extends ItemDragStart {
   source: Source;
@@ -34,12 +35,15 @@ export interface DrawerDragAdapter<Source> {
   releaseSource(source: Source): void;
   beginVisual(start: ItemDragStart): void;
   moveVisual(point: ItemDragPoint): void;
-  finishVisual(outcome: DrawerDragTerminalOutcome): void;
+  finishVisual(
+    outcome: DrawerDragTerminalOutcome,
+    reason?: DrawerDragCancelReason,
+  ): void;
   clearTransientFeedback(): void;
   commit(collectionId: string, start: ItemDragStart): Promise<void>;
   showUnavailable(collectionId: string): void;
   showSuccess(collectionId: string): Promise<void> | void;
-  showFailure(error: unknown): void;
+  showFailure(error: unknown): Promise<void> | void;
 }
 
 export interface DrawerDragLifecycle<Source> {
@@ -105,6 +109,7 @@ export function createDrawerDragLifecycle<Source>(
   function finish(
     session: ActiveSession<Source>,
     outcome: DrawerDragTerminalOutcome,
+    reason?: DrawerDragCancelReason,
   ): DrawerDragTerminalOutcome | null {
     if (!isCurrent(session)) return null;
     active = null;
@@ -116,7 +121,7 @@ export function createDrawerDragLifecycle<Source>(
     });
     adapter.clearTransientFeedback();
     adapter.releaseSource(session.start.source);
-    adapter.finishVisual(outcome);
+    adapter.finishVisual(outcome, reason);
     return outcome;
   }
 
@@ -175,7 +180,7 @@ export function createDrawerDragLifecycle<Source>(
     if (!isCurrent(session)) return null;
     if (!membership.ok) {
       const outcome = finish(session, "failed");
-      adapter.showFailure(membership.error);
+      await adapter.showFailure(membership.error);
       return outcome;
     }
 
@@ -194,7 +199,7 @@ export function createDrawerDragLifecycle<Source>(
     } catch (error) {
       if (!isCurrent(session)) return null;
       const outcome = finish(session, "failed");
-      adapter.showFailure(error);
+      await adapter.showFailure(error);
       return outcome;
     }
     if (!isCurrent(session)) return null;
@@ -205,11 +210,11 @@ export function createDrawerDragLifecycle<Source>(
 
   function cancel(
     sessionId: number,
-    _reason: DrawerDragCancelReason,
+    reason: DrawerDragCancelReason,
   ): DrawerDragTerminalOutcome | null {
     const session = active;
     if (!session || session.start.sessionId !== sessionId) return null;
-    return finish(session, "cancelled");
+    return finish(session, "cancelled", reason);
   }
 
   return { start, move, end, cancel };

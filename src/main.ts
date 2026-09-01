@@ -14,16 +14,11 @@ import { MultiSelectState } from "./multi-select";
 import { decideWorkspaceLayout, escapeLayer, tabAfterPreviewIntent } from "./workspace-state";
 import type { WorkspaceTab } from "./workspace-state";
 import {
-  beginInlineItemDrag,
-  cancelHistoryDrawerDrag,
-  cancelInlineItemDrag,
-  endHistoryDrawerDrag,
-  endInlineItemDrag,
-  moveHistoryDrawerDrag,
-  moveInlineItemDrag,
-  startHistoryDrawerDrag,
+  cancelDrawerDrag,
+  endDrawerDrag,
+  moveDrawerDrag,
+  startDrawerDrag,
 } from "./favorites";
-import { beginInlineDragCard, finishInlineDragCard, moveInlineDragCard } from "./drag-overlay";
 import type { DrawerDragCancelReason } from "./drawer-drag";
 import "./preview";
 import { insertBefore, moveOne } from "./reorder";
@@ -53,14 +48,13 @@ let noteTarget: ClipLocator | null = null;
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 const previewState = new PreviewController();
 let shortcutMatcher = new ShortcutMatcher(FAVORITES_DEFAULT_CODES);
-// The history row currently being dragged toward the drawer, so a mid-drag
-// re-render can clear its source feedback and broadcast a cancel.
+// The row currently being dragged toward another Drawer collection, so a
+// mid-drag re-render can clear its source feedback and cancel the session.
 let activeDragSource: HTMLElement | null = null;
 // Monotonic session id + the active one, carried on every move/end/cancel so
 // the sidebar can reject stale or cancelled drags.
 let dragSessionSeq = 0;
 let activeDragSessionId: number | null = null;
-let activeDragKind: "history" | "favorite" | null = null;
 let activeItemReorderId: string | null = null;
 let itemReorderBeforeId: string | null = null;
 let itemReorderInsideList = false;
@@ -1315,8 +1309,7 @@ function commitItemReorder(
 
   const currentIds = favoriteItems.map((item) => item.id);
   const nextIds = insertBefore(currentIds, itemId, itemReorderBeforeId);
-  cancelInlineItemDrag(sessionId);
-  finishInlineDragCard(false);
+  cancelDrawerDrag(sessionId, "item-reorder");
   clearItemReorderFeedback();
   if (nextIds.every((id, index) => id === currentIds[index])) return true;
   void invoke("reorder_favorite_items", { collectionId, ids: nextIds })
@@ -1333,23 +1326,14 @@ function releaseDragSource(
   cancel: boolean,
   reason: DrawerDragCancelReason = "explicit",
 ): void {
-  let kind: "history" | "favorite" | null = null;
   if (activeDragSource === el) {
-    kind = activeDragKind;
     activeDragSource = null;
-    activeDragKind = null;
     if (cancel && activeDragSessionId !== null) {
-      if (kind === "history") {
-        cancelHistoryDrawerDrag(activeDragSessionId, reason);
-      } else {
-        cancelInlineItemDrag(activeDragSessionId);
-        finishInlineDragCard(true);
-      }
+      cancelDrawerDrag(activeDragSessionId, reason);
     }
     activeDragSessionId = null;
   }
   clearItemReorderFeedback();
-  if (kind !== "history") el.classList.remove("dragging-source", "drag-held");
 }
 
 function attachRowDrag(row: HTMLElement, handle: HTMLElement, item: DisplayItem) {
@@ -1362,7 +1346,6 @@ function attachRowDrag(row: HTMLElement, handle: HTMLElement, item: DisplayItem)
     drag.beginImmediately(e.clientX, e.clientY);
     dragSessionSeq += 1;
     activeDragSessionId = dragSessionSeq;
-    activeDragKind = favorite ? "favorite" : "history";
     activeDragSource = row;
     if (favorite && favoriteItemReorderEnabled()) {
       activeItemReorderId = item.id;
@@ -1371,27 +1354,14 @@ function attachRowDrag(row: HTMLElement, handle: HTMLElement, item: DisplayItem)
     }
     handle.setPointerCapture(e.pointerId);
     const point = { x: e.clientX, y: e.clientY };
-    const payload: ItemDragPoint = { sessionId: activeDragSessionId, locator, x: point.x, y: point.y };
     const start = itemDragStartPayload(activeDragSessionId, item, point);
-    if (favorite) {
-      row.classList.add("dragging-source");
-      beginInlineItemDrag(start);
-      beginInlineDragCard(start);
-      moveInlineItemDrag(payload);
-    } else {
-      startHistoryDrawerDrag({ ...start, source: row });
-    }
+    startDrawerDrag({ ...start, source: row });
   });
   handle.addEventListener("pointermove", (e) => {
     if (!drag.isDragging || activeDragSessionId === null) return;
     const p = { x: e.clientX, y: e.clientY };
     const payload: ItemDragPoint = { sessionId: activeDragSessionId, locator, x: p.x, y: p.y };
-    if (favorite) {
-      moveInlineItemDrag(payload);
-      moveInlineDragCard(payload);
-    } else {
-      moveHistoryDrawerDrag(payload);
-    }
+    moveDrawerDrag(payload);
     if (activeItemReorderId === item.id) updateItemReorder(item.id, p);
   });
   handle.addEventListener("pointerup", (e) => {
@@ -1401,12 +1371,7 @@ function attachRowDrag(row: HTMLElement, handle: HTMLElement, item: DisplayItem)
       const reordered = favorite
         && commitItemReorder(item.id, activeDragSessionId, p);
       if (!reordered) {
-        if (favorite) {
-          void endInlineItemDrag(payload);
-          finishInlineDragCard(false);
-        } else {
-          void endHistoryDrawerDrag(payload);
-        }
+        void endDrawerDrag(payload);
       }
     }
     releaseDragSource(row, false);
