@@ -1,10 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createDrawerDragLifecycle,
 } from "./drawer-drag";
 import type {
   DrawerDragAdapter,
   DrawerDragCancelReason,
+  DrawerDragReorderAdapter,
+  DrawerDragReorderGeometry,
+  DrawerDragReorderState,
   DrawerDragStart,
   DrawerDragTargetState,
   DrawerDragTerminalOutcome,
@@ -56,6 +59,71 @@ function point(start: ItemDragStart, x = start.x, y = start.y): ItemDragPoint {
   };
 }
 
+class MemoryDrawerReorderAdapter implements DrawerDragReorderAdapter {
+  enabled = true;
+  collectionId = "drawer-a";
+  ids = ["snapshot-a", "snapshot-b", "snapshot-c", "snapshot-d"];
+  geometry: DrawerDragReorderGeometry = {
+    list: { left: 0, top: -100, right: 100, bottom: 500 },
+    items: [
+      { id: "snapshot-a", rect: { left: 0, top: 0, right: 100, bottom: 100 } },
+      { id: "snapshot-b", rect: { left: 0, top: 100, right: 100, bottom: 200 } },
+      { id: "snapshot-c", rect: { left: 0, top: 200, right: 100, bottom: 300 } },
+      { id: "snapshot-d", rect: { left: 0, top: 300, right: 100, bottom: 400 } },
+    ],
+  };
+  readonly states: DrawerDragReorderState[] = [];
+  readonly commits: Array<{ collectionId: string; ids: readonly string[] }> = [];
+  readonly successes: string[] = [];
+  readonly failures: unknown[] = [];
+  readonly scrollAmounts: number[] = [];
+  scrollResult = false;
+  onScroll: (() => void) | null = null;
+  commitGate: Promise<void> | null = null;
+  commitError: unknown | null = null;
+  successRecovery: Promise<void> | null = null;
+  failureRecovery: Promise<void> | null = null;
+
+  context(start: ItemDragStart) {
+    if (!this.enabled || start.locator.scope !== "favorite") return null;
+    return {
+      collectionId: this.collectionId,
+      itemId: start.locator.id,
+      ids: [...this.ids],
+    };
+  }
+
+  measure(): DrawerDragReorderGeometry {
+    return this.geometry;
+  }
+
+  render(state: DrawerDragReorderState): void {
+    this.states.push({ ...state });
+  }
+
+  scrollBy(amount: number): boolean {
+    this.scrollAmounts.push(amount);
+    this.onScroll?.();
+    return this.scrollResult;
+  }
+
+  async commit(collectionId: string, ids: readonly string[]): Promise<void> {
+    this.commits.push({ collectionId, ids: [...ids] });
+    if (this.commitGate) await this.commitGate;
+    if (this.commitError) throw this.commitError;
+  }
+
+  showSuccess(collectionId: string): Promise<void> | void {
+    this.successes.push(collectionId);
+    return this.successRecovery ?? undefined;
+  }
+
+  showFailure(error: unknown): Promise<void> | void {
+    this.failures.push(error);
+    return this.failureRecovery ?? undefined;
+  }
+}
+
 class MemoryDrawerDragAdapter implements DrawerDragAdapter<string> {
   readonly memberships = new Map<number, ReturnType<typeof deferred<readonly string[]>>>();
   readonly targetStates: DrawerDragTargetState[] = [];
@@ -73,6 +141,7 @@ class MemoryDrawerDragAdapter implements DrawerDragAdapter<string> {
   commitError: unknown | null = null;
   commitGate: Promise<void> | null = null;
   failureRecovery: Promise<void> | null = null;
+  reorder: DrawerDragReorderAdapter | undefined;
   transientCleanupCount = 0;
   indicatorVisible = false;
   frameScheduled = false;
@@ -164,7 +233,282 @@ function expectClean(adapter: MemoryDrawerDragAdapter, source: string): void {
   expect(adapter.frameScheduled).toBe(false);
 }
 
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 describe("Drawer drag lifecycle", () => {
+  it("prioritizes an active-list reorder over a collection drop", async () => {
+    const adapter = new MemoryDrawerDragAdapter();
+    const reorder = new MemoryDrawerReorderAdapter();
+    adapter.reorder = reorder;
+    adapter.collectionId = "drawer-b";
+    const lifecycle = createDrawerDragLifecycle(adapter);
+    const start = favoriteStartFact(18, "snapshot-d");
+
+    lifecycle.start(start);
+
+    await expect(lifecycle.end(point(start, 50, 125))).resolves.toBe("success");
+    expect(reorder.commits).toEqual([{
+      collectionId: "drawer-a",
+      ids: ["snapshot-a", "snapshot-d", "snapshot-b", "snapshot-c"],
+    }]);
+    expect(reorder.successes).toEqual(["drawer-a"]);
+    expect(adapter.commits).toEqual([]);
+    expect(adapter.finishedVisualReasons).toEqual(["item-reorder"]);
+    expectClean(adapter, "drawer-row-snapshot-d");
+  });
+
+  it("auto-scrolls at an edge and refreshes insertion from the latest geometry", () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    const cancelled: number[] = [];
+    let nextFrame = 1;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      const id = nextFrame++;
+      frames.set(id, callback);
+      return id;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => {
+      cancelled.push(id);
+      frames.delete(id);
+    });
+    const adapter = new MemoryDrawerDragAdapter();
+    const reorder = new MemoryDrawerReorderAdapter();
+    reorder.ids = ["snapshot-a", "snapshot-b", "snapshot-c", "snapshot-d", "snapshot-e"];
+    reorder.geometry = {
+      list: { left: 0, top: 0, right: 100, bottom: 400 },
+      items: reorder.ids.map((id, index) => ({
+        id,
+        rect: { left: 0, top: index * 100, right: 100, bottom: (index + 1) * 100 },
+      })),
+    };
+    reorder.scrollResult = true;
+    reorder.onScroll = () => {
+      reorder.geometry = {
+        ...reorder.geometry,
+        items: reorder.geometry.items.map((item) => ({
+          id: item.id,
+          rect: {
+            ...item.rect,
+            top: item.rect.top - 100,
+            bottom: item.rect.bottom - 100,
+          },
+        })),
+      };
+    };
+    adapter.reorder = reorder;
+    const lifecycle = createDrawerDragLifecycle(adapter);
+    const start = favoriteStartFact(19, "snapshot-a");
+
+    lifecycle.start(start);
+    lifecycle.move(point(start, 50, 370));
+    expect(reorder.states[reorder.states.length - 1]).toMatchObject({ beforeId: "snapshot-e" });
+
+    const firstFrameId = [...frames.keys()][0];
+    const firstFrame = frames.get(firstFrameId)!;
+    frames.delete(firstFrameId);
+    firstFrame(0);
+
+    expect(reorder.scrollAmounts[0]).toBeGreaterThan(0);
+    expect(reorder.states[reorder.states.length - 1]).toMatchObject({ beforeId: null });
+    const pendingFrameId = [...frames.keys()][0];
+    lifecycle.move(point(start, 50, 200));
+    expect(cancelled).toContain(pendingFrameId);
+
+    lifecycle.cancel(19, "explicit");
+    vi.unstubAllGlobals();
+  });
+
+  it("cancels a scheduled edge scroll with the drag session", () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    const cancelled: number[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.set(1, callback);
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => {
+      cancelled.push(id);
+      frames.delete(id);
+    });
+    const adapter = new MemoryDrawerDragAdapter();
+    const reorder = new MemoryDrawerReorderAdapter();
+    reorder.geometry = {
+      ...reorder.geometry,
+      list: { left: 0, top: 0, right: 100, bottom: 400 },
+    };
+    adapter.reorder = reorder;
+    const lifecycle = createDrawerDragLifecycle(adapter);
+    const start = favoriteStartFact(27, "snapshot-a");
+
+    lifecycle.start(start);
+    lifecycle.move(point(start, 50, 390));
+    expect(frames.has(1)).toBe(true);
+
+    expect(lifecycle.cancel(27, "explicit")).toBe("cancelled");
+    expect(cancelled).toEqual([1]);
+    expect(frames.size).toBe(0);
+    expect(reorder.states[reorder.states.length - 1]).toMatchObject({ active: false });
+  });
+
+  it("reloads a late successful reorder without clearing its replacement session", async () => {
+    const adapter = new MemoryDrawerDragAdapter();
+    const reorder = new MemoryDrawerReorderAdapter();
+    const commit = deferred<void>();
+    reorder.commitGate = commit.promise;
+    adapter.reorder = reorder;
+    const lifecycle = createDrawerDragLifecycle(adapter);
+    const staleStart = favoriteStartFact(20, "snapshot-d");
+    const currentStart = favoriteStartFact(21, "snapshot-c");
+
+    lifecycle.start(staleStart);
+    const staleEnd = lifecycle.end(point(staleStart, 50, 125));
+    await Promise.resolve();
+    lifecycle.start(currentStart);
+    commit.resolve();
+
+    await expect(staleEnd).resolves.toBeNull();
+    expect(reorder.successes).toEqual(["drawer-a"]);
+    expect(reorder.states[reorder.states.length - 1]).toMatchObject({
+      active: true,
+      sourceId: "snapshot-c",
+    });
+  });
+
+  it("rejects late reorder moves and ends from a replaced session", async () => {
+    const adapter = new MemoryDrawerDragAdapter();
+    const reorder = new MemoryDrawerReorderAdapter();
+    adapter.reorder = reorder;
+    const lifecycle = createDrawerDragLifecycle(adapter);
+    const staleStart = favoriteStartFact(28, "snapshot-d");
+    const currentStart = favoriteStartFact(29, "snapshot-c");
+
+    lifecycle.start(staleStart);
+    lifecycle.start(currentStart);
+    const stateCount = reorder.states.length;
+    lifecycle.move(point(staleStart, 50, 125));
+
+    await expect(lifecycle.end(point(staleStart, 50, 125))).resolves.toBeNull();
+    expect(lifecycle.cancel(28, "explicit")).toBeNull();
+    expect(reorder.states).toHaveLength(stateCount);
+    expect(reorder.commits).toEqual([]);
+  });
+
+  it.each([
+    { label: "first", y: 0, beforeId: "snapshot-b" },
+    { label: "middle", y: 200, beforeId: "snapshot-c" },
+    { label: "last", y: 300, beforeId: "snapshot-d" },
+    { label: "list-end", y: 450, beforeId: null },
+  ])("renders the $label insertion position", ({ y, beforeId }) => {
+    const adapter = new MemoryDrawerDragAdapter();
+    const reorder = new MemoryDrawerReorderAdapter();
+    adapter.reorder = reorder;
+    const lifecycle = createDrawerDragLifecycle(adapter);
+    const start = favoriteStartFact(22, "snapshot-a");
+
+    lifecycle.start(start);
+    lifecycle.move(point(start, 50, y));
+
+    expect(reorder.states[reorder.states.length - 1]).toMatchObject({
+      active: true,
+      inside: true,
+      sourceId: "snapshot-a",
+      beforeId,
+    });
+    lifecycle.cancel(22, "explicit");
+  });
+
+  it.each(["search", "non-All filter"])(
+    "does not persist a reorder while %s is active",
+    async () => {
+      const adapter = new MemoryDrawerDragAdapter();
+      const reorder = new MemoryDrawerReorderAdapter();
+      reorder.enabled = false;
+      adapter.reorder = reorder;
+      adapter.collectionId = null;
+      const lifecycle = createDrawerDragLifecycle(adapter);
+      const start = favoriteStartFact(23, "snapshot-a");
+
+      lifecycle.start(start);
+      await resolveMembership(adapter, 23, []);
+      await expect(lifecycle.end(point(start, 50, 200))).resolves.toBe("no-op");
+
+      expect(reorder.commits).toEqual([]);
+    },
+  );
+
+  it("treats the current insertion position as a reorder no-op", async () => {
+    const adapter = new MemoryDrawerDragAdapter();
+    const reorder = new MemoryDrawerReorderAdapter();
+    adapter.reorder = reorder;
+    adapter.collectionId = "drawer-b";
+    const lifecycle = createDrawerDragLifecycle(adapter);
+    const start = favoriteStartFact(24, "snapshot-b");
+
+    lifecycle.start(start);
+    await expect(lifecycle.end(point(start, 50, 200))).resolves.toBe("no-op");
+
+    expect(reorder.commits).toEqual([]);
+    expect(adapter.commits).toEqual([]);
+    expect(adapter.finishedVisualReasons).toEqual(["item-reorder"]);
+    expect(reorder.states[reorder.states.length - 1]).toEqual({
+      active: false,
+      inside: false,
+      sourceId: null,
+      beforeId: null,
+    });
+  });
+
+  it("awaits authoritative reload before completing a successful reorder", async () => {
+    const adapter = new MemoryDrawerDragAdapter();
+    const reorder = new MemoryDrawerReorderAdapter();
+    const recovery = deferred<void>();
+    reorder.successRecovery = recovery.promise;
+    adapter.reorder = reorder;
+    const lifecycle = createDrawerDragLifecycle(adapter);
+    const start = favoriteStartFact(25, "snapshot-d");
+    let settled = false;
+
+    lifecycle.start(start);
+    const outcome = lifecycle.end(point(start, 50, 125)).then((result) => {
+      settled = true;
+      return result;
+    });
+    await Promise.resolve();
+
+    expect(reorder.successes).toEqual(["drawer-a"]);
+    expect(settled).toBe(false);
+    recovery.resolve();
+    await expect(outcome).resolves.toBe("success");
+    expectClean(adapter, "drawer-row-snapshot-d");
+  });
+
+  it("shows failure, reloads authoritative order, and clears reorder feedback", async () => {
+    const adapter = new MemoryDrawerDragAdapter();
+    const reorder = new MemoryDrawerReorderAdapter();
+    const error = new Error("reorder rejected");
+    const recovery = deferred<void>();
+    reorder.commitError = error;
+    reorder.failureRecovery = recovery.promise;
+    adapter.reorder = reorder;
+    const lifecycle = createDrawerDragLifecycle(adapter);
+    const start = favoriteStartFact(26, "snapshot-d");
+    let settled = false;
+
+    lifecycle.start(start);
+    const outcome = lifecycle.end(point(start, 50, 125)).then((result) => {
+      settled = true;
+      return result;
+    });
+    await Promise.resolve();
+
+    expect(reorder.failures).toEqual([error]);
+    expect(reorder.successes).toEqual([]);
+    expect(settled).toBe(false);
+    expectClean(adapter, "drawer-row-snapshot-d");
+    recovery.resolve();
+    await expect(outcome).resolves.toBe("failed");
+  });
+
   it("commits a History Clip once and cleans every terminal visual", async () => {
     const adapter = new MemoryDrawerDragAdapter();
     const lifecycle = createDrawerDragLifecycle(adapter);

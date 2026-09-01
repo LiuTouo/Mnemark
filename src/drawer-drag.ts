@@ -1,4 +1,6 @@
+import { rectContains } from "./drag";
 import type { ItemDragPoint, ItemDragStart } from "./drag";
+import { insertBefore } from "./reorder";
 
 export type DrawerDragTerminalOutcome =
   | "success"
@@ -27,7 +29,43 @@ export interface DrawerDragTargetState {
   targetId: string | null;
 }
 
+export interface DrawerDragRect {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+export interface DrawerDragReorderContext {
+  collectionId: string;
+  itemId: string;
+  ids: readonly string[];
+}
+
+export interface DrawerDragReorderGeometry {
+  list: DrawerDragRect;
+  items: ReadonlyArray<{ id: string; rect: DrawerDragRect }>;
+}
+
+export interface DrawerDragReorderState {
+  active: boolean;
+  inside: boolean;
+  sourceId: string | null;
+  beforeId: string | null;
+}
+
+export interface DrawerDragReorderAdapter {
+  context(start: ItemDragStart): DrawerDragReorderContext | null;
+  measure(): DrawerDragReorderGeometry;
+  render(state: DrawerDragReorderState): void;
+  scrollBy(amount: number): boolean;
+  commit(collectionId: string, ids: readonly string[]): Promise<void>;
+  showSuccess(collectionId: string): Promise<void> | void;
+  showFailure(error: unknown): Promise<void> | void;
+}
+
 export interface DrawerDragAdapter<Source> {
+  reorder?: DrawerDragReorderAdapter;
   lookupMembership(start: ItemDragStart): Promise<readonly string[]>;
   collectionAt(point: ItemDragPoint): string | null;
   renderTargets(state: DrawerDragTargetState): void;
@@ -62,6 +100,9 @@ interface ActiveSession<Source> {
   point: ItemDragPoint;
   membershipIds: readonly string[] | null;
   membershipResult: Promise<MembershipResult>;
+  reorderContext: DrawerDragReorderContext | null;
+  reorderState: DrawerDragReorderState | null;
+  reorderFrame: number | null;
   ending: boolean;
 }
 
@@ -76,6 +117,19 @@ function pointFromStart(start: ItemDragStart): ItemDragPoint {
 
 function sameLocator(left: ItemDragPoint["locator"], right: ItemDragPoint["locator"]): boolean {
   return left.scope === right.scope && left.id === right.id;
+}
+
+function sameOrder(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((id, index) => id === right[index]);
+}
+
+function inactiveReorderState(): DrawerDragReorderState {
+  return {
+    active: false,
+    inside: false,
+    sourceId: null,
+    beforeId: null,
+  };
 }
 
 export function createDrawerDragLifecycle<Source>(
@@ -106,6 +160,104 @@ export function createDrawerDragLifecycle<Source>(
     if (isCurrent(session)) adapter.renderTargets(targetState(session));
   }
 
+  function currentReorderContext(
+    session: ActiveSession<Source>,
+  ): DrawerDragReorderContext | null {
+    if (!session.reorderContext || !adapter.reorder) return null;
+    const current = adapter.reorder.context(session.start);
+    if (!current
+      || current.collectionId !== session.reorderContext.collectionId
+      || current.itemId !== session.reorderContext.itemId) return null;
+    return current;
+  }
+
+  function stopReorderAutoScroll(session: ActiveSession<Source>): void {
+    if (session.reorderFrame !== null) cancelAnimationFrame(session.reorderFrame);
+    session.reorderFrame = null;
+  }
+
+  function reorderScrollVelocity(
+    geometry: DrawerDragReorderGeometry,
+    point: ItemDragPoint,
+  ): number {
+    if (!rectContains(geometry.list, point.x, point.y)) return 0;
+    const edge = 40;
+    if (point.y < geometry.list.top + edge) {
+      return -Math.max(3, Math.ceil((geometry.list.top + edge - point.y) / 3));
+    }
+    if (point.y > geometry.list.bottom - edge) {
+      return Math.max(3, Math.ceil((point.y - (geometry.list.bottom - edge)) / 3));
+    }
+    return 0;
+  }
+
+  function scheduleReorderAutoScroll(
+    session: ActiveSession<Source>,
+    geometry: DrawerDragReorderGeometry,
+  ): void {
+    const velocity = reorderScrollVelocity(geometry, session.point);
+    if (session.ending || velocity === 0) {
+      stopReorderAutoScroll(session);
+    } else if (session.reorderFrame === null) {
+      session.reorderFrame = requestAnimationFrame(() => runReorderAutoScroll(session));
+    }
+  }
+
+  function updateReorder(
+    session: ActiveSession<Source>,
+    scheduleAutoScroll = true,
+  ): DrawerDragReorderState | null {
+    const reorder = adapter.reorder;
+    const context = currentReorderContext(session);
+    if (!reorder || !context) {
+      stopReorderAutoScroll(session);
+      if (session.reorderState) reorder?.render(inactiveReorderState());
+      session.reorderState = null;
+      return null;
+    }
+
+    session.reorderContext = context;
+    const geometry = reorder.measure();
+    const inside = rectContains(geometry.list, session.point.x, session.point.y);
+    let beforeId: string | null = null;
+    if (inside) {
+      for (const item of geometry.items) {
+        if (item.id === context.itemId) continue;
+        if (session.point.y < item.rect.top + (item.rect.bottom - item.rect.top) / 2) {
+          beforeId = item.id;
+          break;
+        }
+      }
+    }
+    const state: DrawerDragReorderState = {
+      active: true,
+      inside,
+      sourceId: context.itemId,
+      beforeId,
+    };
+    session.reorderState = state;
+    reorder.render(state);
+    if (scheduleAutoScroll) scheduleReorderAutoScroll(session, geometry);
+    else stopReorderAutoScroll(session);
+    return state;
+  }
+
+  function runReorderAutoScroll(session: ActiveSession<Source>): void {
+    session.reorderFrame = null;
+    const reorder = adapter.reorder;
+    if (!isCurrent(session) || session.ending || !reorder || !currentReorderContext(session)) return;
+    const velocity = reorderScrollVelocity(reorder.measure(), session.point);
+    if (velocity === 0) return;
+    const scrolled = reorder.scrollBy(velocity);
+    updateReorder(session, scrolled);
+  }
+
+  function clearReorder(session: ActiveSession<Source>): void {
+    stopReorderAutoScroll(session);
+    if (session.reorderState) adapter.reorder?.render(inactiveReorderState());
+    session.reorderState = null;
+  }
+
   function finish(
     session: ActiveSession<Source>,
     outcome: DrawerDragTerminalOutcome,
@@ -113,6 +265,7 @@ export function createDrawerDragLifecycle<Source>(
   ): DrawerDragTerminalOutcome | null {
     if (!isCurrent(session)) return null;
     active = null;
+    clearReorder(session);
     adapter.renderTargets({
       active: false,
       membershipReady: false,
@@ -148,12 +301,16 @@ export function createDrawerDragLifecycle<Source>(
       point: pointFromStart(startFact),
       membershipIds: null,
       membershipResult,
+      reorderContext: adapter.reorder?.context(startFact) ?? null,
+      reorderState: null,
+      reorderFrame: null,
       ending: false,
     };
     active = session;
     adapter.activateSource(startFact.source);
     adapter.beginVisual(startFact);
     render(session);
+    updateReorder(session);
 
     void membershipResult.then((result) => {
       if (!isCurrent(session) || !result.ok) return;
@@ -171,6 +328,7 @@ export function createDrawerDragLifecycle<Source>(
     session.point = point;
     adapter.moveVisual(point);
     render(session);
+    updateReorder(session);
   }
 
   async function end(point: ItemDragPoint): Promise<DrawerDragTerminalOutcome | null> {
@@ -184,6 +342,30 @@ export function createDrawerDragLifecycle<Source>(
     session.point = point;
     adapter.moveVisual(point);
     render(session);
+
+    const reorderState = updateReorder(session, false);
+    const reorderContext = currentReorderContext(session);
+    if (reorderState?.inside && reorderContext && adapter.reorder) {
+      const nextIds = insertBefore(
+        reorderContext.ids,
+        reorderContext.itemId,
+        reorderState.beforeId,
+      );
+      if (sameOrder(nextIds, reorderContext.ids)) {
+        return finish(session, "no-op", "item-reorder");
+      }
+      try {
+        await adapter.reorder.commit(reorderContext.collectionId, nextIds);
+      } catch (error) {
+        const outcome = finish(session, "failed", "item-reorder");
+        await adapter.reorder.showFailure(error);
+        return outcome;
+      }
+      await adapter.reorder.showSuccess(reorderContext.collectionId);
+      if (!isCurrent(session)) return null;
+      const outcome = finish(session, "success", "item-reorder");
+      return outcome;
+    }
 
     const membership = await session.membershipResult;
     if (!isCurrent(session)) return null;

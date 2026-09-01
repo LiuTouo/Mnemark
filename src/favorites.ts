@@ -11,6 +11,7 @@ import type { ItemDragPoint } from "./drag";
 import { createDrawerDragLifecycle } from "./drawer-drag";
 import type {
   DrawerDragCancelReason,
+  DrawerDragReorderAdapter,
   DrawerDragStart,
   DrawerDragTargetState,
   DrawerDragTerminalOutcome,
@@ -46,6 +47,7 @@ let drawerTargetState: DrawerDragTargetState = {
   membershipIds: [],
   targetId: null,
 };
+let drawerReorderAdapter: DrawerDragReorderAdapter | undefined;
 
 const listEl = document.getElementById("favorites-list")!;
 const emptyEl = document.getElementById("favorites-empty")!;
@@ -523,6 +525,9 @@ function renderDrawerTargets(state: DrawerDragTargetState): void {
 }
 
 const drawerDrag = createDrawerDragLifecycle<HTMLElement>({
+  get reorder() {
+    return drawerReorderAdapter;
+  },
   lookupMembership: (start) => invoke<string[]>("favorite_collection_ids", { locator: start.locator }),
   collectionAt: (point) => collectionUnderPoint(point.x, point.y),
   renderTargets: renderDrawerTargets,
@@ -558,6 +563,10 @@ const drawerDrag = createDrawerDragLifecycle<HTMLElement>({
     await loadCollections();
   },
 });
+
+export function configureDrawerItemReorder(adapter: DrawerDragReorderAdapter): void {
+  drawerReorderAdapter = adapter;
+}
 
 export function startDrawerDrag(start: DrawerDragStart<HTMLElement>): void {
   drawerDrag.start(start);

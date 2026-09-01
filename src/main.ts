@@ -6,7 +6,7 @@ import { applyTheme } from "./theme";
 import { decidePreviewSync, PreviewController } from "./preview-state";
 import { ShortcutMatcher, FAVORITES_DEFAULT_CODES } from "./shortcut";
 import { ChooserGate, computeMenuPlacement } from "./menu";
-import { DragController, itemDragStartPayload, isFavoriteItem, clipLocator, rectContains } from "./drag";
+import { DragController, itemDragStartPayload, isFavoriteItem, clipLocator } from "./drag";
 import type { ItemDragPoint } from "./drag";
 import { classifyClip, filterItems } from "./dataset";
 import type { FilterKind } from "./dataset";
@@ -15,13 +15,14 @@ import { decideWorkspaceLayout, escapeLayer, tabAfterPreviewIntent } from "./wor
 import type { WorkspaceTab } from "./workspace-state";
 import {
   cancelDrawerDrag,
+  configureDrawerItemReorder,
   endDrawerDrag,
   moveDrawerDrag,
   startDrawerDrag,
 } from "./favorites";
 import type { DrawerDragCancelReason } from "./drawer-drag";
 import "./preview";
-import { insertBefore, moveOne } from "./reorder";
+import { moveOne } from "./reorder";
 import type { BatchMutationResult, Clip, ClipboardUpdate, ClipLocator, CollectionSummary, FavoriteItem, FavoritesUiState } from "./types";
 
 type DisplayItem = Clip | FavoriteItem;
@@ -55,11 +56,6 @@ let activeDragSource: HTMLElement | null = null;
 // the sidebar can reject stale or cancelled drags.
 let dragSessionSeq = 0;
 let activeDragSessionId: number | null = null;
-let activeItemReorderId: string | null = null;
-let itemReorderBeforeId: string | null = null;
-let itemReorderInsideList = false;
-let itemReorderPointer: { x: number; y: number } | null = null;
-let itemReorderScrollFrame: number | null = null;
 const chooserGate = new ChooserGate();
 let lastMenuPos = { anchorTop: 0, anchorBottom: 0, right: 0 };
 const multiSelect = new MultiSelectState();
@@ -95,6 +91,54 @@ const previewPane = document.getElementById("workspace-preview")!;
 const workspaceTabs = document.getElementById("workspace-tabs")!;
 const drawerTab = document.getElementById("workspace-tab-drawer") as HTMLButtonElement;
 const previewTab = document.getElementById("workspace-tab-preview") as HTMLButtonElement;
+
+configureDrawerItemReorder({
+  context: (start) => {
+    const collectionId = selectedCollection;
+    if (start.locator.scope !== "favorite"
+      || !collectionId
+      || !favoriteItemReorderEnabled()
+      || !favoriteItems.some((item) => item.id === start.locator.id)) return null;
+    return {
+      collectionId,
+      itemId: start.locator.id,
+      ids: favoriteItems.map((item) => item.id),
+    };
+  },
+  measure: () => ({
+    list: clipList.getBoundingClientRect(),
+    items: [...clipList.querySelectorAll<HTMLElement>('.clip-item[data-is-favorite="1"]')]
+      .map((row) => ({
+        id: row.dataset.clipId ?? "",
+        rect: row.getBoundingClientRect(),
+      }))
+      .filter((item) => item.id.length > 0),
+  }),
+  render: (state) => {
+    clipList.classList.toggle("reordering-items", state.active);
+    itemReorderIndicator.remove();
+    if (!state.active || !state.inside) return;
+    const rows = [...clipList.querySelectorAll<HTMLElement>('.clip-item[data-is-favorite="1"]')];
+    const beforeRow = state.beforeId === null
+      ? null
+      : rows.find((row) => row.dataset.clipId === state.beforeId) ?? null;
+    if (beforeRow) clipList.insertBefore(itemReorderIndicator, beforeRow);
+    else clipList.appendChild(itemReorderIndicator);
+  },
+  scrollBy: (amount) => {
+    const previous = clipList.scrollTop;
+    clipList.scrollTop += amount;
+    return clipList.scrollTop !== previous;
+  },
+  commit: (collectionId, ids) => invoke("reorder_favorite_items", { collectionId, ids }),
+  showSuccess: async () => {
+    await loadFavoritesContext();
+  },
+  showFailure: async (error) => {
+    showToast(localizeBackendError(String(error)));
+    await loadFavoritesContext();
+  },
+});
 
 // Bind the primary drawer action synchronously while the deferred script is
 // evaluated. The panel can become clickable before async init finishes, so
@@ -1212,114 +1256,8 @@ function isSpaceKey(e: KeyboardEvent): boolean {
 }
 
 // === Item drag source (to the sidebar or within the active drawer) ===
-// History clips drag into a drawer collection. Drawer items keep that copy
-// behavior when dropped over the sidebar, while a drop inside the unfiltered
-// center list persists a new item order.
-function stopItemReorderAutoScroll(): void {
-  if (itemReorderScrollFrame !== null) cancelAnimationFrame(itemReorderScrollFrame);
-  itemReorderScrollFrame = null;
-}
-
-function clearItemReorderFeedback(): void {
-  stopItemReorderAutoScroll();
-  activeItemReorderId = null;
-  itemReorderBeforeId = null;
-  itemReorderInsideList = false;
-  itemReorderPointer = null;
-  itemReorderIndicator.remove();
-  clipList.classList.remove("reordering-items");
-}
-
-function itemReorderScrollVelocity(point: { x: number; y: number }): number {
-  const rect = clipList.getBoundingClientRect();
-  if (!rectContains(rect, point.x, point.y)) return 0;
-  const edge = 40;
-  if (point.y < rect.top + edge) {
-    return -Math.max(3, Math.ceil((rect.top + edge - point.y) / 3));
-  }
-  if (point.y > rect.bottom - edge) {
-    return Math.max(3, Math.ceil((point.y - (rect.bottom - edge)) / 3));
-  }
-  return 0;
-}
-
-function placeItemReorderIndicator(itemId: string, point: { x: number; y: number }): void {
-  const listRect = clipList.getBoundingClientRect();
-  itemReorderInsideList = rectContains(listRect, point.x, point.y);
-  if (!itemReorderInsideList) {
-    itemReorderBeforeId = null;
-    itemReorderIndicator.remove();
-    return;
-  }
-
-  const rows = [...clipList.querySelectorAll<HTMLElement>('.clip-item[data-is-favorite="1"]')];
-  let beforeId: string | null = null;
-  for (const candidate of rows) {
-    if (candidate.dataset.clipId === itemId) continue;
-    const rect = candidate.getBoundingClientRect();
-    if (point.y < rect.top + rect.height / 2) {
-      beforeId = candidate.dataset.clipId ?? null;
-      break;
-    }
-  }
-  itemReorderBeforeId = beforeId;
-  const beforeRow = beforeId
-    ? clipList.querySelector<HTMLElement>(`.clip-item[data-clip-id="${CSS.escape(beforeId)}"]`)
-    : null;
-  if (beforeRow) clipList.insertBefore(itemReorderIndicator, beforeRow);
-  else clipList.appendChild(itemReorderIndicator);
-}
-
-function runItemReorderAutoScroll(): void {
-  itemReorderScrollFrame = null;
-  const itemId = activeItemReorderId;
-  const point = itemReorderPointer;
-  if (!itemId || !point) return;
-  const velocity = itemReorderScrollVelocity(point);
-  if (velocity === 0) return;
-  const previous = clipList.scrollTop;
-  clipList.scrollTop += velocity;
-  placeItemReorderIndicator(itemId, point);
-  if (clipList.scrollTop !== previous) {
-    itemReorderScrollFrame = requestAnimationFrame(runItemReorderAutoScroll);
-  }
-}
-
-function updateItemReorder(itemId: string, point: { x: number; y: number }): void {
-  if (activeItemReorderId !== itemId) return;
-  itemReorderPointer = point;
-  placeItemReorderIndicator(itemId, point);
-  const velocity = itemReorderScrollVelocity(point);
-  if (velocity === 0) {
-    stopItemReorderAutoScroll();
-  } else if (itemReorderScrollFrame === null) {
-    itemReorderScrollFrame = requestAnimationFrame(runItemReorderAutoScroll);
-  }
-}
-
-function commitItemReorder(
-  itemId: string,
-  sessionId: number,
-  point: { x: number; y: number },
-): boolean {
-  const collectionId = selectedCollection;
-  if (!collectionId || activeItemReorderId !== itemId || !favoriteItemReorderEnabled()) return false;
-  updateItemReorder(itemId, point);
-  if (!itemReorderInsideList) return false;
-
-  const currentIds = favoriteItems.map((item) => item.id);
-  const nextIds = insertBefore(currentIds, itemId, itemReorderBeforeId);
-  cancelDrawerDrag(sessionId, "item-reorder");
-  clearItemReorderFeedback();
-  if (nextIds.every((id, index) => id === currentIds[index])) return true;
-  void invoke("reorder_favorite_items", { collectionId, ids: nextIds })
-    .then(() => loadFavoritesContext())
-    .catch(async (err) => {
-      showToast(localizeBackendError(String(err)));
-      await loadFavoritesContext();
-    });
-  return true;
-}
+// Pointer events provide session facts only. Drawer drag owns reorder
+// precedence, insertion state, auto-scroll, mutation, and terminal cleanup.
 
 function releaseDragSource(
   el: HTMLElement,
@@ -1333,13 +1271,11 @@ function releaseDragSource(
     }
     activeDragSessionId = null;
   }
-  clearItemReorderFeedback();
 }
 
 function attachRowDrag(row: HTMLElement, handle: HTMLElement, item: DisplayItem) {
   const drag = new DragController(6);
   const locator = clipLocator(item);
-  const favorite = isFavoriteItem(item);
   handle.addEventListener("pointerdown", (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -1347,11 +1283,6 @@ function attachRowDrag(row: HTMLElement, handle: HTMLElement, item: DisplayItem)
     dragSessionSeq += 1;
     activeDragSessionId = dragSessionSeq;
     activeDragSource = row;
-    if (favorite && favoriteItemReorderEnabled()) {
-      activeItemReorderId = item.id;
-      clipList.classList.add("reordering-items");
-      updateItemReorder(item.id, { x: e.clientX, y: e.clientY });
-    }
     handle.setPointerCapture(e.pointerId);
     const point = { x: e.clientX, y: e.clientY };
     const start = itemDragStartPayload(activeDragSessionId, item, point);
@@ -1362,17 +1293,12 @@ function attachRowDrag(row: HTMLElement, handle: HTMLElement, item: DisplayItem)
     const p = { x: e.clientX, y: e.clientY };
     const payload: ItemDragPoint = { sessionId: activeDragSessionId, locator, x: p.x, y: p.y };
     moveDrawerDrag(payload);
-    if (activeItemReorderId === item.id) updateItemReorder(item.id, p);
   });
   handle.addEventListener("pointerup", (e) => {
     if (drag.didDrag && activeDragSessionId !== null) {
       const p = { x: e.clientX, y: e.clientY };
       const payload: ItemDragPoint = { sessionId: activeDragSessionId, locator, x: p.x, y: p.y };
-      const reordered = favorite
-        && commitItemReorder(item.id, activeDragSessionId, p);
-      if (!reordered) {
-        void endDrawerDrag(payload);
-      }
+      void endDrawerDrag(payload);
     }
     releaseDragSource(row, false);
     drag.pointerUp();
