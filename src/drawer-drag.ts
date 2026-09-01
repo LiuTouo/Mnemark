@@ -125,6 +125,15 @@ export function createDrawerDragLifecycle<Source>(
     return outcome;
   }
 
+  async function fail(
+    session: ActiveSession<Source>,
+    error: unknown,
+  ): Promise<DrawerDragTerminalOutcome | null> {
+    const outcome = finish(session, "failed");
+    await adapter.showFailure(error);
+    return outcome;
+  }
+
   function start(startFact: DrawerDragStart<Source>): void {
     if (newestSessionId !== null && startFact.sessionId <= newestSessionId) return;
     if (active) finish(active, "replaced");
@@ -178,11 +187,7 @@ export function createDrawerDragLifecycle<Source>(
 
     const membership = await session.membershipResult;
     if (!isCurrent(session)) return null;
-    if (!membership.ok) {
-      const outcome = finish(session, "failed");
-      await adapter.showFailure(membership.error);
-      return outcome;
-    }
+    if (!membership.ok) return fail(session, membership.error);
 
     session.membershipIds = membership.ids;
     render(session);
@@ -197,10 +202,7 @@ export function createDrawerDragLifecycle<Source>(
     try {
       await adapter.commit(collectionId, session.start);
     } catch (error) {
-      if (!isCurrent(session)) return null;
-      const outcome = finish(session, "failed");
-      await adapter.showFailure(error);
-      return outcome;
+      return fail(session, error);
     }
     if (!isCurrent(session)) return null;
     const outcome = finish(session, "success");

@@ -71,6 +71,7 @@ class MemoryDrawerDragAdapter implements DrawerDragAdapter<string> {
   readonly failures: unknown[] = [];
   collectionId: string | null = "drawer-a";
   commitError: unknown | null = null;
+  commitGate: Promise<void> | null = null;
   failureRecovery: Promise<void> | null = null;
   transientCleanupCount = 0;
   indicatorVisible = false;
@@ -125,6 +126,7 @@ class MemoryDrawerDragAdapter implements DrawerDragAdapter<string> {
   async commit(collectionId: string, start: ItemDragStart): Promise<void> {
     this.commits.push({ collectionId, locatorId: start.locator.id });
     if (this.commitError !== null) throw this.commitError;
+    if (this.commitGate !== null) await this.commitGate;
   }
 
   showUnavailable(collectionId: string): void {
@@ -294,6 +296,36 @@ describe("Drawer drag lifecycle", () => {
     expect(adapter.commits).toEqual([
       { collectionId: "drawer-a", locatorId: "snapshot-current" },
     ]);
+  });
+
+  it("recovers a late mutation failure without clearing the replacement session", async () => {
+    const adapter = new MemoryDrawerDragAdapter();
+    const lifecycle = createDrawerDragLifecycle(adapter);
+    const staleStart = favoriteStartFact(16, "snapshot-stale-commit");
+    const currentStart = favoriteStartFact(17, "snapshot-current");
+    const commit = deferred<void>();
+    const error = new Error("late mutation rejection");
+    adapter.commitGate = commit.promise;
+
+    lifecycle.start(staleStart);
+    await resolveMembership(adapter, 16, []);
+    const staleEnd = lifecycle.end(point(staleStart));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(adapter.commits).toEqual([
+      { collectionId: "drawer-a", locatorId: "snapshot-stale-commit" },
+    ]);
+
+    lifecycle.start(currentStart);
+    commit.reject(error);
+
+    await expect(staleEnd).resolves.toBeNull();
+    expect(adapter.failures).toEqual([error]);
+    expect(adapter.targetStates[adapter.targetStates.length - 1]).toMatchObject({
+      active: true,
+      membershipReady: false,
+    });
+    expect(adapter.releasedSources).toContain("drawer-row-snapshot-stale-commit");
+    expect(adapter.finishedVisuals).toEqual(["replaced"]);
   });
 
   it.each<DrawerDragCancelReason>([
