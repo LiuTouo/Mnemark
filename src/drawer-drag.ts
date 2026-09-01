@@ -39,7 +39,7 @@ export interface DrawerDragRect {
 export interface DrawerDragReorderContext {
   collectionId: string;
   itemId: string;
-  ids: readonly string[];
+  orderedItemIds: readonly string[];
 }
 
 export interface DrawerDragReorderGeometry {
@@ -50,7 +50,6 @@ export interface DrawerDragReorderGeometry {
 export interface DrawerDragReorderState {
   active: boolean;
   inside: boolean;
-  sourceId: string | null;
   beforeId: string | null;
 }
 
@@ -59,7 +58,7 @@ export interface DrawerDragReorderAdapter {
   measure(): DrawerDragReorderGeometry;
   render(state: DrawerDragReorderState): void;
   scrollBy(amount: number): boolean;
-  commit(collectionId: string, ids: readonly string[]): Promise<void>;
+  commit(collectionId: string, orderedItemIds: readonly string[]): Promise<void>;
   showSuccess(collectionId: string): Promise<void> | void;
   showFailure(error: unknown): Promise<void> | void;
 }
@@ -127,7 +126,6 @@ function inactiveReorderState(): DrawerDragReorderState {
   return {
     active: false,
     inside: false,
-    sourceId: null,
     beforeId: null,
   };
 }
@@ -232,7 +230,6 @@ export function createDrawerDragLifecycle<Source>(
     const state: DrawerDragReorderState = {
       active: true,
       inside,
-      sourceId: context.itemId,
       beforeId,
     };
     session.reorderState = state;
@@ -347,11 +344,11 @@ export function createDrawerDragLifecycle<Source>(
     const reorderContext = currentReorderContext(session);
     if (reorderState?.inside && reorderContext && adapter.reorder) {
       const nextIds = insertBefore(
-        reorderContext.ids,
+        reorderContext.orderedItemIds,
         reorderContext.itemId,
         reorderState.beforeId,
       );
-      if (sameOrder(nextIds, reorderContext.ids)) {
+      if (sameOrder(nextIds, reorderContext.orderedItemIds)) {
         return finish(session, "no-op", "item-reorder");
       }
       try {

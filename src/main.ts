@@ -102,12 +102,12 @@ configureDrawerItemReorder({
     return {
       collectionId,
       itemId: start.locator.id,
-      ids: favoriteItems.map((item) => item.id),
+      orderedItemIds: favoriteItems.map((item) => item.id),
     };
   },
   measure: () => ({
     list: clipList.getBoundingClientRect(),
-    items: [...clipList.querySelectorAll<HTMLElement>('.clip-item[data-is-favorite="1"]')]
+    items: [...clipList.querySelectorAll<HTMLElement>(".clip-item[data-is-favorite='1']")]
       .map((row) => ({
         id: row.dataset.clipId ?? "",
         rect: row.getBoundingClientRect(),
@@ -118,7 +118,7 @@ configureDrawerItemReorder({
     clipList.classList.toggle("reordering-items", state.active);
     itemReorderIndicator.remove();
     if (!state.active || !state.inside) return;
-    const rows = [...clipList.querySelectorAll<HTMLElement>('.clip-item[data-is-favorite="1"]')];
+    const rows = [...clipList.querySelectorAll<HTMLElement>(".clip-item[data-is-favorite='1']")];
     const beforeRow = state.beforeId === null
       ? null
       : rows.find((row) => row.dataset.clipId === state.beforeId) ?? null;
@@ -130,7 +130,10 @@ configureDrawerItemReorder({
     clipList.scrollTop += amount;
     return clipList.scrollTop !== previous;
   },
-  commit: (collectionId, ids) => invoke("reorder_favorite_items", { collectionId, ids }),
+  commit: (collectionId, orderedItemIds) => invoke("reorder_favorite_items", {
+    collectionId,
+    ids: orderedItemIds,
+  }),
   showSuccess: async () => {
     await loadFavoritesContext();
   },
