@@ -156,4 +156,24 @@ describe("DrawerViewCoordinator", () => {
     expect(renderDrawer).toHaveBeenCalledWith(drawerView(1));
     expect(presentation.reportDiagnostic).toHaveBeenCalledTimes(2);
   });
+
+  it("cancels before both renderers and ignores a same-generation barrier", async () => {
+    const projection = new DrawerViewProjection(source(), vi.fn());
+    const { coordinator: drawerViewCoordinator } = coordinator(projection);
+    const publicationOrder: string[] = [];
+    drawerViewCoordinator.subscribe({
+      cancelDrag: () => publicationOrder.push("cancel"),
+      renderPanel: () => publicationOrder.push("Panel"),
+      renderDrawer: () => publicationOrder.push("Drawer"),
+    });
+
+    await projection.startup();
+
+    expect(publicationOrder).toEqual(["cancel", "Panel", "Drawer"]);
+    publicationOrder.length = 0;
+
+    await projection.refresh();
+
+    expect(publicationOrder).toEqual([]);
+  });
 });

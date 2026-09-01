@@ -100,7 +100,6 @@ function renderCurrentView(): void {
 
 // === render ===
 function render(view: DrawerView): void {
-  drawerDrag.cancel("source-removed");
   listEl.replaceChildren();
   const collections = view.collections;
   const selected = view.selectedCollection;
