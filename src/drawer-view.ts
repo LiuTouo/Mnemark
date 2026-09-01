@@ -27,7 +27,7 @@ export class DrawerViewProjection {
   private listenerRegistered = false;
   private listenerAttempt: Promise<void> | null = null;
   private startupRequest: Promise<DrawerView> | null = null;
-  private pumpRequest: Promise<void> | null = null;
+  private pumping = false;
   private readonly barriers: ReadBarrier[] = [];
   private readSequence = 0;
   private backgroundPending = false;
@@ -147,12 +147,11 @@ export class DrawerViewProjection {
   }
 
   private startPump(): void {
-    if (!this.listenerRegistered || this.pumpRequest || !this.needsRead()) return;
+    if (!this.listenerRegistered || this.pumping || !this.needsRead()) return;
 
-    const request = this.pump();
-    this.pumpRequest = request;
-    void request.finally(() => {
-      if (this.pumpRequest === request) this.pumpRequest = null;
+    this.pumping = true;
+    void this.pump().finally(() => {
+      this.pumping = false;
       if (this.needsRead()) this.startPump();
     });
   }

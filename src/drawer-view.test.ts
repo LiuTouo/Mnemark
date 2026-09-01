@@ -32,6 +32,7 @@ class DeferredDrawerViewSource implements DrawerViewSource {
   readonly reads: Deferred<DrawerView>[] = [];
   activeReads = 0;
   maxConcurrentReads = 0;
+  onRead: (() => void) | null = null;
   private invalidated: ((generation: number) => void) | null = null;
 
   async listenInvalidated(listener: (generation: number) => void): Promise<void> {
@@ -45,6 +46,9 @@ class DeferredDrawerViewSource implements DrawerViewSource {
     this.reads.push(read);
     this.activeReads += 1;
     this.maxConcurrentReads = Math.max(this.maxConcurrentReads, this.activeReads);
+    const onRead = this.onRead;
+    this.onRead = null;
+    onRead?.();
     return read.promise.finally(() => {
       this.activeReads -= 1;
     });
@@ -221,6 +225,25 @@ describe("DrawerViewProjection subscriptions", () => {
 });
 
 describe("DrawerViewProjection invalidation freshness", () => {
+  it("prevents synchronous invalidation from reentering the read pump", async () => {
+    const source = new DeferredDrawerViewSource();
+    const projection = new DrawerViewProjection(source, vi.fn());
+    source.onRead = () => source.emitInvalidated(2);
+
+    const startup = projection.startup();
+    await vi.waitFor(() => expect(source.calls).toContain("read"));
+
+    expect(source.reads).toHaveLength(1);
+    expect(source.maxConcurrentReads).toBe(1);
+
+    source.reads[0].resolve(drawerView(1));
+    await expect(startup).resolves.toEqual(drawerView(1));
+    await vi.waitFor(() => expect(source.reads).toHaveLength(2));
+    expect(source.maxConcurrentReads).toBe(1);
+    source.reads[1].resolve(drawerView(2));
+    await vi.waitFor(() => expect(projection.currentView).toEqual(drawerView(2)));
+  });
+
   it("coalesces a burst and rejects an older completion with one trailing read", async () => {
     const source = new DeferredDrawerViewSource();
     const projection = new DrawerViewProjection(source, vi.fn());
