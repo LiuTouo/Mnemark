@@ -11,10 +11,20 @@ export interface DrawerView {
 export interface DrawerViewSource {
   listenInvalidated(listener: (generation: number) => void): Promise<void>;
   read(): Promise<DrawerView>;
+  toggle(): Promise<void>;
+  setOpen(open: boolean): Promise<void>;
+  select(collectionId: string | null): Promise<void>;
 }
 
 export type DrawerViewDiagnosticReporter = (error: unknown) => void;
 export type DrawerViewSubscriber = (next: DrawerView, previous: DrawerView | null) => void;
+export type DrawerViewIntentResult =
+  | { readonly status: "published"; readonly view: DrawerView }
+  | {
+      readonly status: "committed-stale";
+      readonly view: DrawerView;
+      readonly error: unknown;
+    };
 
 interface ReadBarrier {
   readonly requiredRead: number;
@@ -34,6 +44,7 @@ export class DrawerViewProjection {
   private wantedGeneration = 0;
   private stale = true;
   private readonly subscribers = new Set<DrawerViewSubscriber>();
+  private intentQueue: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly source: DrawerViewSource,
@@ -65,6 +76,18 @@ export class DrawerViewProjection {
     return this.refresh();
   }
 
+  toggle(): Promise<DrawerViewIntentResult> {
+    return this.enqueueIntent(() => this.source.toggle());
+  }
+
+  setOpen(open: boolean): Promise<DrawerViewIntentResult> {
+    return this.enqueueIntent(() => this.source.setOpen(open));
+  }
+
+  select(collectionId: string | null): Promise<DrawerViewIntentResult> {
+    return this.enqueueIntent(() => this.source.select(collectionId));
+  }
+
   subscribe(subscriber: DrawerViewSubscriber): () => void {
     this.subscribers.add(subscriber);
     if (this.view) this.notify(subscriber, this.view, null);
@@ -81,6 +104,29 @@ export class DrawerViewProjection {
     } catch {
       // One renderer must not prevent the others from receiving the view.
     }
+  }
+
+  private enqueueIntent(command: () => Promise<void>): Promise<DrawerViewIntentResult> {
+    const request = this.intentQueue.then(async () => {
+      await this.startup();
+      await command();
+
+      try {
+        return {
+          status: "published" as const,
+          view: await this.refresh(),
+        };
+      } catch (error) {
+        const view = this.view;
+        if (!view) throw error;
+        return { status: "committed-stale" as const, view, error };
+      }
+    });
+    this.intentQueue = request.then(
+      () => undefined,
+      () => undefined,
+    );
+    return request;
   }
 
   private accept(next: DrawerView): DrawerView {

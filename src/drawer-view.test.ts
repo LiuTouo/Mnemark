@@ -30,6 +30,11 @@ class Deferred<T> {
 class DeferredDrawerViewSource implements DrawerViewSource {
   readonly calls: string[] = [];
   readonly reads: Deferred<DrawerView>[] = [];
+  readonly mutations: Array<{
+    readonly name: "toggle" | "setOpen" | "select";
+    readonly value?: boolean | string | null;
+    readonly completion: Deferred<void>;
+  }> = [];
   activeReads = 0;
   maxConcurrentReads = 0;
   onRead: (() => void) | null = null;
@@ -54,9 +59,31 @@ class DeferredDrawerViewSource implements DrawerViewSource {
     });
   }
 
+  toggle(): Promise<void> {
+    return this.mutate("toggle");
+  }
+
+  setOpen(open: boolean): Promise<void> {
+    return this.mutate("setOpen", open);
+  }
+
+  select(collectionId: string | null): Promise<void> {
+    return this.mutate("select", collectionId);
+  }
+
   emitInvalidated(generation: number): void {
     if (!this.invalidated) throw new Error("invalidation listener is not registered");
     this.invalidated(generation);
+  }
+
+  private mutate(
+    name: "toggle" | "setOpen" | "select",
+    value?: boolean | string | null,
+  ): Promise<void> {
+    this.calls.push(name);
+    const completion = new Deferred<void>();
+    this.mutations.push({ name, value, completion });
+    return completion.promise;
   }
 }
 
@@ -128,6 +155,15 @@ describe("DrawerViewProjection startup", () => {
       read() {
         reads += 1;
         return read.promise;
+      },
+      toggle() {
+        return Promise.resolve();
+      },
+      setOpen() {
+        return Promise.resolve();
+      },
+      select() {
+        return Promise.resolve();
       },
     };
     const projection = new DrawerViewProjection(source, vi.fn());
@@ -354,5 +390,145 @@ describe("DrawerViewProjection refresh barriers", () => {
     source.reads[2].resolve(drawerView(2));
 
     await expect(retry).resolves.toEqual(drawerView(2));
+  });
+});
+
+describe("DrawerViewProjection intents", () => {
+  it("runs toggle, explicit open, and selection through one FIFO queue", async () => {
+    const source = new DeferredDrawerViewSource();
+    const projection = new DrawerViewProjection(source, vi.fn());
+
+    const toggle = projection.toggle();
+    const setOpen = projection.setOpen(true);
+    const select = projection.select("drawer-a");
+
+    await vi.waitFor(() => expect(source.reads).toHaveLength(1));
+    expect(source.mutations).toHaveLength(0);
+    source.reads[0].resolve(drawerView(1));
+
+    await vi.waitFor(() => expect(source.mutations).toHaveLength(1));
+    expect(source.mutations[0]).toMatchObject({ name: "toggle" });
+    source.mutations[0].completion.resolve();
+    await vi.waitFor(() => expect(source.reads).toHaveLength(2));
+    expect(source.mutations).toHaveLength(1);
+    source.reads[1].resolve({ ...drawerView(2), open: true });
+    await expect(toggle).resolves.toEqual({
+      status: "published",
+      view: { ...drawerView(2), open: true },
+    });
+
+    await vi.waitFor(() => expect(source.mutations).toHaveLength(2));
+    expect(source.mutations[1]).toMatchObject({ name: "setOpen", value: true });
+    source.mutations[1].completion.resolve();
+    await vi.waitFor(() => expect(source.reads).toHaveLength(3));
+    source.reads[2].resolve({ ...drawerView(3), open: true });
+    await expect(setOpen).resolves.toEqual({
+      status: "published",
+      view: { ...drawerView(3), open: true },
+    });
+
+    await vi.waitFor(() => expect(source.mutations).toHaveLength(3));
+    expect(source.mutations[2]).toMatchObject({ name: "select", value: "drawer-a" });
+    source.mutations[2].completion.resolve();
+    await vi.waitFor(() => expect(source.reads).toHaveLength(4));
+    const selected = {
+      ...drawerView(4),
+      open: true,
+      selectedCollection: "drawer-a",
+    };
+    source.reads[3].resolve(selected);
+
+    await expect(select).resolves.toEqual({ status: "published", view: selected });
+    expect(source.calls).toEqual([
+      "listen",
+      "read",
+      "toggle",
+      "read",
+      "setOpen",
+      "read",
+      "select",
+      "read",
+    ]);
+  });
+
+  it("continues after a rejected command without retrying that mutation", async () => {
+    const source = new DeferredDrawerViewSource();
+    const projection = new DrawerViewProjection(source, vi.fn());
+    const startup = projection.startup();
+    await vi.waitFor(() => expect(source.reads).toHaveLength(1));
+    source.reads[0].resolve(drawerView(1));
+    await startup;
+    const failure = new Error("Collection not found");
+
+    const rejected = projection.select("missing");
+    const rejectedAssertion = expect(rejected).rejects.toBe(failure);
+    const recovered = projection.toggle();
+    await vi.waitFor(() => expect(source.mutations).toHaveLength(1));
+    source.mutations[0].completion.reject(failure);
+
+    await rejectedAssertion;
+    await vi.waitFor(() => expect(source.mutations).toHaveLength(2));
+    expect(source.mutations.map(({ name }) => name)).toEqual(["select", "toggle"]);
+    source.mutations[1].completion.resolve();
+    await vi.waitFor(() => expect(source.reads).toHaveLength(2));
+    source.reads[1].resolve({ ...drawerView(2), open: true });
+
+    await expect(recovered).resolves.toEqual({
+      status: "published",
+      view: { ...drawerView(2), open: true },
+    });
+    expect(source.mutations).toHaveLength(2);
+  });
+
+  it("returns committed-stale when the command commits but its barrier refresh fails", async () => {
+    const source = new DeferredDrawerViewSource();
+    const projection = new DrawerViewProjection(source, vi.fn());
+    const initial = drawerView(1);
+    const startup = projection.startup();
+    await vi.waitFor(() => expect(source.reads).toHaveLength(1));
+    source.reads[0].resolve(initial);
+    await startup;
+    const refreshFailure = new Error("refresh failed after commit");
+
+    const intent = projection.setOpen(true);
+    await vi.waitFor(() => expect(source.mutations).toHaveLength(1));
+    source.mutations[0].completion.resolve();
+    await vi.waitFor(() => expect(source.reads).toHaveLength(2));
+    source.reads[1].reject(refreshFailure);
+
+    await expect(intent).resolves.toEqual({
+      status: "committed-stale",
+      view: initial,
+      error: refreshFailure,
+    });
+    expect(projection.currentView).toEqual(initial);
+  });
+
+  it("rejects an unavailable backend before mutation and remains retryable", async () => {
+    const source = new DeferredDrawerViewSource();
+    const projection = new DrawerViewProjection(source, vi.fn());
+    const unavailable = new Error("Favorites unavailable");
+
+    const failed = projection.toggle();
+    const failedAssertion = expect(failed).rejects.toBe(unavailable);
+    await vi.waitFor(() => expect(source.reads).toHaveLength(1));
+    source.reads[0].reject(unavailable);
+
+    await failedAssertion;
+    expect(source.mutations).toHaveLength(0);
+
+    const retry = projection.toggle();
+    await vi.waitFor(() => expect(source.reads).toHaveLength(2));
+    source.reads[1].resolve(drawerView(1));
+    await vi.waitFor(() => expect(source.mutations).toHaveLength(1));
+    source.mutations[0].completion.resolve();
+    await vi.waitFor(() => expect(source.reads).toHaveLength(3));
+    source.reads[2].resolve({ ...drawerView(2), open: true });
+
+    await expect(retry).resolves.toEqual({
+      status: "published",
+      view: { ...drawerView(2), open: true },
+    });
+    expect(source.calls.filter((call) => call === "listen")).toHaveLength(1);
   });
 });
