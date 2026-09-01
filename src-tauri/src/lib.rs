@@ -1,4 +1,5 @@
 mod clipboard;
+mod drawer;
 mod favorites;
 mod history;
 mod migration;
@@ -7,6 +8,7 @@ mod persistence;
 mod startup;
 mod update;
 
+use drawer::{DrawerMutation, DrawerState, DrawerViewInvalidation, DrawerViewState};
 use favorites::FavoritesStore;
 use history::HistoryStore;
 use models::{
@@ -52,10 +54,9 @@ struct AppState {
     /// Monotonic preview-generation token. Every show and hide intent bumps it;
     /// a show may display only while its claimed generation is still the newest.
     preview_generation: Arc<AtomicU64>,
-    /// Durable favorites collections. Independent of history persistence.
-    favorites: Arc<Mutex<Option<FavoritesStore>>>,
-    /// Session-only sidebar UI state (open + selected collection).
-    favorites_ui: Arc<Mutex<FavoritesUiState>>,
+    /// Authoritative Drawer aggregate: durable store, session UI state, and
+    /// process-local mutation generation share one lock.
+    drawer: Arc<Mutex<DrawerState>>,
     /// Logical width inserted to the left of the history panel in the single
     /// main workspace. Used to keep the history panel anchored while resizing.
     workspace_left_extent: Arc<Mutex<u32>>,
@@ -623,16 +624,31 @@ fn copy_only_files(id: String, state: tauri::State<AppState>) -> Result<String, 
 
 // === Favorites ===
 
-/// Run `f` against the live favorites store, or fail when it failed to open.
-fn with_favorites<T>(
+/// Run a read against the authoritative Drawer aggregate.
+fn with_drawer<T>(
     state: &AppState,
-    f: impl FnOnce(&mut FavoritesStore) -> Result<T, String>,
+    read: impl FnOnce(&DrawerState) -> Result<T, String>,
 ) -> Result<T, String> {
-    let mut guard = lock(&state.favorites);
-    let store = guard
-        .as_mut()
-        .ok_or_else(|| "Favorites unavailable".to_string())?;
-    f(store)
+    read(&lock(&state.drawer))
+}
+
+/// Apply one Drawer mutation while holding the aggregate lock, then publish
+/// only its generation after the lock has been released. Event delivery is an
+/// invalidation hint and cannot turn a committed mutation into an error.
+fn mutate_drawer<T>(
+    state: &AppState,
+    app: &tauri::AppHandle,
+    mutation: impl FnOnce(&mut DrawerState) -> Result<DrawerMutation<T>, String>,
+) -> Result<T, String> {
+    let DrawerMutation { value, generation } = {
+        let mut drawer = lock(&state.drawer);
+        mutation(&mut drawer)?
+    };
+    let _ = app.emit(
+        "drawer-view-invalidated",
+        DrawerViewInvalidation { generation },
+    );
+    Ok(value)
 }
 
 /// Resolve a `ClipLocator` to a `FavoriteItem` snapshot (from history or from
@@ -645,15 +661,11 @@ fn resolve_favorite_item(state: &AppState, locator: &ClipLocator) -> Result<Favo
                 .ok_or_else(|| "Clip not found".to_string())?;
             Ok(FavoriteItem::from(clip))
         }
-        ClipScope::Favorite => {
-            let guard = lock(&state.favorites);
-            let store = guard
-                .as_ref()
-                .ok_or_else(|| "Favorites unavailable".to_string())?;
-            store
+        ClipScope::Favorite => with_drawer(state, |drawer| {
+            drawer
                 .get_item(&locator.id)?
                 .ok_or_else(|| "Favorite item not found".to_string())
-        }
+        }),
     }
 }
 
@@ -671,19 +683,22 @@ fn resolve_content_hash(state: &AppState, locator: &ClipLocator) -> Result<Strin
 /// A favorite's stored snapshot as a full `Clip` (image bytes included), for
 /// reuse by the preview/paste/copy paths.
 fn favorite_as_clip(state: &AppState, id: &str) -> Result<Clip, String> {
-    let guard = lock(&state.favorites);
-    let store = guard
-        .as_ref()
-        .ok_or_else(|| "Favorites unavailable".to_string())?;
-    let item = store
-        .get_item(id)?
-        .ok_or_else(|| "Favorite item not found".to_string())?;
+    let item = with_drawer(state, |drawer| {
+        drawer
+            .get_item(id)?
+            .ok_or_else(|| "Favorite item not found".to_string())
+    })?;
     Ok(item.into_clip())
 }
 
 #[tauri::command]
 fn list_collections(state: tauri::State<AppState>) -> Result<Vec<CollectionSummary>, String> {
-    with_favorites(&state, |f| f.list_collections())
+    with_drawer(&state, |drawer| drawer.list_collections())
+}
+
+#[tauri::command]
+fn get_drawer_view(state: tauri::State<AppState>) -> Result<DrawerViewState, String> {
+    with_drawer(&state, DrawerState::view)
 }
 
 #[tauri::command]
@@ -692,7 +707,7 @@ fn create_collection(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<CollectionSummary, String> {
-    let summary = with_favorites(&state, |f| f.create_collection(&name))?;
+    let summary = mutate_drawer(&state, &app, |drawer| drawer.create_collection(&name))?;
     let _ = app.emit("favorites-updated", ());
     Ok(summary)
 }
@@ -704,7 +719,7 @@ fn rename_collection(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<CollectionSummary, String> {
-    let summary = with_favorites(&state, |f| f.rename_collection(&id, &name))?;
+    let summary = mutate_drawer(&state, &app, |drawer| drawer.rename_collection(&id, &name))?;
     let _ = app.emit("favorites-updated", ());
     Ok(summary)
 }
@@ -715,11 +730,8 @@ fn delete_collection(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
-    with_favorites(&state, |f| f.delete_collection(&id))?;
-    // Deleting the selected collection returns main to history; sidebar stays open.
-    clear_selection_if_deleted(&mut lock(&state.favorites_ui), &id);
+    let ui_state = mutate_drawer(&state, &app, |drawer| drawer.delete_collection(&id))?;
     let _ = app.emit("favorites-updated", ());
-    let ui_state = lock(&state.favorites_ui).clone();
     let _ = app.emit("favorites-ui-state-changed", &ui_state);
     Ok(())
 }
@@ -730,7 +742,7 @@ fn reorder_collections(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
-    with_favorites(&state, |f| f.reorder_collections(&ids))?;
+    mutate_drawer(&state, &app, |drawer| drawer.reorder_collections(&ids))?;
     let _ = app.emit("favorites-updated", ());
     Ok(())
 }
@@ -742,7 +754,9 @@ fn reorder_favorite_items(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
-    with_favorites(&state, |f| f.reorder_items(&collection_id, &ids))?;
+    mutate_drawer(&state, &app, |drawer| {
+        drawer.reorder_items(&collection_id, &ids)
+    })?;
     let _ = app.emit("favorites-updated", ());
     Ok(())
 }
@@ -755,7 +769,9 @@ fn add_favorite(
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
     let item = resolve_favorite_item(&state, &locator)?;
-    with_favorites(&state, |f| f.add_favorite(&collection_id, &item))?;
+    mutate_drawer(&state, &app, |drawer| {
+        drawer.add_snapshot(&collection_id, &item)
+    })?;
     let _ = app.emit("favorites-updated", ());
     Ok(())
 }
@@ -774,7 +790,9 @@ fn add_favorites(
         .iter()
         .map(|locator| resolve_favorite_item(&state, locator))
         .collect::<Result<Vec<_>, _>>()?;
-    let result = with_favorites(&state, |f| f.add_favorites(&collection_id, &items))?;
+    let result = mutate_drawer(&state, &app, |drawer| {
+        drawer.add_snapshots(&collection_id, &items)
+    })?;
     let _ = app.emit("favorites-updated", ());
     Ok(result)
 }
@@ -786,7 +804,9 @@ fn remove_favorite(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
-    with_favorites(&state, |f| f.remove_favorite(&collection_id, &item_id))?;
+    mutate_drawer(&state, &app, |drawer| {
+        drawer.remove_snapshot(&collection_id, &item_id)
+    })?;
     let _ = app.emit("favorites-updated", ());
     Ok(())
 }
@@ -798,7 +818,9 @@ fn remove_favorites(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<BatchMutationResult, String> {
-    let result = with_favorites(&state, |f| f.remove_favorites(&collection_id, &item_ids))?;
+    let result = mutate_drawer(&state, &app, |drawer| {
+        drawer.remove_snapshots(&collection_id, &item_ids)
+    })?;
     let _ = app.emit("favorites-updated", ());
     Ok(result)
 }
@@ -808,7 +830,7 @@ fn list_favorite_items(
     collection_id: String,
     state: tauri::State<AppState>,
 ) -> Result<Vec<FavoriteItem>, String> {
-    with_favorites(&state, |f| f.list_items(&collection_id))
+    with_drawer(&state, |drawer| drawer.list_items(&collection_id))
 }
 
 /// Which collections reference this clip (empty when not favorited). Lets the
@@ -820,7 +842,7 @@ fn favorite_collection_ids(
     state: tauri::State<AppState>,
 ) -> Result<Vec<String>, String> {
     let hash = resolve_content_hash(&state, &locator)?;
-    with_favorites(&state, |f| f.collection_ids_for_item(&hash))
+    with_drawer(&state, |drawer| drawer.collection_ids_for_item(&hash))
 }
 
 #[tauri::command]
@@ -831,7 +853,7 @@ fn set_favorite_note(
     state: tauri::State<AppState>,
 ) -> Result<Option<String>, String> {
     let note = normalize_note(note);
-    with_favorites(&state, |f| f.set_note(&id, note.as_deref()))?;
+    mutate_drawer(&state, &app, |drawer| drawer.set_note(&id, note.as_deref()))?;
     let _ = app.emit("favorites-updated", ());
     Ok(note)
 }
@@ -912,7 +934,7 @@ async fn show_favorite_preview(
 
 #[tauri::command]
 fn get_favorites_ui_state(state: tauri::State<AppState>) -> FavoritesUiState {
-    lock(&state.favorites_ui).clone()
+    lock(&state.drawer).ui_state()
 }
 
 /// Open/close the inline drawer pane. Closing clears the selection.
@@ -922,8 +944,7 @@ fn set_favorites_open(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
-    apply_sidebar_toggle(&mut lock(&state.favorites_ui), open);
-    let ui_state = lock(&state.favorites_ui).clone();
+    let ui_state = mutate_drawer(&state, &app, |drawer| drawer.set_open(open))?;
     let _ = app.emit("favorites-ui-state-changed", &ui_state);
     Ok(())
 }
@@ -934,12 +955,7 @@ fn toggle_favorites_sidebar(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<FavoritesUiState, String> {
-    let ui_state = {
-        let mut ui = lock(&state.favorites_ui);
-        let open = !ui.open;
-        apply_sidebar_toggle(&mut ui, open);
-        ui.clone()
-    };
+    let ui_state = mutate_drawer(&state, &app, DrawerState::toggle_open)?;
     let _ = app.emit("favorites-ui-state-changed", &ui_state);
     Ok(ui_state)
 }
@@ -951,14 +967,7 @@ fn set_favorites_selected(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
-    // Reject an unknown collection id before mutating state.
-    if let Some(id) = &collection_id {
-        if !with_favorites(&state, |f| f.collection_exists(id))? {
-            return Err("Collection not found".to_string());
-        }
-    }
-    lock(&state.favorites_ui).selected_collection = collection_id;
-    let ui_state = lock(&state.favorites_ui).clone();
+    let ui_state = mutate_drawer(&state, &app, |drawer| drawer.set_selected(collection_id))?;
     let _ = app.emit("favorites-ui-state-changed", &ui_state);
     Ok(())
 }
@@ -1703,22 +1712,6 @@ fn apply_ui_scale(app: &tauri::AppHandle) {
     }
 }
 
-/// Pure UI-state transitions (session-only), kept free of window/DB effects so
-/// the selection / return-to-history rules are unit-testable.
-fn apply_sidebar_toggle(ui: &mut FavoritesUiState, open: bool) {
-    ui.open = open;
-    // Closing the sidebar clears the selection and returns main to history.
-    if !open {
-        ui.selected_collection = None;
-    }
-}
-
-fn clear_selection_if_deleted(ui: &mut FavoritesUiState, deleted_id: &str) {
-    if ui.selected_collection.as_deref() == Some(deleted_id) {
-        ui.selected_collection = None;
-    }
-}
-
 fn tutorial_needed(version: u32) -> bool {
     version < CURRENT_TUTORIAL_VERSION
 }
@@ -1843,8 +1836,7 @@ pub fn run(_hidden: bool) {
     let last_deleted = Arc::new(Mutex::new(None));
     let last_deleted_batch = Arc::new(Mutex::new(None));
     let persistence = Arc::new(Mutex::new(persistence));
-    let favorites = Arc::new(Mutex::new(favorites));
-    let favorites_ui = Arc::new(Mutex::new(FavoritesUiState::default()));
+    let drawer = Arc::new(Mutex::new(DrawerState::new(favorites)));
     let tray_items = Arc::new(Mutex::new(None));
     let startup_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(migration_error));
 
@@ -1865,8 +1857,7 @@ pub fn run(_hidden: bool) {
             startup_error: startup_error.clone(),
             preview: Arc::new(Mutex::new(None)),
             preview_generation: Arc::new(AtomicU64::new(0)),
-            favorites: favorites.clone(),
-            favorites_ui: favorites_ui.clone(),
+            drawer: drawer.clone(),
             workspace_left_extent: Arc::new(Mutex::new(0)),
             workspace_right_extent: Arc::new(Mutex::new(0)),
         })
@@ -2031,6 +2022,7 @@ pub fn run(_hidden: bool) {
             hide_panel_command,
             set_main_modal_open,
             get_active_clip_preview,
+            get_drawer_view,
             list_collections,
             create_collection,
             rename_collection,
@@ -2553,68 +2545,6 @@ mod workspace_placement_tests {
 }
 
 #[cfg(test)]
-mod favorites_ui_tests {
-    use super::{apply_sidebar_toggle, clear_selection_if_deleted, FavoritesUiState};
-
-    #[test]
-    fn closing_sidebar_clears_selection() {
-        let mut ui = FavoritesUiState {
-            open: true,
-            selected_collection: Some("c1".to_string()),
-        };
-        apply_sidebar_toggle(&mut ui, false);
-        assert!(!ui.open);
-        assert_eq!(ui.selected_collection, None);
-    }
-
-    #[test]
-    fn opening_sidebar_keeps_state() {
-        let mut ui = FavoritesUiState {
-            open: false,
-            selected_collection: None,
-        };
-        apply_sidebar_toggle(&mut ui, true);
-        assert!(ui.open);
-    }
-
-    #[test]
-    fn selecting_history_keeps_sidebar_open() {
-        // "Selecting history keeps sidebar open": only `selected_collection`
-        // changes; `open` is untouched by set_favorites_selected.
-        let ui = FavoritesUiState {
-            open: true,
-            selected_collection: Some("c1".to_string()),
-        };
-        // set_favorites_selected(None) is modeled directly here.
-        let mut ui = ui;
-        ui.selected_collection = None;
-        assert!(ui.open);
-        assert_eq!(ui.selected_collection, None);
-    }
-
-    #[test]
-    fn deleting_selected_collection_returns_to_history() {
-        let mut ui = FavoritesUiState {
-            open: true,
-            selected_collection: Some("c1".to_string()),
-        };
-        clear_selection_if_deleted(&mut ui, "c1");
-        assert_eq!(ui.selected_collection, None);
-        assert!(ui.open, "sidebar stays open after deleting the selection");
-    }
-
-    #[test]
-    fn deleting_unselected_collection_leaves_selection() {
-        let mut ui = FavoritesUiState {
-            open: true,
-            selected_collection: Some("c2".to_string()),
-        };
-        clear_selection_if_deleted(&mut ui, "c1");
-        assert_eq!(ui.selected_collection.as_deref(), Some("c2"));
-    }
-}
-
-#[cfg(test)]
 mod tutorial_tests {
     use super::tutorial_needed;
 
@@ -2682,7 +2612,7 @@ mod tutorial_lifecycle_tests {
 #[cfg(test)]
 mod persistence_consistency_tests {
     use super::*;
-    use crate::models::{AppConfig, Clip, ClipKind, FavoritesUiState};
+    use crate::models::{AppConfig, Clip, ClipKind};
     use crate::persistence::Persistence;
     use std::sync::atomic::AtomicU64;
     use std::sync::{Arc, Mutex};
@@ -2720,11 +2650,7 @@ mod persistence_consistency_tests {
             startup_error: Arc::new(Mutex::new(None)),
             preview: Arc::new(Mutex::new(None)),
             preview_generation: Arc::new(AtomicU64::new(0)),
-            favorites: Arc::new(Mutex::new(None)),
-            favorites_ui: Arc::new(Mutex::new(FavoritesUiState {
-                open: false,
-                selected_collection: None,
-            })),
+            drawer: Arc::new(Mutex::new(DrawerState::new(None))),
             workspace_left_extent: Arc::new(Mutex::new(0)),
             workspace_right_extent: Arc::new(Mutex::new(0)),
         }

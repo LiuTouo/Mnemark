@@ -312,7 +312,7 @@ impl FavoritesStore {
     }
 
     #[cfg(test)]
-    fn from_conn(conn: Connection) -> Self {
+    pub(crate) fn from_conn(conn: Connection) -> Self {
         init_schema(&conn).unwrap();
         Self { conn }
     }
