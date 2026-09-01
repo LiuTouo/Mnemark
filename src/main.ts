@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { emit, listen } from "@tauri-apps/api/event";
+import { listen } from "@tauri-apps/api/event";
 import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
 import { setLanguage, applyI18n, t, localizeBackendError } from "./i18n";
 import { applyTheme } from "./theme";
@@ -12,14 +12,16 @@ import type { FilterKind } from "./dataset";
 import { MultiSelectState } from "./multi-select";
 import { decideWorkspaceLayout, escapeLayer, tabAfterPreviewIntent } from "./workspace-state";
 import type { WorkspaceTab } from "./workspace-state";
-import { panelDrawerDrag } from "./favorites";
+import { mountDrawer } from "./favorites";
+import type { PanelDrawerController } from "./favorites";
 import type { DrawerDragCancelReason, DrawerDragSession } from "./drawer-drag";
-import "./preview";
+import { mountPreview } from "./preview";
 import { moveOne } from "./reorder";
 import type { BatchMutationResult, Clip, ClipboardUpdate, ClipLocator, CollectionSummary, FavoriteItem, FavoritesUiState } from "./types";
 
 type DisplayItem = Clip | FavoriteItem;
 
+let panelDrawerDrag: PanelDrawerController;
 let clips: Clip[] = [];
 let favoriteItems: FavoriteItem[] = [];
 let collections: CollectionSummary[] = [];
@@ -868,6 +870,11 @@ noteModal.addEventListener("keydown", (e) => {
 });
 
 // === Add-to-collection chooser ===
+function requestCreateCollection(): void {
+  void invoke("set_favorites_open", { open: true })
+    .then(() => panelDrawerDrag.requestCreateCollection());
+}
+
 function openAddChooser(item: DisplayItem) {
   const token = chooserGate.open(item.id);
   const locator: ClipLocator = clipLocator(item);
@@ -884,7 +891,7 @@ function renderAddChooser(locator: ClipLocator, existing: string[]) {
   if (collections.length === 0) {
     const create = menuItem(t("createCollection"), () => {
       hideAddChooser();
-      void invoke("set_favorites_open", { open: true }).then(() => emit("favorites-create-request"));
+      requestCreateCollection();
     });
     addMenu.appendChild(create);
   } else {
@@ -932,7 +939,7 @@ function openBatchAddChooser(): void {
   if (collections.length === 0) {
     addMenu.appendChild(menuItem(t("createCollection"), () => {
       exitMultiSelect();
-      void invoke("set_favorites_open", { open: true }).then(() => emit("favorites-create-request"));
+      requestCreateCollection();
     }));
   } else if (targets.length === 0) {
     const none = menuItem(t("noOtherCollections"), () => {});
@@ -1454,4 +1461,8 @@ document.body.addEventListener("click", (e) => {
 });
 
 // === Initialize ===
-window.addEventListener("DOMContentLoaded", init);
+window.addEventListener("DOMContentLoaded", () => {
+  panelDrawerDrag = mountDrawer();
+  void mountPreview();
+  void init();
+});

@@ -16,14 +16,14 @@ interface PreviewPayload {
   source_title: string;
 }
 
-const kindEl = document.getElementById("preview-kind")!;
-const warningEl = document.getElementById("preview-warning")!;
-const contentEl = document.getElementById("preview-content")!;
-const noteEl = document.getElementById("preview-note")!;
-const noteTextEl = document.getElementById("preview-note-text")!;
-const sourceEl = document.getElementById("preview-source")!;
-const capturedEl = document.getElementById("preview-captured")!;
-const sizeEl = document.getElementById("preview-size")!;
+let kindEl: HTMLElement;
+let warningEl: HTMLElement;
+let contentEl: HTMLElement;
+let noteEl: HTMLElement;
+let noteTextEl: HTMLElement;
+let sourceEl: HTMLElement;
+let capturedEl: HTMLElement;
+let sizeEl: HTMLElement;
 
 function typeLabel(kind: PreviewPayload["kind"]): string {
   switch (kind) {
@@ -104,7 +104,16 @@ function render(payload: PreviewPayload) {
   }
 }
 
-async function init() {
+export async function mountPreview(): Promise<void> {
+  kindEl = document.getElementById("preview-kind")!;
+  warningEl = document.getElementById("preview-warning")!;
+  contentEl = document.getElementById("preview-content")!;
+  noteEl = document.getElementById("preview-note")!;
+  noteTextEl = document.getElementById("preview-note-text")!;
+  sourceEl = document.getElementById("preview-source")!;
+  capturedEl = document.getElementById("preview-captured")!;
+  sizeEl = document.getElementById("preview-size")!;
+
   try {
     const config = await invoke<{ language?: string; theme?: string; ui_opacity_percent?: number }>("get_config");
     setLanguage(config.language || "zh-TW");
@@ -128,5 +137,3 @@ async function init() {
     // covers updates once the backend ships it.
   }
 }
-
-window.addEventListener("DOMContentLoaded", init);
