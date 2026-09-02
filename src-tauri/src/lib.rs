@@ -1,5 +1,6 @@
 mod clip_encoding;
 mod clipboard;
+mod config_transaction;
 mod drawer;
 mod favorites;
 mod history;
@@ -11,6 +12,7 @@ mod persistence;
 mod startup;
 mod update;
 
+use config_transaction::{run_config_update, ConfigEffects};
 use drawer::{DrawerMutation, DrawerState, DrawerViewInvalidation, DrawerViewState};
 use favorites::FavoritesStore;
 use history::HistoryPolicy;
@@ -167,13 +169,43 @@ fn take_startup_error(state: tauri::State<AppState>) -> Option<String> {
     lock(&state.startup_error).take()
 }
 
-/// Undo a hotkey swap so runtime state matches the on-disk config.
-fn rollback_hotkey_swap(app: &tauri::AppHandle, new_hotkey: &str, old_hotkey: &str) {
-    if let Ok(new_sc) = new_hotkey.parse::<tauri_plugin_global_shortcut::Shortcut>() {
-        use tauri_plugin_global_shortcut::GlobalShortcutExt;
-        let _ = app.global_shortcut().unregister(new_sc);
+/// Register `new_hotkey` before unregistering `old_hotkey`, so a conflict never
+/// leaves the Panel without a working shortcut.
+fn swap_panel_hotkey(
+    app: &tauri::AppHandle,
+    old_hotkey: &str,
+    new_hotkey: &str,
+) -> Result<(), String> {
+    let new_shortcut = new_hotkey
+        .parse::<tauri_plugin_global_shortcut::Shortcut>()
+        .map_err(|e| format!("Invalid hotkey '{}': {}", new_hotkey, e))?;
+    let old_shortcut = old_hotkey
+        .parse::<tauri_plugin_global_shortcut::Shortcut>()
+        .ok();
+    if old_shortcut.as_ref() == Some(&new_shortcut) {
+        return Ok(());
     }
-    let _ = register_panel_hotkey(app, old_hotkey);
+
+    register_panel_hotkey(app, new_hotkey)?;
+    if let Some(old) = old_shortcut {
+        use tauri_plugin_global_shortcut::GlobalShortcutExt;
+        let _ = app.global_shortcut().unregister(old);
+    }
+    Ok(())
+}
+
+/// Undo a completed hotkey swap in the same operation order as the previous
+/// hand-written rollback: remove the rejected new chord, then restore the old.
+fn restore_panel_hotkey(
+    app: &tauri::AppHandle,
+    new_hotkey: &str,
+    old_hotkey: &str,
+) -> Result<(), String> {
+    if let Ok(new_shortcut) = new_hotkey.parse::<tauri_plugin_global_shortcut::Shortcut>() {
+        use tauri_plugin_global_shortcut::GlobalShortcutExt;
+        let _ = app.global_shortcut().unregister(new_shortcut);
+    }
+    register_panel_hotkey(app, old_hotkey)
 }
 
 /// Current wall-clock time in milliseconds since the Unix epoch (the same unit
@@ -204,19 +236,46 @@ fn apply_persist(state: &AppState, enabled: bool) -> Result<(), String> {
     }
 }
 
-/// Undo a persistence toggle after a later step failed.
-fn rollback_persist(state: &AppState, failed_new_value: bool) {
-    let _ = apply_persist(state, !failed_new_value);
+struct SystemConfigEffects<'a> {
+    app: &'a tauri::AppHandle,
+    state: &'a AppState,
 }
 
-#[tauri::command]
-fn update_config(
-    new_config: AppConfig,
-    app: tauri::AppHandle,
-    state: tauri::State<AppState>,
-) -> Result<(), String> {
-    let new_config = new_config.sanitized();
-    // Reject a malformed or reserved favorites chord before any side effect.
+impl ConfigEffects for SystemConfigEffects<'_> {
+    fn hotkey_change_needed(&self, old_hotkey: &str, new_hotkey: &str) -> bool {
+        let Ok(new_shortcut) = new_hotkey.parse::<tauri_plugin_global_shortcut::Shortcut>() else {
+            // Validation will surface the parse error before effects run.
+            return true;
+        };
+        old_hotkey
+            .parse::<tauri_plugin_global_shortcut::Shortcut>()
+            .ok()
+            .as_ref()
+            != Some(&new_shortcut)
+    }
+
+    fn apply_hotkey(&self, old_hotkey: &str, new_hotkey: &str) -> Result<(), String> {
+        swap_panel_hotkey(self.app, old_hotkey, new_hotkey)
+    }
+
+    fn undo_hotkey(&self, new_hotkey: &str, old_hotkey: &str) -> Result<(), String> {
+        restore_panel_hotkey(self.app, new_hotkey, old_hotkey)
+    }
+
+    fn set_startup(&self, enabled: bool) -> Result<(), String> {
+        startup::set_startup(enabled)
+    }
+
+    fn set_persistence(&self, enabled: bool) -> Result<(), String> {
+        apply_persist(self.state, enabled)
+    }
+
+    fn save_config(&self, config: &AppConfig) -> Result<(), String> {
+        config.save()
+    }
+}
+
+fn validate_config_update(new_config: &AppConfig, old_config: &AppConfig) -> Result<(), String> {
     new_config.favorites_toggle_shortcut.validate()?;
     if new_config
         .favorites_toggle_shortcut
@@ -224,104 +283,39 @@ fn update_config(
     {
         return Err("Drawer shortcut conflicts with the panel hotkey".to_string());
     }
-    let (
-        old_hotkey,
-        old_startup,
-        old_persist,
-        old_language,
-        old_auto_update,
-        old_preview_enabled,
-        old_ui_scale,
-    ) = {
-        let config = lock(&state.config);
-        (
-            config.hotkey.clone(),
-            config.startup,
-            config.persist,
-            config.language.clone(),
-            config.auto_update,
-            config.preview_enabled,
-            config.ui_scale_percent,
-        )
-    };
-    let mut swapped_hotkey = false;
-    let mut swapped_startup = false;
-    let mut swapped_persist = false;
 
-    // 1. Hotkey swap (validated + registered before anything is persisted).
-    if new_config.hotkey != old_hotkey {
-        // A bare key (e.g. "A" or "F1") as a global shortcut makes that key
-        // unusable in every other application — require a modifier.
-        let has_modifier = ["Ctrl", "Shift", "Alt", "Super"]
-            .iter()
-            .any(|m| new_config.hotkey.contains(m));
-        if !has_modifier {
-            return Err(format!(
-                "Hotkey '{}' must include at least one modifier (Ctrl/Shift/Alt)",
-                new_config.hotkey
-            ));
-        }
-
-        let new_shortcut = new_config
-            .hotkey
-            .parse::<tauri_plugin_global_shortcut::Shortcut>()
-            .map_err(|e| format!("Invalid hotkey '{}': {}", new_config.hotkey, e))?;
-        let old_shortcut = old_hotkey
-            .parse::<tauri_plugin_global_shortcut::Shortcut>()
-            .ok();
-
-        if old_shortcut.as_ref() != Some(&new_shortcut) {
-            // Register the new hotkey first; if it conflicts, the old one stays active.
-            register_panel_hotkey(&app, &new_config.hotkey)?;
-            if let Some(old) = &old_shortcut {
-                use tauri_plugin_global_shortcut::GlobalShortcutExt;
-                let _ = app.global_shortcut().unregister(*old);
-            }
-            swapped_hotkey = true;
-        }
+    if new_config.hotkey == old_config.hotkey {
+        return Ok(());
     }
 
-    // 2. Autostart shortcut sync.
-    if new_config.startup != old_startup {
-        if let Err(e) = startup::set_startup(new_config.startup) {
-            if swapped_hotkey {
-                rollback_hotkey_swap(&app, &new_config.hotkey, &old_hotkey);
-            }
-            return Err(e);
-        }
-        swapped_startup = true;
+    // A bare key (e.g. "A" or "F1") as a global shortcut makes that key
+    // unusable in every other application — require a modifier.
+    let has_modifier = ["Ctrl", "Shift", "Alt", "Super"]
+        .iter()
+        .any(|modifier| new_config.hotkey.contains(modifier));
+    if !has_modifier {
+        return Err(format!(
+            "Hotkey '{}' must include at least one modifier (Ctrl/Shift/Alt)",
+            new_config.hotkey
+        ));
     }
 
-    // 3. History persistence toggle.
-    if new_config.persist != old_persist {
-        if let Err(e) = apply_persist(&state, new_config.persist) {
-            if swapped_startup {
-                let _ = startup::set_startup(old_startup);
-            }
-            if swapped_hotkey {
-                rollback_hotkey_swap(&app, &new_config.hotkey, &old_hotkey);
-            }
-            return Err(e);
-        }
-        swapped_persist = true;
-    }
+    new_config
+        .hotkey
+        .parse::<tauri_plugin_global_shortcut::Shortcut>()
+        .map(|_| ())
+        .map_err(|e| format!("Invalid hotkey '{}': {}", new_config.hotkey, e))
+}
 
-    // 4. Persist config to disk; on failure roll back every side effect above.
-    if let Err(e) = new_config.save() {
-        if swapped_persist {
-            rollback_persist(&state, new_config.persist);
-        }
-        if swapped_startup {
-            let _ = startup::set_startup(old_startup);
-        }
-        if swapped_hotkey {
-            rollback_hotkey_swap(&app, &new_config.hotkey, &old_hotkey);
-        }
-        return Err(e);
-    }
-
-    // 5. Config is on disk — sync cosmetic runtime state (tray menu labels).
-    if new_config.language != old_language {
+/// Non-transactional success-path work. The ordering is intentional: tray
+/// localization, runtime config/policy sync, preview hide, update check, zoom.
+fn apply_config_follow_ups(
+    new_config: &AppConfig,
+    old_config: &AppConfig,
+    app: &tauri::AppHandle,
+    state: &AppState,
+) {
+    if new_config.language != old_config.language {
         let labels = tray_labels(&new_config.language);
         let running = *lock(&state.monitor_running);
         let items = lock(&state.tray_items);
@@ -336,22 +330,17 @@ fn update_config(
         }
     }
 
-    // Toggling auto_update on takes effect without an app restart: run one
-    // check now (installed builds only — spawn_auto_update_check re-verifies).
-    let auto_update_turned_on = !old_auto_update && new_config.auto_update;
-    let preview_turned_off = old_preview_enabled && !new_config.preview_enabled;
-    let ui_scale_changed = new_config.ui_scale_percent != old_ui_scale;
+    let auto_update_turned_on = !old_config.auto_update && new_config.auto_update;
+    let preview_turned_off = old_config.preview_enabled && !new_config.preview_enabled;
+    let ui_scale_changed = new_config.ui_scale_percent != old_config.ui_scale_percent;
 
-    let mut config = lock(&state.config);
-    *config = new_config.clone();
-    drop(config);
-    // Pure capacity-policy sync inside the aggregate: new limits apply from
-    // the next capture/restore, existing Clips are not re-trimmed (existing
-    // observable semantics).
-    lock(&state.history).set_policy(HistoryPolicy::from(&new_config));
+    *lock(&state.config) = new_config.clone();
+    // New limits apply from the next capture/restore; existing Clips are not
+    // re-trimmed, preserving the existing observable capacity semantics.
+    lock(&state.history).set_policy(HistoryPolicy::from(new_config));
 
     if preview_turned_off {
-        hide_preview_window(&app);
+        hide_preview_window(app);
     }
     if auto_update_turned_on {
         update::spawn_auto_update_check(app.clone(), state.config.clone());
@@ -359,9 +348,29 @@ fn update_config(
     if ui_scale_changed {
         // Cosmetic best-effort: the config is already on disk, so a failed
         // zoom call only leaves this session at the old scale.
-        apply_ui_scale(&app);
+        apply_ui_scale(app);
     }
-    Ok(())
+}
+
+#[tauri::command]
+fn update_config(
+    new_config: AppConfig,
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<(), String> {
+    let new_config = new_config.sanitized();
+    let effects = SystemConfigEffects {
+        app: &app,
+        state: state.inner(),
+    };
+
+    run_config_update(
+        || lock(&state.config).clone(),
+        &new_config,
+        validate_config_update,
+        &effects,
+        |target, snapshot| apply_config_follow_ups(target, snapshot, &app, &state),
+    )
 }
 
 /// Write content to the clipboard, hide the Panel so focus returns to the
