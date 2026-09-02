@@ -429,7 +429,7 @@ fn encode_dib_24bpp(img: &image::DynamicImage) -> Vec<u8> {
     let raw = rgb.as_raw();
     for y in (0..h).rev() {
         let row = &raw[y * w * 3..(y + 1) * w * 3];
-        for px in row.chunks_exact(3) {
+        for px in row.as_chunks::<3>().0 {
             out.push(px[2]); // B
             out.push(px[1]); // G
             out.push(px[0]); // R
