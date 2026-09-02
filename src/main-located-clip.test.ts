@@ -9,6 +9,14 @@ const tauri = vi.hoisted(() => ({
   listen: vi.fn(async () => () => {}),
   onFocusChanged: vi.fn(async () => () => {}),
   currentMonitor: vi.fn(async () => null),
+  drawerOverlay: {
+    open: false,
+    close: vi.fn(() => {
+      if (!tauri.drawerOverlay.open) return false;
+      tauri.drawerOverlay.open = false;
+      return true;
+    }),
+  },
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: tauri.invoke }));
@@ -20,6 +28,8 @@ vi.mock("@tauri-apps/api/window", () => ({
 vi.mock("./preview", () => ({ mountPreview: vi.fn(async () => {}) }));
 vi.mock("./favorites", () => ({
   mountDrawerRenderer: () => ({
+    isAnyOverlayOpen: () => tauri.drawerOverlay.open,
+    closeOverlays: tauri.drawerOverlay.close,
     cancel: () => null,
     render: vi.fn(),
     requestCreate: vi.fn(),
@@ -95,6 +105,8 @@ describe("Panel located Clip callers", () => {
     tauri.listen.mockClear();
     tauri.onFocusChanged.mockClear();
     tauri.currentMonitor.mockClear();
+    tauri.drawerOverlay.open = false;
+    tauri.drawerOverlay.close.mockClear();
     document.documentElement.innerHTML = panelHtml;
     Object.defineProperty(document, "hasFocus", { configurable: true, value: () => true });
     HTMLElement.prototype.scrollIntoView = vi.fn();
@@ -186,5 +198,18 @@ describe("Panel located Clip callers", () => {
     const focusListener = focusCalls[0][0];
     focusListener({ payload: true });
     await vi.waitFor(() => expect(commandCalls("get_active_clip_preview").length).toBeGreaterThan(0));
+  });
+
+  it("routes one Escape classification through the Drawer overlay controller", async () => {
+    await import("./main");
+    window.dispatchEvent(new Event("DOMContentLoaded"));
+    await vi.waitFor(() => expect(document.querySelectorAll("#clip-list .clip-item")).toHaveLength(2));
+    tauri.drawerOverlay.open = true;
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+
+    expect(tauri.drawerOverlay.close).toHaveBeenCalledOnce();
+    expect(tauri.drawerOverlay.open).toBe(false);
+    expect(commandCalls("hide_panel_command")).toHaveLength(0);
   });
 });

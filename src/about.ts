@@ -2,8 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { open } from "@tauri-apps/plugin-shell";
 import { resourceDir } from "@tauri-apps/api/path";
-import { initLanguage, applyI18n, t } from "./i18n";
-import { applyTheme } from "./theme";
+import { applyI18n, t } from "./i18n";
+import { configBootstrap } from "./config";
 
 const REPO = "LiuTouo/Mnemark";
 
@@ -130,16 +130,13 @@ async function portableDownload(asset: GhAsset, sigAsset: GhAsset) {
 }
 
 async function init() {
-  await initLanguage();
-  applyI18n();
-  document.title = t("aboutTitle");
-
   let autoUpdate = true;
   try {
-    const config = await invoke<{ theme?: string; auto_update?: boolean }>("get_config");
-    applyTheme(config.theme || "system");
+    const config = await configBootstrap.loadAndApply();
     autoUpdate = config.auto_update !== false;
   } catch (_) {}
+  applyI18n();
+  document.title = t("aboutTitle");
 
   // Version comes from the single source of truth (Cargo.toml via app config).
   try {

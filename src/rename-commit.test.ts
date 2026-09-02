@@ -1,31 +1,19 @@
 import { describe, expect, it } from "vitest";
 import { createRenameController, type RenameDeps } from "./rename-commit";
 
-// Minimal shim so tsc (no @types/node) accepts the Node-only test below.
-declare const process: {
-  on(event: "unhandledRejection", listener: (reason: unknown) => void): void;
-  off(event: "unhandledRejection", listener: (reason: unknown) => void): void;
-};
-
-function makeDeps(renames: Map<string, Error> = new Map(), reloadErr?: Error) {
+function makeDeps(renames: Map<string, Error> = new Map()) {
   const deps: RenameDeps & {
     renamed: Array<[string, string]>;
-    reloads: number;
     renders: number;
     errors: string[];
   } = {
     renamed: [],
-    reloads: 0,
     renders: 0,
     errors: [],
     rename: (id, name) => {
       deps.renamed.push([id, name]);
       const err = renames.get(id);
       return err ? Promise.reject(err) : Promise.resolve();
-    },
-    reload: () => {
-      deps.reloads += 1;
-      return reloadErr ? Promise.reject(reloadErr) : Promise.resolve();
     },
     render: () => {
       deps.renders += 1;
@@ -55,35 +43,10 @@ describe("rename commit", () => {
 
     expect(deps.errors).toEqual(["Error: Name already exists"]);
     expect(deps.renders).toBe(rendersBefore + 1); // synchronous re-render in the rejection handler
-    expect(deps.reloads).toBe(1); // re-render from backend truth
     expect(deps.renamed).toEqual([["c1", "Duplicate"]]);
   });
 
-  it("a failed reload after a rejected rename stays safe: editing exited, rendered, error shown, no unhandled rejection", async () => {
-    const unhandled: unknown[] = [];
-    const onUnhandled = (e: unknown) => unhandled.push(e);
-    process.on("unhandledRejection", onUnhandled);
-    const deps = makeDeps(
-      new Map([["c1", new Error("Name already exists")]]),
-      new Error("reload failed"),
-    );
-    const ctl = createRenameController(deps);
-    ctl.begin("c1");
-    const rendersBefore = deps.renders;
-
-    ctl.commit("c1", "Duplicate");
-    await settled();
-    await settled();
-
-    expect(ctl.editingId).toBeNull();
-    expect(deps.renders).toBe(rendersBefore + 1); // immediate render survived the reload failure
-    expect(deps.errors).toEqual(["Error: Name already exists"]);
-    expect(deps.reloads).toBe(1);
-    expect(unhandled).toEqual([]); // reload failure was swallowed, not leaked
-    process.off("unhandledRejection", onUnhandled);
-  });
-
-  it("reloads after a successful rename", async () => {
+  it("leaves refresh ownership to the successful rename workflow", async () => {
     const deps = makeDeps();
     const ctl = createRenameController(deps);
     ctl.begin("c1");
@@ -93,7 +56,7 @@ describe("rename commit", () => {
 
     expect(ctl.editingId).toBeNull();
     expect(deps.errors).toEqual([]);
-    expect(deps.reloads).toBe(1);
+    expect(deps.renamed).toEqual([["c1", "New Name"]]);
   });
 
   it("an empty trimmed value just cancels without invoking", async () => {
@@ -107,7 +70,6 @@ describe("rename commit", () => {
     expect(ctl.editingId).toBeNull();
     expect(deps.renders).toBeGreaterThanOrEqual(2); // begin + cancel render
     expect(deps.renamed).toEqual([]);
-    expect(deps.reloads).toBe(0);
   });
 
   it("a commit for a different id than the one being edited is ignored", async () => {

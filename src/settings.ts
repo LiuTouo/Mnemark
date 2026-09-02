@@ -3,31 +3,9 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { applyI18n, setLanguage, t, localizeBackendError } from "./i18n";
 import { applyTheme } from "./theme";
+import { clampOpacityPercent, configBootstrap } from "./config";
+import type { AppConfig } from "./config";
 import { shortcutLabel, isModifierCode, isFunctionCode, isPrintableCode, FAVORITES_DEFAULT_CODES } from "./shortcut";
-
-interface AppConfig {
-  text_size_limit_kb: number;
-  text_count_limit: number;
-  image_count_limit: number;
-  image_memory_budget_mb: number;
-  image_size_limit_mb: number;
-  hotkey: string;
-  startup: boolean;
-  persist: boolean;
-  exclusion_list: string[];
-  vim_mode: boolean;
-  debounce_ms: number;
-  theme: string;
-  ui_opacity_percent: number;
-  ui_scale_percent: number;
-  language: string;
-  paste_files_as_files: boolean;
-  auto_update: boolean;
-  preview_enabled: boolean;
-  remember_history_filter: boolean;
-  favorites_toggle_shortcut: { codes: string[] };
-  tutorial_version: number;
-}
 
 // The saved config is the "baseline" the form is compared against for the
 // dirty check. It is only replaced after a successful save.
@@ -219,7 +197,7 @@ async function loadConfig() {
   resetTransientState();
   setLoading(true);
   try {
-    const loaded = await invoke<AppConfig>("get_config");
+    const loaded = await configBootstrap.loadAndApply(() => token === reloadToken);
     if (token !== reloadToken) return;
     config = loaded;
   } catch (err) {
@@ -229,8 +207,6 @@ async function loadConfig() {
     return;
   }
 
-  setLanguage(config.language || "zh-TW");
-  applyTheme(config.theme || "system");
   populateForm();
   applyI18n();
   document.title = `Mnemark ${t("settings")}`;
@@ -285,7 +261,7 @@ function populateForm() {
 }
 
 function updateOpacityDisplay(value: number) {
-  const opacity = Math.min(100, Math.max(50, Number.isFinite(value) ? value : 99));
+  const opacity = clampOpacityPercent(value);
   textInput("setting-ui-opacity").value = String(opacity);
   (document.getElementById("setting-ui-opacity-value") as HTMLOutputElement).value = `${opacity}%`;
 }

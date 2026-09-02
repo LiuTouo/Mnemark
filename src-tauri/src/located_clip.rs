@@ -1,5 +1,5 @@
+use std::cell::RefCell;
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use serde::Serialize;
@@ -41,6 +41,67 @@ enum LocatedClipErrorCode {
     DrawerMutation,
 }
 
+struct LocatedClipErrorParts {
+    code: LocatedClipErrorCode,
+    detail: Option<String>,
+    default_message: &'static str,
+}
+
+impl LocatedClipError {
+    fn into_parts(self) -> LocatedClipErrorParts {
+        let (code, detail, default_message) = match self {
+            Self::NotFound => (LocatedClipErrorCode::NotFound, None, "Clip not found"),
+            Self::DrawerUnavailable => (
+                LocatedClipErrorCode::DrawerUnavailable,
+                None,
+                "Favorites unavailable",
+            ),
+            Self::HistoryPersistence(detail) => (
+                LocatedClipErrorCode::HistoryPersistence,
+                Some(detail),
+                "History persistence failed",
+            ),
+            Self::MissingContent => (
+                LocatedClipErrorCode::MissingContent,
+                None,
+                "Clip content missing",
+            ),
+            Self::ClipboardWrite(detail) => (
+                LocatedClipErrorCode::ClipboardWrite,
+                Some(detail),
+                "Clipboard write failed",
+            ),
+            Self::PreviewDisabled => (
+                LocatedClipErrorCode::PreviewDisabled,
+                None,
+                "Preview disabled",
+            ),
+            Self::PreviewPublication(detail) => (
+                LocatedClipErrorCode::PreviewPublication,
+                Some(detail),
+                "Preview publication failed",
+            ),
+            Self::DrawerMutation(detail) => (
+                LocatedClipErrorCode::DrawerMutation,
+                Some(detail),
+                "Drawer mutation failed",
+            ),
+        };
+        LocatedClipErrorParts {
+            code,
+            detail,
+            default_message,
+        }
+    }
+
+    pub(crate) fn command_message(self) -> String {
+        let parts = self.into_parts();
+        parts
+            .detail
+            .unwrap_or_else(|| parts.default_message.to_string())
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct LocatedClipWireError {
     code: LocatedClipErrorCode,
@@ -49,31 +110,33 @@ pub(crate) struct LocatedClipWireError {
 
 impl From<LocatedClipError> for LocatedClipWireError {
     fn from(error: LocatedClipError) -> Self {
-        let (code, detail) = match error {
-            LocatedClipError::NotFound => (LocatedClipErrorCode::NotFound, None),
-            LocatedClipError::DrawerUnavailable => (LocatedClipErrorCode::DrawerUnavailable, None),
-            LocatedClipError::HistoryPersistence(detail) => {
-                (LocatedClipErrorCode::HistoryPersistence, Some(detail))
-            }
-            LocatedClipError::MissingContent => (LocatedClipErrorCode::MissingContent, None),
-            LocatedClipError::ClipboardWrite(detail) => {
-                (LocatedClipErrorCode::ClipboardWrite, Some(detail))
-            }
-            LocatedClipError::PreviewDisabled => (LocatedClipErrorCode::PreviewDisabled, None),
-            LocatedClipError::PreviewPublication(detail) => {
-                (LocatedClipErrorCode::PreviewPublication, Some(detail))
-            }
-            LocatedClipError::DrawerMutation(detail) => {
-                (LocatedClipErrorCode::DrawerMutation, Some(detail))
-            }
-        };
-        Self { code, detail }
+        let parts = error.into_parts();
+        Self {
+            code: parts.code,
+            detail: parts.detail,
+        }
     }
 }
 
 pub(crate) enum ResolvedClip {
     History(Clip),
     Drawer(FavoriteItem),
+}
+
+impl ResolvedClip {
+    fn into_snapshot(self) -> FavoriteItem {
+        match self {
+            Self::History(clip) => FavoriteItem::from(clip),
+            Self::Drawer(item) => item,
+        }
+    }
+
+    fn into_content_hash(self) -> String {
+        match self {
+            Self::History(clip) => clip.content_hash,
+            Self::Drawer(item) => item.content_hash,
+        }
+    }
 }
 
 macro_rules! with_resolved_clip {
@@ -104,6 +167,15 @@ impl From<FavoriteItem> for ResolvedClip {
 
 pub(crate) trait LocatedClipSource {
     fn resolve(&self, locator: &ClipLocator) -> Result<ResolvedClip, LocatedClipError>;
+
+    fn resolve_snapshot(&self, locator: &ClipLocator) -> Result<FavoriteItem, LocatedClipError> {
+        self.resolve(locator).map(ResolvedClip::into_snapshot)
+    }
+
+    fn resolve_content_hash(&self, locator: &ClipLocator) -> Result<String, LocatedClipError> {
+        self.resolve(locator).map(ResolvedClip::into_content_hash)
+    }
+
     fn set_note(
         &self,
         locator: &ClipLocator,
@@ -149,17 +221,47 @@ struct DrawerSnapshotAdapter<'a> {
     drawer: &'a Mutex<DrawerState>,
 }
 
+fn resolve_drawer_snapshot(
+    drawer: &DrawerState,
+    locator: &ClipLocator,
+) -> Result<ResolvedClip, LocatedClipError> {
+    if !drawer.has_favorites_store() {
+        return Err(LocatedClipError::DrawerUnavailable);
+    }
+    drawer
+        .get_item(&locator.id)
+        .map_err(LocatedClipError::DrawerMutation)?
+        .map(ResolvedClip::from)
+        .ok_or(LocatedClipError::NotFound)
+}
+
+fn set_drawer_note(
+    drawer: &mut DrawerState,
+    locator: &ClipLocator,
+    note: Option<String>,
+) -> Result<NoteCommit, LocatedClipError> {
+    if !drawer.has_favorites_store() {
+        return Err(LocatedClipError::DrawerUnavailable);
+    }
+    if drawer
+        .get_item(&locator.id)
+        .map_err(LocatedClipError::DrawerMutation)?
+        .is_none()
+    {
+        return Err(LocatedClipError::NotFound);
+    }
+    let mutation = drawer
+        .set_note(&locator.id, note.as_deref())
+        .map_err(LocatedClipError::DrawerMutation)?;
+    Ok(NoteCommit {
+        note,
+        drawer_generation: Some(mutation.generation),
+    })
+}
+
 impl LocatedClipSource for DrawerSnapshotAdapter<'_> {
     fn resolve(&self, locator: &ClipLocator) -> Result<ResolvedClip, LocatedClipError> {
-        let drawer = lock(self.drawer);
-        if !drawer.has_favorites_store() {
-            return Err(LocatedClipError::DrawerUnavailable);
-        }
-        drawer
-            .get_item(&locator.id)
-            .map_err(LocatedClipError::DrawerMutation)?
-            .map(ResolvedClip::from)
-            .ok_or(LocatedClipError::NotFound)
+        resolve_drawer_snapshot(&lock(self.drawer), locator)
     }
 
     fn set_note(
@@ -167,24 +269,7 @@ impl LocatedClipSource for DrawerSnapshotAdapter<'_> {
         locator: &ClipLocator,
         note: Option<String>,
     ) -> Result<NoteCommit, LocatedClipError> {
-        let mut drawer = lock(self.drawer);
-        if !drawer.has_favorites_store() {
-            return Err(LocatedClipError::DrawerUnavailable);
-        }
-        if drawer
-            .get_item(&locator.id)
-            .map_err(LocatedClipError::DrawerMutation)?
-            .is_none()
-        {
-            return Err(LocatedClipError::NotFound);
-        }
-        let mutation = drawer
-            .set_note(&locator.id, note.as_deref())
-            .map_err(LocatedClipError::DrawerMutation)?;
-        Ok(NoteCommit {
-            note,
-            drawer_generation: Some(mutation.generation),
-        })
+        set_drawer_note(&mut lock(self.drawer), locator, note)
     }
 }
 
@@ -218,6 +303,43 @@ impl LocatedClipSource for StateLocatedClipSource<'_> {
         match locator.scope {
             ClipScope::History => self.history.set_note(locator, note),
             ClipScope::Drawer => self.drawer.set_note(locator, note),
+        }
+    }
+}
+
+/// Located-Clip adapter used while the Drawer aggregate lock is already held.
+/// It prevents add/lookup commands from resolving a snapshot, releasing the
+/// aggregate, and then reacquiring it for the dependent operation.
+pub(crate) struct LockedStateLocatedClipSource<'a> {
+    history: HistoryAdapter<'a>,
+    drawer: RefCell<&'a mut DrawerState>,
+}
+
+impl<'a> LockedStateLocatedClipSource<'a> {
+    pub(crate) fn new(history: &'a Mutex<HistoryState>, drawer: &'a mut DrawerState) -> Self {
+        Self {
+            history: HistoryAdapter { history },
+            drawer: RefCell::new(drawer),
+        }
+    }
+}
+
+impl LocatedClipSource for LockedStateLocatedClipSource<'_> {
+    fn resolve(&self, locator: &ClipLocator) -> Result<ResolvedClip, LocatedClipError> {
+        match locator.scope {
+            ClipScope::History => self.history.resolve(locator),
+            ClipScope::Drawer => resolve_drawer_snapshot(&self.drawer.borrow(), locator),
+        }
+    }
+
+    fn set_note(
+        &self,
+        locator: &ClipLocator,
+        note: Option<String>,
+    ) -> Result<NoteCommit, LocatedClipError> {
+        match locator.scope {
+            ClipScope::History => self.history.set_note(locator, note),
+            ClipScope::Drawer => set_drawer_note(&mut self.drawer.borrow_mut(), locator, note),
         }
     }
 }
@@ -301,7 +423,7 @@ where
     pub(crate) async fn preview<Publish, F>(
         &self,
         locator: &ClipLocator,
-        generation: &AtomicU64,
+        generation: u64,
         publish: Publish,
     ) -> Result<(), LocatedClipError>
     where
@@ -311,7 +433,6 @@ where
         if !self.preview_enabled {
             return Err(LocatedClipError::PreviewDisabled);
         }
-        let mine = generation.fetch_add(1, Ordering::SeqCst) + 1;
         with_resolved_clip!(self.source.resolve(locator)?, |clip| {
             let image_preview_base64 = if clip.kind == ClipKind::Image {
                 Some(
@@ -338,7 +459,7 @@ where
                 source_exe: clip.source_exe,
                 source_title: clip.source_title,
             };
-            publish(mine, payload)
+            publish(generation, payload)
                 .await
                 .map_err(LocatedClipError::PreviewPublication)
         })
@@ -409,14 +530,14 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicU64;
     use std::sync::{Arc, Mutex};
 
     use rusqlite::Connection;
 
     use super::{
         CopyOutcome, LocatedClipError, LocatedClipModule, LocatedClipPlatform, LocatedClipSource,
-        LocatedClipWireError, NoteCommit, ResolvedClip, StateLocatedClipSource,
+        LocatedClipWireError, LockedStateLocatedClipSource, NoteCommit, ResolvedClip,
+        StateLocatedClipSource,
     };
     use crate::drawer::DrawerState;
     use crate::favorites::FavoritesStore;
@@ -750,10 +871,8 @@ mod tests {
                 scope,
                 id: "preview".to_string(),
             };
-            let generation = AtomicU64::new(0);
-
             module
-                .preview(&locator, &generation, |mine, payload| {
+                .preview(&locator, 7, |mine, payload| {
                     let published = Arc::clone(&published);
                     async move {
                         *published.lock().unwrap() = Some((mine, payload));
@@ -765,7 +884,7 @@ mod tests {
 
             let guard = published.lock().unwrap();
             let (mine, payload) = guard.as_ref().unwrap();
-            assert_eq!(*mine, 1);
+            assert_eq!(*mine, 7);
             assert_eq!(payload.id, "preview");
             assert_eq!(payload.kind, ClipKind::Text);
             assert_eq!(payload.text_content.as_deref(), Some("hello"));
@@ -789,7 +908,7 @@ mod tests {
                 RecordingClipboard(Arc::clone(&image_events)),
             );
             image_module
-                .preview(&locator, &AtomicU64::new(0), |_, payload| {
+                .preview(&locator, 1, |_, payload| {
                     let image_payload = Arc::clone(&image_payload);
                     async move {
                         *image_payload.lock().unwrap() = Some(payload);
@@ -818,7 +937,7 @@ mod tests {
                 RecordingClipboard(Arc::new(Mutex::new(Vec::new()))),
             );
             file_module
-                .preview(&locator, &AtomicU64::new(0), |_, payload| {
+                .preview(&locator, 1, |_, payload| {
                     let file_payload = Arc::clone(&file_payload);
                     async move {
                         *file_payload.lock().unwrap() = Some(payload);
@@ -836,8 +955,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disabled_preview_fails_before_resolution_or_generation_claim() {
-        let generation = AtomicU64::new(0);
+    async fn disabled_preview_fails_before_resolution_or_publication() {
         let module = LocatedClipModule::new(
             MemorySource,
             RecordingClipboard(Arc::new(Mutex::new(Vec::new()))),
@@ -850,12 +968,11 @@ mod tests {
         };
 
         let error = module
-            .preview(&locator, &generation, |_, _| async { Ok(()) })
+            .preview(&locator, 1, |_, _| async { Ok(()) })
             .await
             .unwrap_err();
 
         assert_eq!(error, LocatedClipError::PreviewDisabled);
-        assert_eq!(generation.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -969,7 +1086,7 @@ mod tests {
             events.lock().unwrap().clear();
             let published = Arc::new(Mutex::new(None));
             module
-                .preview(&locator, &AtomicU64::new(0), |_, payload| {
+                .preview(&locator, 1, |_, payload| {
                     let published = Arc::clone(&published);
                     async move {
                         *published.lock().unwrap() = Some(payload);
@@ -1029,6 +1146,46 @@ mod tests {
         exercise_production_adapter_contract(&module, &events, ClipScope::Drawer).await;
     }
 
+    #[test]
+    fn locked_source_resolves_snapshots_and_hashes_by_the_scope_identity_rule() {
+        let clip = text_clip("history-id", "content-hash");
+        let history = history_state(&[clip.clone()]);
+        let mut drawer = DrawerState::new(Some(FavoritesStore::from_conn(
+            Connection::open_in_memory().unwrap(),
+        )));
+        let collection = drawer.create_collection("Saved").unwrap().value;
+        drawer
+            .add_snapshot(&collection.id, &FavoriteItem::from(clip))
+            .unwrap();
+        let source = LockedStateLocatedClipSource::new(&history, &mut drawer);
+
+        let history_locator = ClipLocator {
+            scope: ClipScope::History,
+            id: "history-id".to_string(),
+        };
+        let drawer_locator = ClipLocator {
+            scope: ClipScope::Drawer,
+            id: "content-hash".to_string(),
+        };
+
+        assert_eq!(
+            source.resolve_snapshot(&history_locator).unwrap().id,
+            "content-hash"
+        );
+        assert_eq!(
+            source.resolve_snapshot(&drawer_locator).unwrap().id,
+            "content-hash"
+        );
+        assert_eq!(
+            source.resolve_content_hash(&history_locator).unwrap(),
+            "content-hash"
+        );
+        assert_eq!(
+            source.resolve_content_hash(&drawer_locator).unwrap(),
+            "content-hash"
+        );
+    }
+
     #[tokio::test]
     async fn drawer_actions_survive_history_deletion() {
         let clip = text_clip("history-id", "content-hash");
@@ -1068,7 +1225,7 @@ mod tests {
 
         let preview = Arc::new(Mutex::new(None));
         module
-            .preview(&locator, &AtomicU64::new(0), |_, payload| {
+            .preview(&locator, 1, |_, payload| {
                 let preview = Arc::clone(&preview);
                 async move {
                     *preview.lock().unwrap() = Some(payload);
@@ -1093,7 +1250,7 @@ mod tests {
         assert!(note.drawer_generation.is_some());
         let refreshed_preview = Arc::new(Mutex::new(None));
         module
-            .preview(&locator, &AtomicU64::new(0), |_, payload| {
+            .preview(&locator, 1, |_, payload| {
                 let refreshed_preview = Arc::clone(&refreshed_preview);
                 async move {
                     *refreshed_preview.lock().unwrap() = Some(payload);

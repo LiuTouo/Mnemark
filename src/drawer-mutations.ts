@@ -31,22 +31,73 @@ export interface DrawerMembershipBatchIntent {
   readonly locators: readonly ClipLocator[];
 }
 
+export interface DrawerMembershipRemoveIntent {
+  readonly collectionId: string;
+  readonly itemId: string;
+}
+
+export interface DrawerMembershipBatchRemoveIntent {
+  readonly collectionId: string;
+  readonly itemIds: readonly string[];
+}
+
 export interface DrawerMutationDependencies {
   invoke(command: string, args?: Record<string, unknown>): Promise<unknown>;
   refreshAfterMutation(context: string): Promise<boolean>;
   retryAfterFailure(context: string): Promise<void>;
 }
 
+interface MutationDiagnostic {
+  readonly refresh: string;
+  readonly recovery: string;
+}
+
+type DrawerMutationIncomplete =
+  | { readonly status: "committed-stale" }
+  | { readonly status: "failed"; readonly error: unknown };
+
+const succeeded = () => ({ status: "succeeded" as const });
+
 // Each Drawer mutation diagnostic is defined exactly once, here; wording
 // changes cannot drift between the menu and drag copies.
 const DIAGNOSTIC = {
-  itemReorderRefresh: "Drawer item reorder refresh failed",
-  itemReorderRecovery: "Drawer item reorder recovery failed",
-  membershipRefresh: "Drawer membership refresh failed",
-  membershipRecovery: "Drawer membership recovery failed",
-  batchMembershipRefresh: "Drawer batch membership refresh failed",
-  batchMembershipRecovery: "Drawer batch membership recovery failed",
-} as const;
+  itemReorder: {
+    refresh: "Drawer item reorder refresh failed",
+    recovery: "Drawer item reorder recovery failed",
+  },
+  membership: {
+    refresh: "Drawer membership refresh failed",
+    recovery: "Drawer membership recovery failed",
+  },
+  batchMembership: {
+    refresh: "Drawer batch membership refresh failed",
+    recovery: "Drawer batch membership recovery failed",
+  },
+  membershipRemoval: {
+    refresh: "Drawer removal refresh failed",
+    recovery: "Drawer removal recovery failed",
+  },
+  batchRemoval: {
+    refresh: "Drawer batch removal refresh failed",
+    recovery: "Drawer batch removal recovery failed",
+  },
+  collectionCreate: {
+    refresh: "Drawer create refresh failed",
+    recovery: "Drawer create recovery failed",
+  },
+  collectionRename: {
+    refresh: "Drawer rename refresh failed",
+    recovery: "Drawer rename recovery failed",
+  },
+  collectionDelete: {
+    refresh: "Drawer delete refresh failed",
+    recovery: "Drawer delete recovery failed",
+  },
+  collectionReorder: {
+    refresh: "Drawer collection reorder refresh failed",
+    recovery: "Drawer collection reorder recovery failed",
+  },
+} as const satisfies Record<string, MutationDiagnostic>;
 
 export class DrawerMutationWorkflow {
   constructor(private readonly dependencies: DrawerMutationDependencies) {}
@@ -62,8 +113,8 @@ export class DrawerMutationWorkflow {
         collectionId: intent.collectionId,
         ids: [...intent.orderedItemIds],
       }),
-      DIAGNOSTIC.itemReorderRefresh,
-      DIAGNOSTIC.itemReorderRecovery,
+      DIAGNOSTIC.itemReorder,
+      succeeded,
     );
   }
 
@@ -73,41 +124,93 @@ export class DrawerMutationWorkflow {
         collectionId: intent.collectionId,
         locator: intent.locator,
       }),
-      DIAGNOSTIC.membershipRefresh,
-      DIAGNOSTIC.membershipRecovery,
+      DIAGNOSTIC.membership,
+      succeeded,
     );
   }
 
   async addBatchToCollection(
     intent: DrawerMembershipBatchIntent,
   ): Promise<DrawerMembershipBatchOutcome> {
-    try {
-      const result = await this.dependencies.invoke("add_favorites", {
+    return this.commitThenRefresh(
+      () => this.dependencies.invoke("add_favorites", {
         collectionId: intent.collectionId,
         locators: [...intent.locators],
-      }) as BatchMutationResult;
-      const refreshed = await this.dependencies.refreshAfterMutation(DIAGNOSTIC.batchMembershipRefresh);
-      return refreshed
-        ? { status: "succeeded", changed: result.changed, unchanged: result.unchanged }
-        : { status: "committed-stale" };
-    } catch (error) {
-      await this.dependencies.retryAfterFailure(DIAGNOSTIC.batchMembershipRecovery);
-      return { status: "failed", error };
-    }
+      }) as Promise<BatchMutationResult>,
+      DIAGNOSTIC.batchMembership,
+      (result) => ({ status: "succeeded" as const, changed: result.changed, unchanged: result.unchanged }),
+    );
   }
 
-  private async commitThenRefresh(
-    commit: () => Promise<unknown>,
-    refreshContext: string,
-    recoveryContext: string,
-  ): Promise<DrawerMutationOutcome> {
+  async removeFromCollection(intent: DrawerMembershipRemoveIntent): Promise<DrawerMutationOutcome> {
+    return this.commitThenRefresh(
+      () => this.dependencies.invoke("remove_favorite", {
+        collectionId: intent.collectionId,
+        itemId: intent.itemId,
+      }),
+      DIAGNOSTIC.membershipRemoval,
+      succeeded,
+    );
+  }
+
+  async removeBatchFromCollection(
+    intent: DrawerMembershipBatchRemoveIntent,
+  ): Promise<DrawerMembershipBatchOutcome> {
+    return this.commitThenRefresh(
+      () => this.dependencies.invoke("remove_favorites", {
+        collectionId: intent.collectionId,
+        itemIds: [...intent.itemIds],
+      }) as Promise<BatchMutationResult>,
+      DIAGNOSTIC.batchRemoval,
+      (result) => ({ status: "succeeded" as const, changed: result.changed, unchanged: result.unchanged }),
+    );
+  }
+
+  async createCollection(name: string): Promise<DrawerMutationOutcome> {
+    return this.commitThenRefresh(
+      () => this.dependencies.invoke("create_collection", { name }),
+      DIAGNOSTIC.collectionCreate,
+      succeeded,
+    );
+  }
+
+  async renameCollection(id: string, name: string): Promise<DrawerMutationOutcome> {
+    return this.commitThenRefresh(
+      () => this.dependencies.invoke("rename_collection", { id, name }),
+      DIAGNOSTIC.collectionRename,
+      succeeded,
+    );
+  }
+
+  async deleteCollection(id: string): Promise<DrawerMutationOutcome> {
+    return this.commitThenRefresh(
+      () => this.dependencies.invoke("delete_collection", { id }),
+      DIAGNOSTIC.collectionDelete,
+      succeeded,
+    );
+  }
+
+  async reorderCollections(orderedCollectionIds: readonly string[]): Promise<DrawerMutationOutcome> {
+    return this.commitThenRefresh(
+      () => this.dependencies.invoke("reorder_collections", { ids: [...orderedCollectionIds] }),
+      DIAGNOSTIC.collectionReorder,
+      succeeded,
+    );
+  }
+
+  private async commitThenRefresh<Value, Success>(
+    commit: () => Promise<Value>,
+    diagnostic: MutationDiagnostic,
+    success: (value: Value) => Success,
+  ): Promise<Success | DrawerMutationIncomplete> {
+    let value: Value;
     try {
-      await commit();
+      value = await commit();
     } catch (error) {
-      await this.dependencies.retryAfterFailure(recoveryContext);
+      await this.dependencies.retryAfterFailure(diagnostic.recovery);
       return { status: "failed", error };
     }
-    const refreshed = await this.dependencies.refreshAfterMutation(refreshContext);
-    return refreshed ? { status: "succeeded" } : { status: "committed-stale" };
+    const refreshed = await this.dependencies.refreshAfterMutation(diagnostic.refresh);
+    return refreshed ? success(value) : { status: "committed-stale" };
   }
 }

@@ -1,5 +1,3 @@
-import { invoke } from "@tauri-apps/api/core";
-
 /**
  * Shared UI strings for all Mnemark pages (panel, settings, about).
  * Language comes from AppConfig.language: "zh-TW" (default) or "en".
@@ -508,15 +506,4 @@ export function applyI18n(root: ParentNode = document) {
     const key = el.dataset.i18nAriaLabel!;
     if (dict[key]) el.setAttribute("aria-label", dict[key]);
   });
-}
-
-/** Load the configured language from the backend into this module. */
-export async function initLanguage(): Promise<string> {
-  try {
-    const config = await invoke<{ language?: string }>("get_config");
-    setLanguage(config.language || "zh-TW");
-  } catch (_) {
-    setLanguage("zh-TW");
-  }
-  return lang;
 }

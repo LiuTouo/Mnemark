@@ -23,6 +23,99 @@ describe("DrawerMutationWorkflow", () => {
     expect(deps.invoke).toHaveBeenCalledExactlyOnceWith("favorite_collection_ids", { locator });
   });
 
+  const mutationCases = [
+    {
+      name: "item reorder",
+      command: "reorder_favorite_items",
+      run: (workflow: DrawerMutationWorkflow) => workflow.reorderItems({
+        collectionId: "c1",
+        orderedItemIds: ["b", "a"],
+      }),
+    },
+    {
+      name: "single membership add",
+      command: "add_favorite",
+      run: (workflow: DrawerMutationWorkflow) => workflow.addToCollection({ collectionId: "c1", locator }),
+    },
+    {
+      name: "batch membership add",
+      command: "add_favorites",
+      run: (workflow: DrawerMutationWorkflow) => workflow.addBatchToCollection({
+        collectionId: "c1",
+        locators: [locator],
+      }),
+    },
+    {
+      name: "single membership removal",
+      command: "remove_favorite",
+      run: (workflow: DrawerMutationWorkflow) => workflow.removeFromCollection({
+        collectionId: "c1",
+        itemId: "item-1",
+      }),
+    },
+    {
+      name: "batch membership removal",
+      command: "remove_favorites",
+      run: (workflow: DrawerMutationWorkflow) => workflow.removeBatchFromCollection({
+        collectionId: "c1",
+        itemIds: ["item-1"],
+      }),
+    },
+    {
+      name: "Collection creation",
+      command: "create_collection",
+      run: (workflow: DrawerMutationWorkflow) => workflow.createCollection("Work"),
+    },
+    {
+      name: "Collection rename",
+      command: "rename_collection",
+      run: (workflow: DrawerMutationWorkflow) => workflow.renameCollection("c1", "Renamed"),
+    },
+    {
+      name: "Collection deletion",
+      command: "delete_collection",
+      run: (workflow: DrawerMutationWorkflow) => workflow.deleteCollection("c1"),
+    },
+    {
+      name: "Collection reorder",
+      command: "reorder_collections",
+      run: (workflow: DrawerMutationWorkflow) => workflow.reorderCollections(["c2", "c1"]),
+    },
+  ];
+
+  describe.each(mutationCases)("$name outcome", ({ command, run }) => {
+    it("reports succeeded after commit and refresh", async () => {
+      const { deps, workflow } = dependencies({
+        invoke: vi.fn(async () => ({ requested: 1, changed: 1, unchanged: 0 })),
+      });
+
+      await expect(run(workflow)).resolves.toMatchObject({ status: "succeeded" });
+      expect(deps.invoke).toHaveBeenCalledWith(command, expect.anything());
+      expect(deps.refreshAfterMutation).toHaveBeenCalledOnce();
+      expect(deps.retryAfterFailure).not.toHaveBeenCalled();
+    });
+
+    it("reports committed-stale after a successful commit and failed refresh", async () => {
+      const { workflow } = dependencies({
+        invoke: vi.fn(async () => ({ requested: 1, changed: 1, unchanged: 0 })),
+        refreshAfterMutation: vi.fn(async () => false),
+      });
+
+      await expect(run(workflow)).resolves.toMatchObject({ status: "committed-stale" });
+    });
+
+    it("reports failed and attempts recovery after command rejection", async () => {
+      const failure = new Error("rejected");
+      const { deps, workflow } = dependencies({
+        invoke: vi.fn(async () => { throw failure; }),
+      });
+
+      await expect(run(workflow)).resolves.toEqual({ status: "failed", error: failure });
+      expect(deps.refreshAfterMutation).not.toHaveBeenCalled();
+      expect(deps.retryAfterFailure).toHaveBeenCalledOnce();
+    });
+  });
+
   describe("reorderItems", () => {
     it("commits the reorder, awaits the refresh barrier, and reports success", async () => {
       const { deps, workflow } = dependencies();

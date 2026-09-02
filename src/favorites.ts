@@ -1,7 +1,6 @@
 // Inline Drawer pane: Collection list + History button, create/rename,
 // reorder, destructive remove modal, and the item-drop target.
 
-import { invoke } from "@tauri-apps/api/core";
 import { localizeDrawerError, t } from "./i18n";
 import { computeMenuPlacement } from "./menu";
 import { clipLocator } from "./drag";
@@ -32,7 +31,13 @@ type DrawerDragItemContext = Parameters<ProductionDrawerDragAdapter["lookupMembe
 /** The workflow surface the drag adapter consumes; tests substitute a fake. */
 export type DrawerMutations = Pick<
   DrawerMutationWorkflow,
-  "reorderItems" | "addToCollection" | "memberCollectionIds"
+  | "reorderItems"
+  | "addToCollection"
+  | "memberCollectionIds"
+  | "createCollection"
+  | "renameCollection"
+  | "deleteCollection"
+  | "reorderCollections"
 >;
 
 /** Reorder eligibility derived once from Panel state. The drag adapter
@@ -117,6 +122,8 @@ function raiseFailed(outcome: DrawerMutationOutcome): void {
 }
 
 export interface PanelDrawerController {
+  isAnyOverlayOpen(): boolean;
+  closeOverlays(): boolean;
   start(item: Clip | FavoriteItem, source: HTMLElement, point: DrawerDragPoint): DrawerDragSession;
   move(session: DrawerDragSession, point: DrawerDragPoint): void;
   end(session: DrawerDragSession, point: DrawerDragPoint): Promise<DrawerDragTerminalOutcome | null>;
@@ -126,7 +133,7 @@ export interface PanelDrawerController {
 
 export type DrawerViewController = Pick<
   DrawerViewCoordinator,
-  "currentView" | "refreshAfterMutation" | "retryAfterFailure" | "select"
+  "currentView" | "select"
 >;
 
 export interface PanelDrawerRenderer extends PanelDrawerController {
@@ -140,6 +147,7 @@ let editingCreate = false;
 let renameCtl: ReturnType<typeof createRenameController>;
 let drawerDrag: DrawerDragLifecycle<HTMLElement>;
 let drawerViewController: DrawerViewController;
+let drawerMutations: DrawerMutations;
 let listEl: HTMLElement;
 let drawerItemList: HTMLElement;
 let emptyEl: HTMLElement;
@@ -370,14 +378,16 @@ function commitCreate(value: string): void {
   if (!editingCreate) return;
   const name = value.trim();
   if (!name) { cancelCreate(); return; }
-  void invoke<CollectionSummary>("create_collection", { name })
-    .then(async () => {
-      editingCreate = false;
-      if (await drawerViewController.refreshAfterMutation("Drawer create refresh failed")) {
-        showToast(t("collectionAdded"));
+  void drawerMutations.createCollection(name)
+    .then((outcome) => {
+      if (outcome.status === "failed") {
+        showToast(localizeDrawerError(String(outcome.error)));
+        return;
       }
-    })
-    .catch((err) => showToast(localizeDrawerError(String(err))));
+      editingCreate = false;
+      renderCurrentView();
+      if (outcome.status === "succeeded") showToast(t("collectionAdded"));
+    });
 }
 
 function cancelCreate(): void {
@@ -485,13 +495,10 @@ function confirmRemove(): void {
   if (!removeTargetId) return;
   const id = removeTargetId;
   closeRemoveModal();
-  void invoke("delete_collection", { id })
-    .then(async () => {
-      if (await drawerViewController.refreshAfterMutation("Drawer delete refresh failed")) {
-        showToast(t("collectionRemoved"));
-      }
-    })
-    .catch((err) => showToast(localizeDrawerError(String(err))));
+  void drawerMutations.deleteCollection(id).then((outcome) => {
+    if (outcome.status === "succeeded") showToast(t("collectionRemoved"));
+    else if (outcome.status === "failed") showToast(localizeDrawerError(String(outcome.error)));
+  });
 }
 
 // === toast ===
@@ -679,15 +686,11 @@ function createProductionDrawerDrag(
       if (beforeRow) beforeRow.before(collectionReorderIndicator);
       else listEl.append(collectionReorderIndicator);
     },
-    commit: (orderedCollectionIds) => invoke("reorder_collections", {
-      ids: orderedCollectionIds,
-    }),
-    showSuccess: async () => {
-      await drawerViewController.refreshAfterMutation("Drawer collection reorder refresh failed");
-    },
-    showFailure: async (error) => {
+    commit: (orderedCollectionIds) =>
+      drawerMutations.reorderCollections(orderedCollectionIds).then(raiseFailed),
+    showSuccess: () => {},
+    showFailure: (error) => {
       showToast(localizeDrawerError(String(error)));
-      await drawerViewController.retryAfterFailure("Drawer collection reorder recovery failed");
     },
   };
 
@@ -725,6 +728,23 @@ function createProductionDrawerDrag(
 
 function createPanelDrawerController(): PanelDrawerRenderer {
   return {
+    isAnyOverlayOpen(): boolean {
+      return moreMenuFor !== null
+        || !removeModal.classList.contains("hidden")
+        || drawerDrag.isActive();
+    },
+    closeOverlays(): boolean {
+      if (moreMenuFor !== null) {
+        moreMenuFor = null;
+        updateMoreMenu();
+        return true;
+      }
+      if (!removeModal.classList.contains("hidden")) {
+        closeRemoveModal();
+        return true;
+      }
+      return drawerDrag.cancel("explicit") !== null;
+    },
     render(view: DrawerView): void {
       render(view);
     },
@@ -771,6 +791,7 @@ export function mountDrawerRenderer(
   dependencies: PanelDrawerDependencies,
 ): PanelDrawerRenderer {
   drawerViewController = controller;
+  drawerMutations = dependencies.mutations;
   listEl = document.getElementById("favorites-list")!;
   drawerItemList = document.getElementById("clip-list")!;
   emptyEl = document.getElementById("favorites-empty")!;
@@ -787,9 +808,10 @@ export function mountDrawerRenderer(
   // Rename editing and drag adapters are DOM-bound and therefore belong to
   // the explicit Panel mount instead of module evaluation.
   renameCtl = createRenameController({
-    rename: (id, name) => invoke("rename_collection", { id, name }),
-    reload: async () => {
-      await drawerViewController.refreshAfterMutation("Drawer rename refresh failed");
+    rename: async (id, name) => {
+      const outcome = await drawerMutations.renameCollection(id, name);
+      if (outcome.status === "committed-stale") renderCurrentView();
+      raiseFailed(outcome);
     },
     render: renderCurrentView,
     showError: (message) => showToast(localizeDrawerError(message)),
@@ -806,21 +828,9 @@ export function mountDrawerRenderer(
   removeCancel.addEventListener("click", closeRemoveModal);
   removeConfirm.addEventListener("click", confirmRemove);
   removeModal.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") { e.preventDefault(); closeRemoveModal(); }
-    else if (e.key === "Tab") trapFocus(e);
-  });
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && drawerDrag.cancel("explicit") !== null) {
-      return;
-    } else if (e.key === "Escape" && moreMenuFor) {
-      moreMenuFor = null;
-      updateMoreMenu();
-    }
+    if (e.key === "Tab") trapFocus(e);
   });
   document.addEventListener("click", () => { if (moreMenuFor) { moreMenuFor = null; updateMoreMenu(); } });
-  window.addEventListener("blur", () => {
-    drawerDrag.cancel("window-blur");
-  });
 
   return createPanelDrawerController();
 }

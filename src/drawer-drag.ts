@@ -154,6 +154,7 @@ interface DrawerDragAdapter<Source> {
 }
 
 export interface DrawerDragLifecycle<Source> {
+  isActive(): boolean;
   start(start: DrawerDragStartFact<Source>): DrawerDragSession;
   move(session: DrawerDragSession, point: DrawerDragPoint): void;
   end(
@@ -698,6 +699,7 @@ export function createDrawerDragLifecycle<Source>(
   }
 
   return {
+    isActive: () => active !== null,
     start,
     move,
     end,

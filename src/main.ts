@@ -2,14 +2,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
 import {
-  setLanguage,
   applyI18n,
   t,
   localizeBackendError,
   localizeDrawerError,
   localizeLocatedClipError,
 } from "./i18n";
-import { applyTheme } from "./theme";
+import { configBootstrap } from "./config";
 import { decidePreviewSync, PreviewController } from "./preview-state";
 import { ShortcutMatcher, FAVORITES_DEFAULT_CODES } from "./shortcut";
 import { ChooserGate, computeMenuPlacement } from "./menu";
@@ -29,12 +28,12 @@ import type { DrawerDragCancelReason, DrawerDragSession } from "./drawer-drag";
 import { mountPreview } from "./preview";
 import { moveOne } from "./reorder";
 import { LocatedClipFacade } from "./located-clip";
-import type { BatchMutationResult, Clip, ClipboardUpdate, ClipLocator, FavoriteItem } from "./types";
+import { HistoryModule } from "./history-module";
+import type { Clip, ClipboardUpdate, ClipLocator, FavoriteItem } from "./types";
 
 type DisplayItem = Clip | FavoriteItem;
 
 let panelDrawer: PanelDrawerRenderer;
-let clips: Clip[] = [];
 let workspaceTab: WorkspaceTab = "drawer";
 let workspaceLayoutRevision = 0;
 // The search-filtered view of the active dataset, in display order. Keyboard
@@ -54,6 +53,14 @@ const chooserGate = new ChooserGate();
 let lastMenuPos = { anchorTop: 0, anchorBottom: 0, right: 0 };
 const multiSelect = new MultiSelectState();
 let batchChooserOpen = false;
+const history = new HistoryModule({
+  read: () => invoke<Clip[]>("get_clips"),
+  remove: async (id) => { await invoke("delete_clip", { id }); },
+  restore: async (id) => { await invoke("undo_delete", { id }); },
+  removeBatch: async (ids) => { await invoke("delete_clips", { ids: [...ids] }); },
+  restoreBatch: async (ids) => { await invoke("undo_delete_batch", { ids: [...ids] }); },
+  setPinned: async (id, pinned) => { await invoke("set_pinned", { id, pinned }); },
+});
 const drawerViewCoordinator = new DrawerViewCoordinator(drawerViewProjection, {
   presentError: (error) => showToast(localizeDrawerError(String(error))),
   presentStale: () => showToast(t("drawerRefreshFailed")),
@@ -69,8 +76,7 @@ const drawerMutations = new DrawerMutationWorkflow({
 const locatedClip = new LocatedClipFacade({
   invoke: (command, args) => invoke(command, args),
   publishHistoryNote: (id, note) => {
-    const item = clips.find((candidate) => candidate.id === id);
-    if (item) item.note = note;
+    history.publishNote(id, note);
   },
   refreshDrawer: () => drawerViewCoordinator.refreshAfterMutation("Drawer note refresh failed"),
   presentCopyOutcome: (outcome) => {
@@ -118,31 +124,14 @@ favoritesToggle.addEventListener("click", () => {
 // === Init ===
 async function refreshConfig() {
   try {
-    const config = await invoke<{
-      language?: string;
-      vim_mode?: boolean;
-      theme?: string;
-      ui_opacity_percent?: number;
-      preview_enabled?: boolean;
-      remember_history_filter?: boolean;
-      favorites_toggle_shortcut?: { codes: string[] };
-    }>("get_config");
-    setLanguage(config.language || "zh-TW");
+    const config = await configBootstrap.loadAndApply();
     vimMode = !!config.vim_mode;
     previewEnabled = config.preview_enabled !== false;
     rememberHistoryFilter = !!config.remember_history_filter;
-    applyTheme(config.theme || "system");
-    const opacity = Math.min(100, Math.max(50, config.ui_opacity_percent ?? 99));
-    document.documentElement.style.setProperty("--panel-opacity", String(opacity / 100));
     shortcutMatcher = new ShortcutMatcher(config.favorites_toggle_shortcut?.codes ?? FAVORITES_DEFAULT_CODES);
   } catch (err) {
     console.error("Failed to load config:", err);
-    setLanguage("zh-TW");
   }
-}
-
-function sortClips() {
-  clips.sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.captured_at - a.captured_at);
 }
 
 function currentDrawerView(): DrawerView | null {
@@ -162,7 +151,7 @@ function drawerIsOpen(): boolean {
 }
 
 function activeDataset(): readonly DisplayItem[] {
-  return selectedCollectionId() === null ? clips : drawerSnapshots();
+  return selectedCollectionId() === null ? history.view : drawerSnapshots();
 }
 
 function favoriteItemReorderEnabled(): boolean {
@@ -227,7 +216,7 @@ async function init() {
   await refreshConfig();
   applyI18n();
 
-  clips = await invoke<Clip[]>("get_clips");
+  await history.load();
   selectedIndex = 0;
   render();
 
@@ -269,17 +258,7 @@ async function init() {
   });
 
   await listen<ClipboardUpdate>("clipboard-update", (event) => {
-    const { clip, evicted } = event.payload;
-    const existingIndex = clips.findIndex((c) => c.content_hash === clip.content_hash);
-    if (existingIndex >= 0) {
-      clips[existingIndex] = clip;
-    } else {
-      clips.unshift(clip);
-    }
-    if (evicted.length > 0) {
-      clips = clips.filter((c) => !evicted.includes(c.id));
-    }
-    sortClips();
+    history.applyCapture(event.payload);
     render();
   });
 
@@ -287,6 +266,7 @@ async function init() {
     closeNoteModal();
     exitMultiSelect(false);
     hideActionMenu();
+    panelDrawer.closeOverlays();
   });
 
   selectionToggle.addEventListener("click", () => {
@@ -780,13 +760,11 @@ function renderActionMenu(item: DisplayItem) {
       const fav = item as FavoriteItem;
       const collectionId = selectedCollectionId();
       if (!collectionId) return;
-      void invoke("remove_favorite", { collectionId, itemId: fav.id })
-        .then(async () => {
-          if (await drawerViewCoordinator.refreshAfterMutation("Drawer removal refresh failed")) {
-            showToast(t("removedFromFavorites"));
-          }
-        })
-        .catch((err) => showToast(localizeDrawerError(String(err))));
+      void drawerMutations.removeFromCollection({ collectionId, itemId: fav.id })
+        .then((outcome) => {
+          if (outcome.status === "succeeded") showToast(t("removedFromFavorites"));
+          else if (outcome.status === "failed") showToast(localizeDrawerError(String(outcome.error)));
+        });
     }, true));
     actionMenu.appendChild(menuItem(t("addToOtherCollection"), () => {
       hideActionMenu();
@@ -1009,14 +987,11 @@ async function runBatchDestructiveAction(): Promise<void> {
   if (selectedCollectionId() === null) {
     const ids = items.map((item) => item.id);
     try {
-      await invoke("delete_clips", { ids });
-      const deleted = new Set(ids);
-      clips = clips.filter((clip) => !deleted.has(clip.id));
+      const undo = await history.removeBatch(ids);
       exitMultiSelect();
       showToast(t("batchDeleted", { n: String(ids.length) }), async () => {
         try {
-          await invoke("undo_delete_batch", { ids });
-          clips = await invoke("get_clips");
+          await undo.undo();
           render();
         } catch (err) {
           showToast(localizeBackendError(String(err)));
@@ -1031,17 +1006,14 @@ async function runBatchDestructiveAction(): Promise<void> {
   const collectionId = selectedCollectionId();
   if (!collectionId) return;
   const itemIds = items.map((item) => item.id);
-  try {
-    const result = await invoke<BatchMutationResult>("remove_favorites", {
-      collectionId,
-      itemIds,
-    });
+  const outcome = await drawerMutations.removeBatchFromCollection({ collectionId, itemIds });
+  if (outcome.status !== "failed") {
     exitMultiSelect();
-    if (await drawerViewCoordinator.refreshAfterMutation("Drawer batch removal refresh failed")) {
-      showToast(t("batchRemoved", { n: String(result.changed) }));
+    if (outcome.status === "succeeded") {
+      showToast(t("batchRemoved", { n: String(outcome.changed) }));
     }
-  } catch (err) {
-    showToast(localizeDrawerError(String(err)));
+  } else {
+    showToast(localizeDrawerError(String(outcome.error)));
   }
 }
 
@@ -1072,36 +1044,26 @@ async function copyActive(item: DisplayItem) {
 }
 
 async function deleteClip(clip: Clip) {
-  const removeLocal = () => {
-    clips = clips.filter((c) => c.id !== clip.id);
-    render();
-  };
   try {
-    await invoke("delete_clip", { id: clip.id });
-    removeLocal();
+    const undo = await history.remove(clip.id);
+    render();
+    if (!undo) return;
     showToast(t("deleted"), async () => {
       try {
-        await invoke("undo_delete", { id: clip.id });
-        clips = await invoke("get_clips");
+        await undo.undo();
         render();
       } catch (err) {
         showToast(localizeBackendError(String(err)));
       }
     });
   } catch (err) {
-    if (String(err).includes("Clip not found")) {
-      removeLocal();
-    } else {
-      console.error("Delete failed:", err);
-    }
+    console.error("Delete failed:", err);
   }
 }
 
 async function togglePin(clip: Clip) {
   try {
-    await invoke("set_pinned", { id: clip.id, pinned: !clip.pinned });
-    clip.pinned = !clip.pinned;
-    sortClips();
+    await history.togglePin(clip.id);
     render();
   } catch (err) {
     showToast(localizeBackendError(String(err)));
@@ -1332,16 +1294,12 @@ document.addEventListener("keydown", (e) => {
       return;
     case "Escape":
       e.preventDefault();
-      if (panelDrawer.cancel("explicit") !== null) return;
-      const removeModal = document.getElementById("remove-modal")!;
-      const favoritesMenu = document.getElementById("favorites-more-menu")!;
       const transientOpen = multiSelect.active
         || !noteModal.classList.contains("hidden")
         || openMenuClipId !== null
         || chooserGate.isOpen
         || batchChooserOpen
-        || !removeModal.classList.contains("hidden")
-        || !favoritesMenu.classList.contains("hidden");
+        || panelDrawer.isAnyOverlayOpen();
       const layer = escapeLayer(transientOpen, previewState.isOpen, drawerIsOpen());
       if (layer === "modal-or-menu" && multiSelect.active) {
         exitMultiSelect();
@@ -1355,10 +1313,7 @@ document.addEventListener("keydown", (e) => {
         hideActionMenu();
         return;
       }
-      if (layer === "modal-or-menu" && !removeModal.classList.contains("hidden")) {
-        (document.getElementById("remove-modal-cancel") as HTMLButtonElement).click();
-        return;
-      }
+      if (layer === "modal-or-menu" && panelDrawer.closeOverlays()) return;
       if (layer === "modal-or-menu") return;
       if (layer === "preview") {
         hidePreview();

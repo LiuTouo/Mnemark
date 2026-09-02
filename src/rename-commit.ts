@@ -1,11 +1,9 @@
-// Rename-editing state for the favorites collection list, extracted from
-// favorites.ts so the commit/rejection flow is testable. The backend stays
-// the authority: after a commit (success OR rejection) the UI always exits
-// editing and re-renders from authoritative state, never the typed value.
+// Rename-editing state for the Drawer collection list. The injected rename
+// operation owns its backend commit and authoritative refresh workflow; this
+// controller only owns the editor lifecycle and rejection presentation.
 
 export interface RenameDeps {
   rename(id: string, name: string): Promise<void>;
-  reload(): Promise<void>;
   render(): void;
   showError(message: string): void;
 }
@@ -42,16 +40,12 @@ export function createRenameController(deps: RenameDeps): RenameController {
       }
       deps
         .rename(id, name)
-        .then(() => deps.reload())
         .catch((err: unknown) => {
           // Regression: the rejection used to leave the row stuck in its
           // editing DOM. Exit editing and re-render synchronously right here,
           // independent of the background refresh below.
           deps.showError(String(err));
           deps.render();
-          // Backend-authoritative refresh; its own failure must not become
-          // an unhandled rejection on top of the already-shown error.
-          deps.reload().catch(() => {});
         });
     },
   };

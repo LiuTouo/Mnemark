@@ -15,6 +15,10 @@ function fakeMutations(overrides: Partial<DrawerMutations> = {}): DrawerMutation
     reorderItems: vi.fn(async (): Promise<DrawerMutationOutcome> => ({ status: "succeeded" })),
     addToCollection: vi.fn(async (): Promise<DrawerMutationOutcome> => ({ status: "succeeded" })),
     memberCollectionIds: vi.fn(async () => ["c1"]),
+    createCollection: vi.fn(async (): Promise<DrawerMutationOutcome> => ({ status: "succeeded" })),
+    renameCollection: vi.fn(async (): Promise<DrawerMutationOutcome> => ({ status: "succeeded" })),
+    deleteCollection: vi.fn(async (): Promise<DrawerMutationOutcome> => ({ status: "succeeded" })),
+    reorderCollections: vi.fn(async (): Promise<DrawerMutationOutcome> => ({ status: "succeeded" })),
     ...overrides,
   };
 }

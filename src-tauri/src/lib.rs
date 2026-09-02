@@ -9,6 +9,7 @@ mod history_state;
 mod located_clip;
 mod migration;
 mod models;
+mod panel_session;
 mod persistence;
 mod startup;
 mod update;
@@ -24,15 +25,16 @@ use favorites::FavoritesStore;
 use history::HistoryPolicy;
 use history_state::HistoryState;
 use located_clip::{
-    CopyOutcome, LocatedClipModule, LocatedClipWireError, StateLocatedClipSource,
-    SystemLocatedClipPlatform,
+    CopyOutcome, LocatedClipModule, LocatedClipSource, LocatedClipWireError,
+    LockedStateLocatedClipSource, StateLocatedClipSource, SystemLocatedClipPlatform,
 };
 use models::{
-    AppConfig, BatchMutationResult, Clip, ClipLocator, ClipScope, CollectionSummary, FavoriteItem,
-    PanelShortcut, PreviewPayload, CURRENT_TUTORIAL_VERSION,
+    AppConfig, BatchMutationResult, Clip, ClipLocator, CollectionSummary, PanelShortcut,
+    PreviewPayload, CURRENT_TUTORIAL_VERSION,
 };
+use panel_session::{PanelSession, PasteAction, SystemForegroundWindowSource, SystemPanelClock};
 use persistence::Persistence;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 
@@ -65,9 +67,8 @@ struct AppState {
     /// Active clip preview payload. Kept so a freshly loaded preview page can
     /// call get_active_clip_preview and cannot miss the first update event.
     preview: Arc<Mutex<Option<PreviewPayload>>>,
-    /// Monotonic preview-generation token. Every show and hide intent bumps it;
-    /// a show may display only while its claimed generation is still the newest.
-    preview_generation: Arc<AtomicU64>,
+    /// Temporal state for dismissal, Paste handoff, and preview publication.
+    panel_session: PanelSession<SystemPanelClock, SystemForegroundWindowSource>,
     /// Authoritative Drawer aggregate: durable store, session UI state, and
     /// process-local mutation generation share one lock.
     drawer: Arc<Mutex<DrawerState>>,
@@ -384,24 +385,14 @@ fn update_config(
 /// fixed sleep loses pastes whenever focus is slow to move), then send
 /// Ctrl+V.
 async fn hide_and_paste(app: &tauri::AppHandle) {
-    let panel_hwnd = clipboard::foreground_hwnd(); // the Panel has focus now
-    hide_panel(app);
-    // Poll until the foreground leaves our Panel (max ~1s), then let it
-    // settle briefly. On timeout, paste anyway — best effort.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1000);
-    loop {
-        let fg = clipboard::foreground_hwnd();
-        if (fg != 0 && fg != panel_hwnd) || std::time::Instant::now() >= deadline {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    // Never paste into the desktop shell: with a file clip, Ctrl+V on the
-    // desktop copies the referenced files there. The content stays on the
-    // clipboard for a manual paste instead (per the Paste spec).
-    if clipboard::foreground_is_desktop() {
+    let state = app.state::<AppState>();
+    let action = state.panel_session.prepare_paste(|| hide_panel(app)).await;
+    if action == PasteAction::SuppressDesktop {
         log("[Mnemark] paste suppressed: foreground is the desktop shell");
+        return;
+    }
+    if action == PasteAction::SuppressUnexpectedTarget {
+        log("[Mnemark] paste suppressed: the previously focused window did not regain focus");
         return;
     }
     if let Err(e) = clipboard::simulate_ctrl_v() {
@@ -451,12 +442,11 @@ async fn show_located_clip_preview(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), LocatedClipWireError> {
+    let generation = state.panel_session.claim_preview();
     located_clip_module(&state)
-        .preview(
-            &locator,
-            state.preview_generation.as_ref(),
-            |generation, payload| commit_preview_on_main_thread(&app, generation, payload),
-        )
+        .preview(&locator, generation, |generation, payload| {
+            commit_preview_on_main_thread(&app, generation, payload)
+        })
         .await
         .map_err(LocatedClipWireError::from)
 }
@@ -507,35 +497,6 @@ fn mutate_drawer<T>(
         DrawerViewInvalidation { generation },
     );
     Ok(value)
-}
-
-/// Resolve a `ClipLocator` to a `FavoriteItem` snapshot (from history or from
-/// another favorite), for "add to a collection" / cross-collection copy.
-fn resolve_favorite_item(state: &AppState, locator: &ClipLocator) -> Result<FavoriteItem, String> {
-    match locator.scope {
-        ClipScope::History => {
-            let clip = lock(&state.history)
-                .clip(&locator.id)
-                .ok_or_else(|| "Clip not found".to_string())?;
-            Ok(FavoriteItem::from(clip))
-        }
-        ClipScope::Drawer => with_drawer(state, |drawer| {
-            drawer
-                .get_item(&locator.id)?
-                .ok_or_else(|| "Favorite item not found".to_string())
-        }),
-    }
-}
-
-/// Resolve a locator to its content hash (a favorite's id IS its content hash).
-fn resolve_content_hash(state: &AppState, locator: &ClipLocator) -> Result<String, String> {
-    match locator.scope {
-        ClipScope::History => lock(&state.history)
-            .clip(&locator.id)
-            .map(|c| c.content_hash)
-            .ok_or_else(|| "Clip not found".to_string()),
-        ClipScope::Drawer => Ok(locator.id.clone()),
-    }
 }
 
 #[tauri::command]
@@ -600,8 +561,10 @@ fn add_favorite(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
-    let item = resolve_favorite_item(&state, &locator)?;
     mutate_drawer(&state, &app, |drawer| {
+        let item = LockedStateLocatedClipSource::new(state.history.as_ref(), drawer)
+            .resolve_snapshot(&locator)
+            .map_err(|error| error.command_message())?;
         drawer.add_snapshot(&collection_id, &item)
     })
 }
@@ -616,11 +579,17 @@ fn add_favorites(
     if locators.is_empty() {
         return Err("Batch must include at least one favorite".to_string());
     }
-    let items = locators
-        .iter()
-        .map(|locator| resolve_favorite_item(&state, locator))
-        .collect::<Result<Vec<_>, _>>()?;
     mutate_drawer(&state, &app, |drawer| {
+        let source = LockedStateLocatedClipSource::new(state.history.as_ref(), drawer);
+        let items = locators
+            .iter()
+            .map(|locator| {
+                source
+                    .resolve_snapshot(locator)
+                    .map_err(|error| error.command_message())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(source);
         drawer.add_snapshots(&collection_id, &items)
     })
 }
@@ -657,8 +626,13 @@ fn favorite_collection_ids(
     locator: ClipLocator,
     state: tauri::State<AppState>,
 ) -> Result<Vec<String>, String> {
-    let hash = resolve_content_hash(&state, &locator)?;
-    with_drawer(&state, |drawer| drawer.collection_ids_for_item(&hash))
+    let mut drawer = lock(&state.drawer);
+    let source = LockedStateLocatedClipSource::new(state.history.as_ref(), &mut drawer);
+    let hash = source
+        .resolve_content_hash(&locator)
+        .map_err(|error| error.command_message())?;
+    drop(source);
+    drawer.collection_ids_for_item(&hash)
 }
 
 /// Open/close the inline drawer pane. Closing clears the selection.
@@ -693,13 +667,6 @@ fn set_favorites_selected(
     Ok(())
 }
 
-/// True when a show whose generation is `mine` is still the newest intent
-/// (`now` has not advanced past it). A later show or hide bumps the shared
-/// generation and supersedes every earlier claim.
-fn show_is_current(now: u64, mine: u64) -> bool {
-    now == mine
-}
-
 /// Commit a prepared preview to the UI on the Tauri main thread and hand the
 /// result back to the awaiting async command. Heavy work stays off the main
 /// thread; only this one non-blocking closure runs there, so its generation
@@ -716,7 +683,7 @@ async fn commit_preview_on_main_thread(
         let state = handle.state::<AppState>();
         // Re-check the generation before any window mutation: a superseded
         // show completes as a no-op.
-        if !show_is_current(state.preview_generation.load(Ordering::SeqCst), generation) {
+        if !state.panel_session.preview_is_current(generation) {
             let _ = tx.send(Ok(()));
             return;
         }
@@ -1074,6 +1041,9 @@ fn show_panel(app: &tauri::AppHandle) {
     use tauri::{webview::PageLoadEvent, WebviewUrl, WebviewWindowBuilder};
 
     log("[Mnemark] show_panel() called");
+    app.state::<AppState>()
+        .panel_session
+        .remember_paste_target();
     MAIN_MODAL_OPEN.store(false, Ordering::SeqCst);
     if let Some(window) = app.get_webview_window("main") {
         log("[Mnemark] panel exists, showing");
@@ -1129,15 +1099,20 @@ fn show_panel(app: &tauri::AppHandle) {
                 // grace-period backstop), so a transient focus bounce during
                 // creation doesn't immediately dismiss the Panel.
                 let app_handle = app.clone();
-                let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let armed_for_event = armed.clone();
                 w.on_window_event(move |event| {
                     match event {
                         tauri::WindowEvent::Focused(true) => {
-                            armed_for_event.store(true, std::sync::atomic::Ordering::Relaxed);
+                            app_handle
+                                .state::<AppState>()
+                                .panel_session
+                                .focus_changed(true);
                         }
                         tauri::WindowEvent::Focused(false) => {
-                            if armed_for_event.load(std::sync::atomic::Ordering::Relaxed) {
+                            if app_handle
+                                .state::<AppState>()
+                                .panel_session
+                                .focus_changed(false)
+                            {
                                 schedule_focus_group_check(&app_handle);
                             }
                         }
@@ -1150,9 +1125,16 @@ fn show_panel(app: &tauri::AppHandle) {
                     }
                 });
                 // Backstop: arm even if the initial focus event never arrives.
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    armed.store(true, std::sync::atomic::Ordering::Relaxed);
+                let app_handle = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let should_recheck = app_handle
+                        .state::<AppState>()
+                        .panel_session
+                        .arm_after_backstop()
+                        .await;
+                    if should_recheck {
+                        schedule_focus_group_check(&app_handle);
+                    }
                 });
             }
             Err(e) => {
@@ -1193,7 +1175,7 @@ fn set_main_modal_open(open: bool, app: tauri::AppHandle) -> Result<(), String> 
 /// Clear the inline preview payload and supersede any in-flight show.
 fn hide_preview_window(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
-    state.preview_generation.fetch_add(1, Ordering::SeqCst);
+    state.panel_session.release_preview();
     *lock(&state.preview) = None;
 }
 
@@ -1201,8 +1183,11 @@ fn hide_preview_window(app: &tauri::AppHandle) {
 /// do not dismiss the panel during the same event turn.
 fn schedule_focus_group_check(app: &tauri::AppHandle) {
     let app = app.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(150));
+    tauri::async_runtime::spawn(async move {
+        app.state::<AppState>()
+            .panel_session
+            .wait_for_focus_recheck()
+            .await;
         let handle = app.clone();
         if let Err(e) = app.run_on_main_thread(move || {
             let focused = handle
@@ -1210,17 +1195,17 @@ fn schedule_focus_group_check(app: &tauri::AppHandle) {
                 .and_then(|w| w.is_focused().ok())
                 .unwrap_or(false);
             let modal_open = MAIN_MODAL_OPEN.load(Ordering::SeqCst);
-            if should_hide_panel_after_focus_loss(focused, modal_open) {
+            if handle
+                .state::<AppState>()
+                .panel_session
+                .should_dismiss(focused, modal_open)
+            {
                 hide_panel(&handle);
             }
         }) {
             log(&format!("[Mnemark] run_on_main_thread failed: {:?}", e));
         }
     });
-}
-
-fn should_hide_panel_after_focus_loss(focused: bool, modal_open: bool) -> bool {
-    !focused && !modal_open
 }
 
 /// UI zoom factor derived from the config percentage.
@@ -1400,7 +1385,10 @@ pub fn run(_hidden: bool) {
             tray_items: tray_items.clone(),
             startup_error: startup_error.clone(),
             preview: Arc::new(Mutex::new(None)),
-            preview_generation: Arc::new(AtomicU64::new(0)),
+            panel_session: PanelSession::new(
+                SystemPanelClock::default(),
+                SystemForegroundWindowSource,
+            ),
             drawer: drawer.clone(),
             workspace_left_extent: Arc::new(Mutex::new(0)),
             workspace_right_extent: Arc::new(Mutex::new(0)),
@@ -1957,32 +1945,6 @@ mod center_coords_tests {
 }
 
 #[cfg(test)]
-mod preview_generation_tests {
-    use super::show_is_current;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    #[test]
-    fn fetch_add_yields_strictly_increasing_tokens() {
-        let gen = AtomicU64::new(0);
-        let a = gen.fetch_add(1, Ordering::SeqCst) + 1;
-        let b = gen.fetch_add(1, Ordering::SeqCst) + 1;
-        assert_eq!((a, b), (1, 2));
-    }
-
-    #[test]
-    fn later_generation_supersedes_earlier_show() {
-        let gen = AtomicU64::new(0);
-        let first = gen.fetch_add(1, Ordering::SeqCst) + 1;
-        let second = gen.fetch_add(1, Ordering::SeqCst) + 1;
-        // The first show is stale once the second intent lands.
-        assert!(!show_is_current(second, first));
-        // The newest intent is current; an unchanged token stays current.
-        assert!(show_is_current(second, second));
-        assert!(show_is_current(first, first));
-    }
-}
-
-#[cfg(test)]
 mod workspace_placement_tests {
     use super::place_workspace_window;
 
@@ -2075,26 +2037,5 @@ mod tutorial_lifecycle_tests {
                 open_history: false
             }
         );
-    }
-}
-
-#[cfg(test)]
-mod main_modal_focus_tests {
-    use super::should_hide_panel_after_focus_loss;
-
-    #[test]
-    fn focus_loss_keeps_panel_visible_while_modal_is_open() {
-        assert!(!should_hide_panel_after_focus_loss(false, true));
-    }
-
-    #[test]
-    fn ordinary_focus_loss_still_hides_panel() {
-        assert!(should_hide_panel_after_focus_loss(false, false));
-    }
-
-    #[test]
-    fn focused_panel_never_hides() {
-        assert!(!should_hide_panel_after_focus_loss(true, false));
-        assert!(!should_hide_panel_after_focus_loss(true, true));
     }
 }

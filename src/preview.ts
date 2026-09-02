@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { applyI18n, setLanguage, t } from "./i18n";
-import { applyTheme } from "./theme";
+import { applyI18n, t } from "./i18n";
+import { configBootstrap } from "./config";
 
 interface PreviewPayload {
   id: string;
@@ -115,14 +115,8 @@ export async function mountPreview(): Promise<void> {
   sizeEl = document.getElementById("preview-size")!;
 
   try {
-    const config = await invoke<{ language?: string; theme?: string; ui_opacity_percent?: number }>("get_config");
-    setLanguage(config.language || "zh-TW");
-    applyTheme(config.theme || "system");
-    const opacity = Math.min(100, Math.max(50, config.ui_opacity_percent ?? 99));
-    document.documentElement.style.setProperty("--panel-opacity", String(opacity / 100));
-  } catch {
-    setLanguage("zh-TW");
-  }
+    await configBootstrap.loadAndApply();
+  } catch {}
   applyI18n();
 
   await listen<PreviewPayload>("preview-payload-updated", (event) => render(event.payload));

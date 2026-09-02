@@ -3,22 +3,15 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { applyI18n, setLanguage, t } from "./i18n";
-import { applyTheme } from "./theme";
+import { applyI18n, t } from "./i18n";
+import { configBootstrap } from "./config";
+import type { AppConfig } from "./config";
 import { TUTORIAL_PAGES, TutorialNav, TutorialSession } from "./tutorial-state";
 import { shortcutLabel, FAVORITES_DEFAULT_CODES } from "./shortcut";
 
-interface AppConfig {
-  language?: string;
-  theme?: string;
-  ui_opacity_percent?: number;
-  hotkey?: string;
-  favorites_toggle_shortcut?: { codes: string[] };
-}
-
 const nav = new TutorialNav();
 const session = new TutorialSession();
-let config: AppConfig = {};
+let config: AppConfig | null = null;
 
 const titleEl = document.getElementById("tutorial-page-title")!;
 const bodyEl = document.getElementById("tutorial-page-body")!;
@@ -31,14 +24,10 @@ const skipBtn = document.getElementById("tutorial-skip") as HTMLButtonElement;
 
 async function refreshConfig(): Promise<void> {
   try {
-    config = await invoke<AppConfig>("get_config");
+    config = await configBootstrap.loadAndApply();
   } catch {
-    config = {};
+    config = null;
   }
-  setLanguage(config.language || "zh-TW");
-  applyTheme(config.theme || "system");
-  const opacity = Math.min(100, Math.max(50, config.ui_opacity_percent ?? 99));
-  document.documentElement.style.setProperty("--panel-opacity", String(opacity / 100));
 }
 
 /** Render the current page, injecting the live hotkey into shortcut copy. */
@@ -51,8 +40,8 @@ function render(): void {
     const p = document.createElement("p");
     // {hotkey} is the global panel hotkey; {shortcut} is the favorites chord.
     p.textContent = t(key, {
-      hotkey: config.hotkey || "Ctrl+Shift+V",
-      shortcut: shortcutLabel(config.favorites_toggle_shortcut?.codes ?? FAVORITES_DEFAULT_CODES),
+      hotkey: config?.hotkey || "Ctrl+Shift+V",
+      shortcut: shortcutLabel(config?.favorites_toggle_shortcut?.codes ?? FAVORITES_DEFAULT_CODES),
     });
     bodyEl.append(p);
   }
