@@ -1,3 +1,4 @@
+mod capture_policy;
 mod clip_encoding;
 mod clipboard;
 mod config_transaction;
@@ -12,6 +13,11 @@ mod persistence;
 mod startup;
 mod update;
 
+use capture_policy::{
+    CaptureDecision, CaptureEmitter, CaptureHistory, CaptureStoreOutcome, CaptureStoreRequest,
+    ClipboardCaptureOutcome, ClipboardCapturer, ClipboardMonitor, ClipboardSequenceReader,
+    SkipReason,
+};
 use config_transaction::{run_config_update, ConfigEffects};
 use drawer::{DrawerMutation, DrawerState, DrawerViewInvalidation, DrawerViewState};
 use favorites::FavoritesStore;
@@ -22,8 +28,8 @@ use located_clip::{
     SystemLocatedClipPlatform,
 };
 use models::{
-    AppConfig, BatchMutationResult, Clip, ClipLocator, ClipScope, ClipboardUpdate,
-    CollectionSummary, FavoriteItem, PanelShortcut, PreviewPayload, CURRENT_TUTORIAL_VERSION,
+    AppConfig, BatchMutationResult, Clip, ClipLocator, ClipScope, CollectionSummary, FavoriteItem,
+    PanelShortcut, PreviewPayload, CURRENT_TUTORIAL_VERSION,
 };
 use persistence::Persistence;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -754,163 +760,89 @@ fn get_active_clip_preview(state: tauri::State<AppState>) -> Option<PreviewPaylo
     lock(&state.preview).clone()
 }
 
-/// True while `now` is still inside the debounce window of the last capture.
-fn within_debounce(now: u64, last_capture_ts: u64, debounce_ms: u64) -> bool {
-    now.saturating_sub(last_capture_ts) < debounce_ms
-}
+struct Win32SequenceReader;
 
-/// True when this capture repeats content first observed inside the debounce
-/// window (double Ctrl+C noise). The same content observed AFTER the window
-/// is a deliberate re-copy and must be kept.
-fn is_double_copy(
-    hash: &str,
-    first_seen: u64,
-    last_hash: &Option<(String, u64)>,
-    debounce_ms: u64,
-) -> bool {
-    matches!(last_hash, Some((h, ts)) if *h == hash && within_debounce(first_seen, *ts, debounce_ms))
-}
+impl ClipboardSequenceReader for Win32SequenceReader {
+    fn sequence_number(&mut self) -> u32 {
+        use windows::Win32::System::DataExchange::GetClipboardSequenceNumber;
 
-/// Track when the CURRENT pending clipboard change was first observed. A new
-/// sequence number resets the clock: otherwise the double-copy comparison
-/// runs against the first sighting of older, since-replaced content and can
-/// misread a deliberate re-copy as double-copy noise. Returns the updated
-/// (pending_seq, pending_since) plus the first-observation time to use.
-fn track_first_seen(
-    pending_seq: Option<u32>,
-    pending_since: Option<u64>,
-    current_seq: u32,
-    now: u64,
-) -> (Option<u32>, Option<u64>, u64) {
-    match (pending_seq, pending_since) {
-        (Some(s), Some(t)) if s == current_seq => (pending_seq, pending_since, t),
-        _ => (Some(current_seq), Some(now), now),
+        unsafe { GetClipboardSequenceNumber() }
     }
 }
 
-/// Clipboard monitor state. One instance lives on the monitor thread for the
-/// lifetime of the app; `tick` runs one poll iteration.
-struct Monitor {
-    app: tauri::AppHandle,
-    history: Arc<Mutex<HistoryState>>,
-    config: Arc<Mutex<AppConfig>>,
-    running: Arc<Mutex<bool>>,
-    /// Own exe name, so content Mnemark itself wrote (paste / copy-only
-    /// while the Panel had focus) keeps its original source attribution.
-    self_exe: String,
-    last_seq: u32,
-    last_hash: Option<(String, u64)>,
-    /// First-observation time + sequence number of the unconsumed clipboard
-    /// change, used for debounce comparisons (see tick's capture match).
-    pending_since: Option<u64>,
-    pending_seq: Option<u32>,
+struct Win32ClipboardCapturer;
+
+impl ClipboardCapturer for Win32ClipboardCapturer {
+    fn capture(&mut self, config: &AppConfig) -> ClipboardCaptureOutcome {
+        match clipboard::capture_clipboard(config) {
+            Ok(clip) => ClipboardCaptureOutcome::Captured(Box::new(clip)),
+            Err(clipboard::CaptureError::Locked) => ClipboardCaptureOutcome::Locked,
+            Err(clipboard::CaptureError::Skip(reason)) => ClipboardCaptureOutcome::Skipped(reason),
+        }
+    }
 }
 
-impl Monitor {
-    fn tick(&mut self) {
-        use windows::Win32::System::DataExchange::GetClipboardSequenceNumber;
+struct SharedCaptureHistory {
+    history: Arc<Mutex<HistoryState>>,
+}
 
-        let current_seq = unsafe { GetClipboardSequenceNumber() };
-
-        {
-            let running = lock(&self.running);
-            if !*running {
-                // Keep last_seq in sync while paused: copies made during
-                // the pause are permanently lost, not captured on resume.
-                self.last_seq = current_seq;
-                self.pending_since = None;
-                self.pending_seq = None;
-                return;
+impl CaptureHistory for SharedCaptureHistory {
+    fn store(&mut self, request: CaptureStoreRequest) -> CaptureStoreOutcome {
+        match self.history.try_lock() {
+            Ok(mut history) => request.apply(&mut history),
+            Err(std::sync::TryLockError::WouldBlock) => CaptureStoreOutcome::Locked,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                request.apply(&mut poisoned.into_inner())
             }
         }
+    }
+}
 
-        if current_seq == self.last_seq {
-            return;
-        }
+struct TauriCaptureEmitter {
+    app: tauri::AppHandle,
+}
 
-        let config = lock(&self.config).clone();
-
-        // now_ms maps a pre-epoch clock to 0 instead of panicking — a panic
-        // here would kill the monitor thread and stop all capture.
-        let now = now_ms();
-
-        let (pending_seq, pending_since, first_seen) =
-            track_first_seen(self.pending_seq, self.pending_since, current_seq, now);
-        self.pending_seq = pending_seq;
-        self.pending_since = pending_since;
-
-        // Debounce: too soon after the last capture. Do NOT consume the
-        // sequence number — the next poll retries and picks up the latest
-        // content once the window has passed.
-        if let Some((_, ts)) = self.last_hash {
-            if within_debounce(now, ts, config.debounce_ms) {
-                return;
+impl CaptureEmitter for TauriCaptureEmitter {
+    fn emit(&mut self, decision: CaptureDecision) {
+        match decision {
+            CaptureDecision::NoChange => {}
+            CaptureDecision::Defer {
+                pending_sequence,
+                reason,
+            } => {
+                let _ = (pending_sequence, reason);
             }
-        }
-
-        // The sequence number is only consumed on success or definitive
-        // failure (Skip). A Locked clipboard stays pending for next poll,
-        // so copies made while another app holds the clipboard are not lost.
-        match clipboard::capture_clipboard(&config) {
-            Ok(mut clip) => {
-                self.last_seq = current_seq;
-                self.pending_since = None;
-                self.pending_seq = None;
-                let content_hash = clip.content_hash.clone();
-
-                if is_double_copy(
-                    &content_hash,
-                    first_seen,
-                    &self.last_hash,
-                    config.debounce_ms,
-                ) {
-                    return;
-                }
-                self.last_hash = Some((content_hash.clone(), now));
-
-                // Source attribution + capture share one aggregate lock; the
-                // capture commits durably before its memory state is
-                // published, so a failed write leaves no phantom Clip.
-                let stored = {
-                    let mut history = lock(&self.history);
-                    if !self.self_exe.is_empty()
-                        && clip.source_exe.eq_ignore_ascii_case(&self.self_exe)
-                    {
-                        if let Some((exe, title)) = history.source_by_hash(&content_hash) {
-                            clip.source_exe = exe;
-                            clip.source_title = title;
-                        }
-                    }
-                    history.capture(clip)
-                };
-                match stored {
-                    Ok((clip, evicted)) => {
-                        // Events are not authoritative state: this only ever
-                        // describes an already-committed capture result.
-                        let _ = self
-                            .app
-                            .emit("clipboard-update", ClipboardUpdate { clip, evicted });
-                    }
-                    Err(e) => {
-                        // The monitor cannot surface a UI error. Minimal
-                        // observable strategy within the existing
-                        // architecture: unconditional stderr (visible
-                        // whenever the app runs with a console, release
-                        // included) plus a broadcast event; no success update
-                        // is emitted. The iteration always continues —
-                        // clipboard capture must never die on a DB error.
-                        let message = e.message();
-                        eprintln!("[Mnemark] history persistence write failed: {}", message);
-                        let _ = self.app.emit("history-persistence-error", &message);
-                    }
-                }
-            }
-            Err(clipboard::CaptureError::Locked) => {}
-            Err(clipboard::CaptureError::Skip(reason)) => {
+            CaptureDecision::Skip {
+                consumed_sequence,
+                reason: SkipReason::Capture(reason),
+            } => {
+                let _ = consumed_sequence;
                 log(&format!("[Mnemark] capture skipped: {}", reason));
-                self.last_seq = current_seq;
-                self.pending_since = None;
-                self.pending_seq = None;
+            }
+            CaptureDecision::Skip {
+                consumed_sequence,
+                reason,
+            } => {
+                let _ = (consumed_sequence, reason);
+            }
+            CaptureDecision::Store {
+                consumed_sequence,
+                update,
+            } => {
+                let _ = consumed_sequence;
+                // Events describe an already-committed capture result; they
+                // are not authoritative History state.
+                let _ = self.app.emit("clipboard-update", *update);
+            }
+            CaptureDecision::PersistenceFailed {
+                consumed_sequence,
+                message,
+            } => {
+                let _ = consumed_sequence;
+                // Keep monitoring after durable failures and make the gap
+                // observable through the existing backend event contract.
+                eprintln!("[Mnemark] history persistence write failed: {}", message);
+                let _ = self.app.emit("history-persistence-error", &message);
             }
         }
     }
@@ -923,28 +855,31 @@ fn start_monitor(
     monitor_running: Arc<Mutex<bool>>,
 ) {
     std::thread::spawn(move || {
-        let mut monitor = Monitor {
-            app: app_handle,
-            history,
-            config,
-            running: monitor_running,
-            self_exe: std::env::current_exe()
-                .ok()
-                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-                .unwrap_or_default(),
-            last_seq: 0,
-            last_hash: None,
-            pending_since: None,
-            pending_seq: None,
-        };
+        let self_exe = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .unwrap_or_default();
+        let mut monitor = ClipboardMonitor::new(
+            Win32SequenceReader,
+            Win32ClipboardCapturer,
+            SharedCaptureHistory { history },
+            TauriCaptureEmitter { app: app_handle },
+            self_exe,
+        );
 
         loop {
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            std::thread::sleep(capture_policy::POLL_INTERVAL);
+            let running = *lock(&monitor_running);
+            let config = lock(&config).clone();
             // A panicking iteration must not kill clipboard monitoring:
             // untrusted clipboard bytes reach the image decoders, and a dead
             // monitor thread fails silently — the user never notices history
             // has stopped. Log and keep polling.
-            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| monitor.tick())).is_err() {
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                monitor.tick(running, &config, now_ms())
+            }))
+            .is_err()
+            {
                 log("[Mnemark] monitor iteration panicked; clipboard watching continues");
             }
         }
@@ -1924,67 +1859,7 @@ mod shell_open_scope_tests {
 }
 
 #[cfg(test)]
-mod monitor_debounce_tests {
-    use super::{is_double_copy, track_first_seen, within_debounce};
-
-    #[test]
-    fn within_debounce_window() {
-        assert!(within_debounce(150, 0, 200));
-        // Boundary: exactly debounce_ms later is OUTSIDE the window.
-        assert!(!within_debounce(200, 0, 200));
-        assert!(!within_debounce(500, 0, 200));
-    }
-
-    #[test]
-    fn double_copy_inside_window_is_dropped() {
-        let last = Some(("hashA".to_string(), 0u64));
-        assert!(is_double_copy("hashA", 150, &last, 200));
-    }
-
-    #[test]
-    fn same_content_after_window_is_a_deliberate_recopy() {
-        let last = Some(("hashA".to_string(), 0u64));
-        assert!(!is_double_copy("hashA", 300, &last, 200));
-    }
-
-    #[test]
-    fn different_content_is_never_double_copy() {
-        let last = Some(("hashA".to_string(), 0u64));
-        assert!(!is_double_copy("hashB", 50, &last, 200));
-    }
-
-    #[test]
-    fn no_previous_capture_is_never_double_copy() {
-        assert!(!is_double_copy("hashA", 50, &None, 200));
-    }
-
-    #[test]
-    fn first_seen_persists_while_the_same_sequence_is_pending() {
-        // Second poll of the same pending change keeps the original time.
-        let (seq, since, first) = track_first_seen(Some(7), Some(1000), 7, 1200);
-        assert_eq!(seq, Some(7));
-        assert_eq!(since, Some(1000));
-        assert_eq!(first, 1000);
-    }
-
-    #[test]
-    fn first_seen_resets_when_a_newer_sequence_arrives() {
-        // Copy B replaced copy A while A was still pending: the debounce
-        // clock must run from B's first observation, not A's.
-        let (seq, since, first) = track_first_seen(Some(7), Some(1000), 8, 1200);
-        assert_eq!(seq, Some(8));
-        assert_eq!(since, Some(1200));
-        assert_eq!(first, 1200);
-    }
-
-    #[test]
-    fn first_seen_starts_on_first_observation() {
-        let (seq, since, first) = track_first_seen(None, None, 7, 1000);
-        assert_eq!(seq, Some(7));
-        assert_eq!(since, Some(1000));
-        assert_eq!(first, 1000);
-    }
-
+mod monitor_clock_tests {
     #[test]
     fn now_ms_never_panics_and_returns_epoch_scale() {
         // The monitor's clock: a pre-epoch system clock maps to 0 (fallback)
