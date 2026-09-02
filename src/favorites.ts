@@ -18,6 +18,7 @@ import type {
 import { createInlineDragCard } from "./drag-overlay";
 import type { InlineDragCard } from "./drag-overlay";
 import { createRenameController } from "./rename-commit";
+import type { DrawerMutationOutcome, DrawerMutationWorkflow } from "./drawer-mutations";
 import type { DrawerView } from "./drawer-view";
 import type { DrawerViewCoordinator } from "./drawer-view-coordinator";
 import type { Clip, CollectionSummary, FavoriteItem } from "./types";
@@ -26,6 +27,94 @@ type ProductionDrawerDragAdapter = Parameters<typeof createDrawerDragLifecycle<H
 type DrawerDragTargetState = Parameters<ProductionDrawerDragAdapter["renderTargets"]>[0];
 type DrawerDragReorderAdapter = NonNullable<ProductionDrawerDragAdapter["reorder"]>;
 type DrawerCollectionReorderAdapter = NonNullable<ProductionDrawerDragAdapter["collectionReorder"]>;
+type DrawerDragItemContext = Parameters<ProductionDrawerDragAdapter["lookupMembership"]>[0];
+
+/** The workflow surface the drag adapter consumes; tests substitute a fake. */
+export type DrawerMutations = Pick<
+  DrawerMutationWorkflow,
+  "reorderItems" | "addToCollection" | "memberCollectionIds"
+>;
+
+/** Reorder eligibility derived once from Panel state. The drag adapter
+ * receives this as data instead of scraping the Panel's row attributes. */
+export interface DrawerItemReorderSnapshot {
+  readonly enabled: boolean;
+  readonly collectionId: string | null;
+  readonly orderedItemIds: readonly string[];
+}
+
+export interface PanelDrawerDependencies {
+  mutations: DrawerMutations;
+  itemReorderSnapshot(): DrawerItemReorderSnapshot;
+}
+
+interface DrawerItemMutationAdapterDependencies {
+  mutations: DrawerMutations;
+  itemReorderSnapshot(): DrawerItemReorderSnapshot;
+  presentFailure(error: unknown): void;
+  presentAdded(collectionId: string): void;
+}
+
+/** The production drag adapter's context, commit, and reporting callbacks,
+ * wired to the workflow module so they are testable against fake invoke and
+ * refresh handles without DOM. */
+export interface DrawerItemMutationAdapter {
+  reorder: Pick<DrawerDragReorderAdapter, "context" | "commit" | "showSuccess" | "showFailure">;
+  lookupMembership(start: DrawerDragItemContext): Promise<readonly string[]>;
+  commit(collectionId: string, start: DrawerDragItemContext): Promise<void>;
+  showSuccess(collectionId: string): void;
+  showFailure(error: unknown): void;
+}
+
+export function createDrawerItemMutationAdapter(
+  dependencies: DrawerItemMutationAdapterDependencies,
+): DrawerItemMutationAdapter {
+  const { mutations, itemReorderSnapshot, presentFailure, presentAdded } = dependencies;
+  // The lifecycle pairs commit with showSuccess sequentially; the outcome of
+  // the last commit decides whether success presentation is due.
+  let lastMembershipOutcome: DrawerMutationOutcome | null = null;
+
+  return {
+    reorder: {
+      context: (start) => {
+        if (start.locator.scope !== "drawer") return null;
+        const snapshot = itemReorderSnapshot();
+        if (!snapshot.enabled || snapshot.collectionId === null) return null;
+        if (!snapshot.orderedItemIds.includes(start.locator.id)) return null;
+        return {
+          collectionId: snapshot.collectionId,
+          itemId: start.locator.id,
+          orderedItemIds: snapshot.orderedItemIds,
+        };
+      },
+      // Success and committed-stale both end inside the workflow: the refresh
+      // barrier has already been awaited when the commit resolves.
+      commit: (collectionId, orderedItemIds) =>
+        mutations.reorderItems({ collectionId, orderedItemIds }).then(raiseFailed),
+      showSuccess: () => {},
+      showFailure: presentFailure,
+    },
+    lookupMembership: (start) => mutations.memberCollectionIds(start.locator),
+    commit: async (collectionId, start) => {
+      const outcome = await mutations.addToCollection({
+        collectionId,
+        locator: start.locator,
+      });
+      lastMembershipOutcome = outcome;
+      raiseFailed(outcome);
+    },
+    showSuccess: (collectionId) => {
+      if (lastMembershipOutcome?.status !== "succeeded") return;
+      lastMembershipOutcome = null;
+      presentAdded(collectionId);
+    },
+    showFailure: presentFailure,
+  };
+}
+
+function raiseFailed(outcome: DrawerMutationOutcome): void {
+  if (outcome.status === "failed") throw outcome.error;
+}
 
 export interface PanelDrawerController {
   start(item: Clip | FavoriteItem, source: HTMLElement, point: DrawerDragPoint): DrawerDragSession;
@@ -509,11 +598,10 @@ function drawerItemRows(): HTMLElement[] {
   return [...drawerItemList.querySelectorAll<HTMLElement>(".clip-item[data-is-favorite='1']")];
 }
 
-function selectedDrawerCollectionId(): string | null {
-  return drawerViewController.currentView?.selectedCollection ?? null;
-}
-
-function createProductionDrawerDrag(inlineDragCard: InlineDragCard): DrawerDragLifecycle<HTMLElement> {
+function createProductionDrawerDrag(
+  inlineDragCard: InlineDragCard,
+  dependencies: PanelDrawerDependencies,
+): DrawerDragLifecycle<HTMLElement> {
   const collectionReorderIndicator = document.createElement("div");
   collectionReorderIndicator.className = "drop-indicator";
 
@@ -521,26 +609,22 @@ function createProductionDrawerDrag(inlineDragCard: InlineDragCard): DrawerDragL
   itemReorderIndicator.className = "clip-reorder-indicator";
   itemReorderIndicator.setAttribute("aria-hidden", "true");
 
-  const drawerReorderAdapter: DrawerDragReorderAdapter = {
-    context: (start) => {
-      const collectionId = selectedDrawerCollectionId();
-      const filter = document.querySelector<HTMLElement>(".filter-btn.active")?.dataset.filter;
-      const selectionActive = document.getElementById("selection-toggle")?.classList.contains("active") ?? false;
-      const orderedItemIds = drawerItemRows()
-        .map((row) => row.dataset.clipId ?? "")
-        .filter((id) => id.length > 0);
-      if (start.locator.scope !== "drawer"
-        || !collectionId
-        || (document.getElementById("search-input") as HTMLInputElement).value.length > 0
-        || filter !== "all"
-        || selectionActive
-        || !orderedItemIds.includes(start.locator.id)) return null;
-      return {
-        collectionId,
-        itemId: start.locator.id,
-        orderedItemIds,
-      };
+  const itemMutations = createDrawerItemMutationAdapter({
+    mutations: dependencies.mutations,
+    itemReorderSnapshot: dependencies.itemReorderSnapshot,
+    presentFailure: (error) => showToast(localizeDrawerError(String(error))),
+    presentAdded: (collectionId) => {
+      showToast(t("addedToFavorites"));
+      const row = listEl.querySelector<HTMLElement>(`.favorites-row[data-collection-id="${collectionId}"]`);
+      if (row) {
+        row.classList.add("drop-success");
+        setTimeout(() => row.classList.remove("drop-success"), 600);
+      }
     },
+  });
+
+  const drawerReorderAdapter: DrawerDragReorderAdapter = {
+    ...itemMutations.reorder,
     measure: () => ({
       list: drawerItemList.getBoundingClientRect(),
       items: drawerItemRows()
@@ -564,17 +648,6 @@ function createProductionDrawerDrag(inlineDragCard: InlineDragCard): DrawerDragL
       const previous = drawerItemList.scrollTop;
       drawerItemList.scrollTop += amount;
       return drawerItemList.scrollTop !== previous;
-    },
-    commit: (collectionId, orderedItemIds) => invoke("reorder_favorite_items", {
-      collectionId,
-      ids: orderedItemIds,
-    }),
-    showSuccess: async () => {
-      await drawerViewController.refreshAfterMutation("Drawer item reorder refresh failed");
-    },
-    showFailure: async (error) => {
-      showToast(localizeDrawerError(String(error)));
-      await drawerViewController.retryAfterFailure("Drawer item reorder recovery failed");
     },
   };
 
@@ -621,7 +694,7 @@ function createProductionDrawerDrag(inlineDragCard: InlineDragCard): DrawerDragL
   return createDrawerDragLifecycle<HTMLElement>({
     reorder: drawerReorderAdapter,
     collectionReorder: collectionReorderAdapter,
-    lookupMembership: (start) => invoke<string[]>("favorite_collection_ids", { locator: start.locator }),
+    lookupMembership: itemMutations.lookupMembership,
     collectionAt: (point) => collectionUnderPoint(point.x, point.y),
     renderTargets: renderDrawerTargets,
     activateSource: (source) => source.classList.add("dragging-source"),
@@ -638,29 +711,15 @@ function createProductionDrawerDrag(inlineDragCard: InlineDragCard): DrawerDragL
       reason !== "item-reorder" && (outcome === "cancelled" || outcome === "replaced"),
     ),
     clearTransientFeedback: clearDrawerFeedback,
-    commit: (collectionId, start) => invoke("add_favorite", {
-      collectionId,
-      locator: start.locator,
-    }),
+    commit: itemMutations.commit,
     showUnavailable: (collectionId) => {
       const row = listEl.querySelector<HTMLElement>(`.favorites-row[data-collection-id="${collectionId}"]`);
       row?.classList.add("drop-invalid");
       setTimeout(() => row?.classList.remove("drop-invalid"), 450);
       showToast(t("alreadyInDrawer"));
     },
-    showSuccess: async (collectionId) => {
-      if (!await drawerViewController.refreshAfterMutation("Drawer membership refresh failed")) return;
-      showToast(t("addedToFavorites"));
-      const row = listEl.querySelector<HTMLElement>(`.favorites-row[data-collection-id="${collectionId}"]`);
-      if (row) {
-        row.classList.add("drop-success");
-        setTimeout(() => row.classList.remove("drop-success"), 600);
-      }
-    },
-    showFailure: async (error) => {
-      showToast(localizeDrawerError(String(error)));
-      await drawerViewController.retryAfterFailure("Drawer membership recovery failed");
-    },
+    showSuccess: itemMutations.showSuccess,
+    showFailure: itemMutations.showFailure,
   });
 }
 
@@ -709,6 +768,7 @@ function createPanelDrawerController(): PanelDrawerRenderer {
 
 export function mountDrawerRenderer(
   controller: DrawerViewController,
+  dependencies: PanelDrawerDependencies,
 ): PanelDrawerRenderer {
   drawerViewController = controller;
   listEl = document.getElementById("favorites-list")!;
@@ -735,7 +795,7 @@ export function mountDrawerRenderer(
     showError: (message) => showToast(localizeDrawerError(message)),
   });
   const inlineDragCard = createInlineDragCard(document.getElementById("drag-overlay-card")!);
-  drawerDrag = createProductionDrawerDrag(inlineDragCard);
+  drawerDrag = createProductionDrawerDrag(inlineDragCard, dependencies);
 
   addBtn.addEventListener("click", () => { moreMenuFor = null; updateMoreMenu(); if (editingCreate) cancelCreate(); else startCreate(); });
   wireNameEditor(createInput, {

@@ -23,6 +23,7 @@ import { mountDrawerRenderer } from "./favorites";
 import type { PanelDrawerRenderer } from "./favorites";
 import { drawerViewProjection } from "./drawer-view-tauri";
 import { DrawerViewCoordinator } from "./drawer-view-coordinator";
+import { DrawerMutationWorkflow } from "./drawer-mutations";
 import type { DrawerView } from "./drawer-view";
 import type { DrawerDragCancelReason, DrawerDragSession } from "./drawer-drag";
 import { mountPreview } from "./preview";
@@ -57,6 +58,13 @@ const drawerViewCoordinator = new DrawerViewCoordinator(drawerViewProjection, {
   presentError: (error) => showToast(localizeDrawerError(String(error))),
   presentStale: () => showToast(t("drawerRefreshFailed")),
   reportDiagnostic: (context, error) => console.error(`[Mnemark] ${context}`, error),
+});
+// Both the row-menu and drag paths hand their Drawer mutation intents to this
+// one workflow; each owns only the presentation of the returned outcome.
+const drawerMutations = new DrawerMutationWorkflow({
+  invoke: (command, args) => invoke(command, args),
+  refreshAfterMutation: (context) => drawerViewCoordinator.refreshAfterMutation(context),
+  retryAfterFailure: (context) => drawerViewCoordinator.retryAfterFailure(context),
 });
 const locatedClip = new LocatedClipFacade({
   invoke: (command, args) => invoke(command, args),
@@ -816,13 +824,8 @@ async function moveFavoriteItem(itemId: string, delta: number): Promise<void> {
   const nextIds = moveOne(currentIds, currentIds.indexOf(itemId), delta);
   if (nextIds.every((id, index) => id === currentIds[index])) return;
   hideActionMenu();
-  try {
-    await invoke("reorder_favorite_items", { collectionId, ids: nextIds });
-    await drawerViewCoordinator.refreshAfterMutation("Drawer item reorder refresh failed");
-  } catch (err) {
-    showToast(localizeDrawerError(String(err)));
-    await drawerViewCoordinator.retryAfterFailure("Drawer item reorder recovery failed");
-  }
+  const outcome = await drawerMutations.reorderItems({ collectionId, orderedItemIds: nextIds });
+  if (outcome.status === "failed") showToast(localizeDrawerError(String(outcome.error)));
 }
 
 function hideActionMenu() {
@@ -899,13 +902,13 @@ function openAddChooser(item: DisplayItem) {
   const token = chooserGate.open(item.id);
   const locator: ClipLocator = clipLocator(item);
 
-  invoke<string[]>("favorite_collection_ids", { locator }).then((existing) => {
+  drawerMutations.memberCollectionIds(locator).then((existing) => {
     if (!chooserGate.isCurrent(item.id, token)) return;
     renderAddChooser(locator, existing);
   }).catch((error) => showToast(localizeDrawerError(String(error))));
 }
 
-function renderAddChooser(locator: ClipLocator, existing: string[]) {
+function renderAddChooser(locator: ClipLocator, existing: readonly string[]) {
   addMenu.replaceChildren();
   const collections = currentDrawerView()?.collections ?? [];
 
@@ -920,13 +923,11 @@ function renderAddChooser(locator: ClipLocator, existing: string[]) {
       const member = existing.includes(c.id);
       const b = menuItem(`${c.name}${member ? ` · ${t("addedToFavorites")}` : ""}`, () => {
         hideAddChooser();
-        void invoke("add_favorite", { collectionId: c.id, locator })
-          .then(async () => {
-            if (await drawerViewCoordinator.refreshAfterMutation("Drawer membership refresh failed")) {
-              showToast(t("addedToFavorites"));
-            }
-          })
-          .catch((err) => showToast(localizeDrawerError(String(err))));
+        void drawerMutations.addToCollection({ collectionId: c.id, locator })
+          .then((outcome) => {
+            if (outcome.status === "succeeded") showToast(t("addedToFavorites"));
+            else if (outcome.status === "failed") showToast(localizeDrawerError(String(outcome.error)));
+          });
       });
       b.disabled = member;
       b.classList.toggle("menu-item-checked", member);
@@ -976,18 +977,22 @@ function openBatchAddChooser(): void {
     for (const collection of targets) {
       addMenu.appendChild(menuItem(collection.name, () => {
         hideAddChooser();
-        void invoke<BatchMutationResult>("add_favorites", {
+        void drawerMutations.addBatchToCollection({
           collectionId: collection.id,
           locators,
-        }).then(async (result) => {
+        }).then((outcome) => {
+          if (outcome.status === "failed") {
+            showToast(localizeDrawerError(String(outcome.error)));
+            return;
+          }
           exitMultiSelect();
-          if (await drawerViewCoordinator.refreshAfterMutation("Drawer batch membership refresh failed")) {
+          if (outcome.status === "succeeded") {
             showToast(t("batchAdded", {
-              changed: String(result.changed),
-              unchanged: String(result.unchanged),
+              changed: String(outcome.changed),
+              unchanged: String(outcome.unchanged),
             }));
           }
-        }).catch((err) => showToast(localizeDrawerError(String(err))));
+        });
       }));
     }
   }
@@ -1430,7 +1435,16 @@ document.body.addEventListener("click", (e) => {
 
 // === Initialize ===
 window.addEventListener("DOMContentLoaded", () => {
-  panelDrawer = mountDrawerRenderer(drawerViewCoordinator);
+  panelDrawer = mountDrawerRenderer(drawerViewCoordinator, {
+    mutations: drawerMutations,
+    // Reorder eligibility has one owner: Panel state. The drag adapter
+    // receives it as data instead of scraping this renderer's rows.
+    itemReorderSnapshot: () => ({
+      enabled: favoriteItemReorderEnabled(),
+      collectionId: selectedCollectionId(),
+      orderedItemIds: drawerSnapshots().map((item) => item.id),
+    }),
+  });
   drawerViewCoordinator.subscribe({
     cancelDrag: () => {
       panelDrawer.cancel("source-removed");
