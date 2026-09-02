@@ -51,7 +51,10 @@ export class TauriDrawerViewSource implements DrawerViewSource {
       open: wire.open,
       selectedCollection: wire.selected_collection,
       collections: [...wire.collections],
-      activeSnapshots: [...wire.active_snapshots],
+      activeSnapshots: wire.active_snapshots.map((snapshot) => ({
+        ...snapshot,
+        origin: "favorite" as const,
+      })),
     };
   }
 

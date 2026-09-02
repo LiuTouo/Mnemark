@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clipLocator } from "./drag";
+import { clipLocator, isFavoriteItem } from "./drag";
 import type { Clip, FavoriteItem } from "./types";
 
 function clipFixture(id: string): Clip {
@@ -24,6 +24,7 @@ function clipFixture(id: string): Clip {
 
 function favoriteFixture(id: string): FavoriteItem {
   return {
+    origin: "favorite",
     id,
     kind: "Text",
     text_content: null,
@@ -48,5 +49,14 @@ describe("clipLocator", () => {
   });
   it("maps a FavoriteItem to a Drawer snapshot locator", () => {
     expect(clipLocator(favoriteFixture("hash-x"))).toEqual({ scope: "drawer", id: "hash-x" });
+  });
+});
+
+describe("isFavoriteItem", () => {
+  it("classifies a Clip as history even if it lacked the pinned field", () => {
+    // Regression: the old guard inferred favorites from `!("pinned" in item)`,
+    // so a Clip that dropped `pinned` silently became a Drawer snapshot.
+    const pinless = { ...clipFixture("clip-b"), pinned: undefined } as unknown as Clip;
+    expect(isFavoriteItem(pinless)).toBe(false);
   });
 });

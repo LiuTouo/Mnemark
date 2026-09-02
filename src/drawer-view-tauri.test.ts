@@ -30,7 +30,7 @@ describe("TauriDrawerViewSource", () => {
       open: true,
       selected_collection: "drawer-a",
       collections,
-      active_snapshots: [],
+      active_snapshots: [{ id: "hash-1", added_at: 5 }],
     }));
     const source = new TauriDrawerViewSource(dependencies(invokeCommand));
 
@@ -43,7 +43,7 @@ describe("TauriDrawerViewSource", () => {
       open: true,
       selectedCollection: "drawer-a",
       collections: [collection("drawer-a")],
-      activeSnapshots: [],
+      activeSnapshots: [{ id: "hash-1", added_at: 5, origin: "favorite" }],
     });
     expect(view.collections).not.toBe(collections);
   });

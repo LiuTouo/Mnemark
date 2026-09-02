@@ -2,9 +2,10 @@
 
 import type { Clip, ClipLocator, FavoriteItem } from "./types";
 
-/** A history Clip carries a `pinned` flag; a FavoriteItem does not. */
+/** A FavoriteItem carries the explicit `origin: "favorite"` discriminant,
+ * stamped at the single wire entrance; a history Clip never does. */
 export function isFavoriteItem(item: Clip | FavoriteItem): item is FavoriteItem {
-  return !("pinned" in item);
+  return (item as { origin?: unknown }).origin === "favorite";
 }
 
 /** Build the item-drop locator for a history Clip or a drawer FavoriteItem.

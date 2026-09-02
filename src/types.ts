@@ -25,6 +25,9 @@ export interface Clip {
 
 /** A durable favorite snapshot. Mirrors `Clip` minus `pinned`, plus membership time. */
 export interface FavoriteItem {
+  /** Explicit discriminant stamped at the single wire entrance
+   * (`drawer-view-tauri.ts`); never infer favorites from missing fields. */
+  origin: "favorite";
   id: string;
   kind: ClipKind;
   text_content: string | null;
