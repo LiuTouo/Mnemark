@@ -167,6 +167,7 @@ impl HistoryStore {
     /// same planner over the same clip set — `insert` after pushing the
     /// candidate, this over the current Clips plus the candidate. A
     /// content-hash dedup hit evicts nothing in both paths.
+    #[cfg(test)]
     pub fn preview_evictions(&self, clip: &Clip, policy: &HistoryPolicy) -> Vec<String> {
         if self
             .clips

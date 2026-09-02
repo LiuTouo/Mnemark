@@ -46,7 +46,7 @@ impl HistoryError {
 /// deletions: a newer successful delete transaction replaces it, a failed
 /// delete leaves it unchanged, and capture/pin/note never touch it.
 enum UndoEntry {
-    Single(Clip),
+    Single(Box<Clip>),
     Batch(Vec<Clip>),
 }
 
@@ -122,7 +122,7 @@ impl HistoryState {
         }
         let removed = self.store.delete(id);
         debug_assert!(removed.is_some());
-        self.undo = Some(UndoEntry::Single(clip.clone()));
+        self.undo = Some(UndoEntry::Single(Box::new(clip.clone())));
         Ok(clip)
     }
 
@@ -164,7 +164,7 @@ impl HistoryState {
     /// with recaptured content resolves identically in memory and SQLite.
     pub(crate) fn undo_delete(&mut self, id: &str) -> Result<Clip, HistoryError> {
         let clip = match self.undo.as_ref() {
-            Some(UndoEntry::Single(c)) if c.id == id => c.clone(),
+            Some(UndoEntry::Single(c)) if c.id == id => c.as_ref().clone(),
             _ => return Err(HistoryError::NothingToUndo),
         };
         let mut plan = self.store.plan_insert(vec![clip], &self.policy);
@@ -1033,9 +1033,11 @@ mod tests {
         }
         let holder = Arc::new(Mutex::new(Some(p)));
         let for_open = Arc::clone(&holder);
-        let mut config = AppConfig::default();
-        config.persist = true;
-        config.text_count_limit = 2;
+        let config = AppConfig {
+            persist: true,
+            text_count_limit: 2,
+            ..Default::default()
+        };
 
         // Never-run cleanup → due: rows evicted by the current limit leave
         // the DB in the same startup.
@@ -1057,8 +1059,10 @@ mod tests {
 
     #[test]
     fn bootstrap_open_failure_degrades_to_memory_only() {
-        let mut config = AppConfig::default();
-        config.persist = true;
+        let config = AppConfig {
+            persist: true,
+            ..Default::default()
+        };
         let (mut s, diagnostics) =
             HistoryState::bootstrap(&config, 0, false, || Err("locked".to_string()));
         assert_eq!(
@@ -1099,8 +1103,10 @@ mod tests {
         p.dump(&[clip("c1", 1)]).unwrap();
         p.record_last_cleanup(10_000_000).unwrap();
         let holder = Mutex::new(Some(p));
-        let mut config = AppConfig::default();
-        config.persist = true;
+        let config = AppConfig {
+            persist: true,
+            ..Default::default()
+        };
         let (s, diagnostics) = HistoryState::bootstrap(
             &config,
             10_000_000 + persistence::CLEANUP_INTERVAL_MS - 1,

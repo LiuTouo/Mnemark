@@ -798,13 +798,15 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            let image_payload = image_payload.lock().unwrap();
-            let image_payload = image_payload.as_ref().unwrap();
-            assert_eq!(image_payload.kind, ClipKind::Image);
-            assert_eq!(
-                image_payload.image_preview_base64.as_deref(),
-                Some("bounded-preview")
-            );
+            {
+                let image_payload = image_payload.lock().unwrap();
+                let image_payload = image_payload.as_ref().unwrap();
+                assert_eq!(image_payload.kind, ClipKind::Image);
+                assert_eq!(
+                    image_payload.image_preview_base64.as_deref(),
+                    Some("bounded-preview")
+                );
+            }
             assert_eq!(*image_events.lock().unwrap(), ["preview:[4, 5, 6]"]);
 
             let file_payload = Arc::new(Mutex::new(None));

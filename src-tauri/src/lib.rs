@@ -1293,7 +1293,6 @@ fn apply_window_zoom(window: &tauri::WebviewWindow, zoom: f64) {
 fn apply_ui_scale(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
     let zoom = ui_zoom_of(&lock(&state.config));
-    drop(state);
     for (label, window) in app.webview_windows() {
         if label == "main" {
             let _ = window.set_zoom(zoom);

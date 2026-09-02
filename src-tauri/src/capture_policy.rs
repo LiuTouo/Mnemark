@@ -471,8 +471,10 @@ mod tests {
 
     #[test]
     fn double_copy_inside_debounce_window_is_deferred_then_dropped() {
-        let mut config = AppConfig::default();
-        config.debounce_ms = 200;
+        let config = AppConfig {
+            debounce_ms: 200,
+            ..Default::default()
+        };
         let mut monitor = ClipboardMonitor::new(
             FakeSequenceReader { sequence: 1 },
             FakeCapturer {
@@ -515,8 +517,10 @@ mod tests {
 
     #[test]
     fn self_capture_keeps_original_attribution_and_dedup_identity() {
-        let mut config = AppConfig::default();
-        config.debounce_ms = 200;
+        let config = AppConfig {
+            debounce_ms: 200,
+            ..Default::default()
+        };
         let mut monitor = ClipboardMonitor::new(
             FakeSequenceReader { sequence: 1 },
             FakeCapturer {
@@ -553,8 +557,10 @@ mod tests {
 
     #[test]
     fn different_content_inside_window_is_stored_after_defer() {
-        let mut config = AppConfig::default();
-        config.debounce_ms = 200;
+        let config = AppConfig {
+            debounce_ms: 200,
+            ..Default::default()
+        };
         let mut monitor = ClipboardMonitor::new(
             FakeSequenceReader { sequence: 1 },
             FakeCapturer {
@@ -659,8 +665,10 @@ mod tests {
 
     #[test]
     fn locked_history_leaves_sequence_pending_for_retry() {
-        let mut history = FakeHistory::default();
-        history.locked_attempts = 1;
+        let history = FakeHistory {
+            locked_attempts: 1,
+            ..Default::default()
+        };
         let mut monitor = ClipboardMonitor::new(
             FakeSequenceReader { sequence: 1 },
             FakeCapturer {
@@ -696,8 +704,10 @@ mod tests {
 
     #[test]
     fn newer_clipboard_change_after_debounce_is_stored() {
-        let mut config = AppConfig::default();
-        config.debounce_ms = 200;
+        let config = AppConfig {
+            debounce_ms: 200,
+            ..Default::default()
+        };
         let mut monitor = ClipboardMonitor::new(
             FakeSequenceReader { sequence: 1 },
             FakeCapturer {
@@ -729,8 +739,10 @@ mod tests {
 
     #[test]
     fn recopy_after_debounce_refreshes_timestamp_source_and_order() {
-        let mut config = AppConfig::default();
-        config.debounce_ms = 200;
+        let config = AppConfig {
+            debounce_ms: 200,
+            ..Default::default()
+        };
         let mut monitor = ClipboardMonitor::new(
             FakeSequenceReader { sequence: 1 },
             FakeCapturer {
