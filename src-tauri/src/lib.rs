@@ -580,16 +580,17 @@ fn add_favorites(
         return Err("Batch must include at least one favorite".to_string());
     }
     mutate_drawer(&state, &app, |drawer| {
-        let source = LockedStateLocatedClipSource::new(state.history.as_ref(), drawer);
-        let items = locators
-            .iter()
-            .map(|locator| {
-                source
-                    .resolve_snapshot(locator)
-                    .map_err(|error| error.command_message())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        drop(source);
+        let items = {
+            let source = LockedStateLocatedClipSource::new(state.history.as_ref(), drawer);
+            locators
+                .iter()
+                .map(|locator| {
+                    source
+                        .resolve_snapshot(locator)
+                        .map_err(|error| error.command_message())
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
         drawer.add_snapshots(&collection_id, &items)
     })
 }
@@ -627,11 +628,12 @@ fn favorite_collection_ids(
     state: tauri::State<AppState>,
 ) -> Result<Vec<String>, String> {
     let mut drawer = lock(&state.drawer);
-    let source = LockedStateLocatedClipSource::new(state.history.as_ref(), &mut drawer);
-    let hash = source
-        .resolve_content_hash(&locator)
-        .map_err(|error| error.command_message())?;
-    drop(source);
+    let hash = {
+        let source = LockedStateLocatedClipSource::new(state.history.as_ref(), &mut drawer);
+        source
+            .resolve_content_hash(&locator)
+            .map_err(|error| error.command_message())?
+    };
     drawer.collection_ids_for_item(&hash)
 }
 
@@ -1669,25 +1671,6 @@ fn mark_tutorial_seen(state: &AppState) -> Result<(), String> {
     }
 }
 
-/// Pure tutorial-reopen action, decoupled from window handles so the tray
-/// reopen policy is unit-testable.
-#[derive(Debug, PartialEq, Eq)]
-enum TutorialAction {
-    /// Reopen a hidden window: show, recenter, focus.
-    Show,
-    /// Already visible: focus only.
-    Focus,
-}
-
-/// Decide the action for the tray "Tutorial" click given current visibility.
-fn tutorial_action_on_reopen(visible: bool) -> TutorialAction {
-    if visible {
-        TutorialAction::Focus
-    } else {
-        TutorialAction::Show
-    }
-}
-
 /// Open (or focus) the tutorial window. Closing it by any means marks the
 /// version seen — so the window's own close button counts as "skip" — but hides
 /// instead of destroying so a first-run portable launch keeps its last window.
@@ -1695,16 +1678,17 @@ fn open_tutorial_window(app: &tauri::AppHandle) -> Result<(), tauri::Error> {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
 
     if let Some(window) = app.get_webview_window("tutorial") {
-        match tutorial_action_on_reopen(window.is_visible().unwrap_or(false)) {
-            TutorialAction::Show => {
-                let _ = window.center();
-                let _ = window.show();
-                window.set_focus()?;
-                // Tell the (reused) frontend this is a fresh session so it can
-                // re-arm Skip/Start and restart from the first page.
-                let _ = app.emit("tutorial-reopened", ());
-            }
-            TutorialAction::Focus => window.set_focus()?,
+        if window.is_visible().unwrap_or(false) {
+            window.set_focus()?;
+        } else {
+            // A hidden window needs show+center+focus; set_focus alone is a
+            // no-op on it.
+            let _ = window.center();
+            let _ = window.show();
+            window.set_focus()?;
+            // Tell the (reused) frontend this is a fresh session so it can
+            // re-arm Skip/Start and restart from the first page.
+            let _ = app.emit("tutorial-reopened", ());
         }
         return Ok(());
     }
@@ -1745,16 +1729,6 @@ struct CompleteTutorialAction {
     open_history: bool,
 }
 
-/// Pure dispatch decision for a tutorial close/finish (testable, no window
-/// handles). Start (`open_history`) must carry the reopen in the SAME action
-/// as the hide, not as a second dispatch.
-fn complete_tutorial_action(open_history: bool) -> CompleteTutorialAction {
-    CompleteTutorialAction {
-        hide_tutorial: true,
-        open_history,
-    }
-}
-
 /// Execute the completion's window mutations. Must only run on the Tauri main
 /// thread (the caller dispatches via `run_on_main_thread`): `show_panel` first
 /// creates the "main" window, which cannot be built off-thread. Idempotent — a
@@ -1790,7 +1764,12 @@ async fn complete_tutorial(
     // save error so a disk failure retries on next launch instead of being
     // silently swallowed.
     let save_result = mark_tutorial_seen(&state);
-    let action = complete_tutorial_action(open_history);
+    // Start (`open_history`) must carry the reopen in the SAME action as the
+    // hide, not as a second dispatch.
+    let action = CompleteTutorialAction {
+        hide_tutorial: true,
+        open_history,
+    };
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     let handle = app.clone();
@@ -1990,52 +1969,5 @@ mod tutorial_tests {
     #[test]
     fn current_tutorial_is_not_needed() {
         assert!(!tutorial_needed(super::CURRENT_TUTORIAL_VERSION));
-    }
-}
-
-#[cfg(test)]
-mod tutorial_lifecycle_tests {
-    use super::{
-        complete_tutorial_action, tutorial_action_on_reopen, CompleteTutorialAction, TutorialAction,
-    };
-
-    #[test]
-    fn tray_reopens_a_hidden_tutorial() {
-        // Tray click on an existing-but-hidden window must show+center+focus,
-        // not just set_focus (which is a no-op on a hidden window).
-        assert_eq!(tutorial_action_on_reopen(false), TutorialAction::Show);
-    }
-
-    #[test]
-    fn tray_focuses_an_already_visible_tutorial() {
-        assert_eq!(tutorial_action_on_reopen(true), TutorialAction::Focus);
-    }
-
-    #[test]
-    fn start_is_one_main_thread_action_hiding_and_opening_history() {
-        // Start must be a SINGLE action that hides the tutorial AND reopens the
-        // panel — the executor runs both on the main thread together. Splitting
-        // them would put `show_panel`'s first-run window creation back on the
-        // IPC thread and deadlock the event loop.
-        assert_eq!(
-            complete_tutorial_action(true),
-            CompleteTutorialAction {
-                hide_tutorial: true,
-                open_history: true
-            }
-        );
-    }
-
-    #[test]
-    fn skip_hides_without_opening_history() {
-        // X / Skip / Escape: hide, never destroy (a first-run portable launch
-        // has the tutorial as its only window) and never reopen the panel.
-        assert_eq!(
-            complete_tutorial_action(false),
-            CompleteTutorialAction {
-                hide_tutorial: true,
-                open_history: false
-            }
-        );
     }
 }

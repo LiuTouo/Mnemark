@@ -1149,7 +1149,7 @@ mod tests {
     #[test]
     fn locked_source_resolves_snapshots_and_hashes_by_the_scope_identity_rule() {
         let clip = text_clip("history-id", "content-hash");
-        let history = history_state(&[clip.clone()]);
+        let history = history_state(std::slice::from_ref(&clip));
         let mut drawer = DrawerState::new(Some(FavoritesStore::from_conn(
             Connection::open_in_memory().unwrap(),
         )));
