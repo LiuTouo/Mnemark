@@ -4,6 +4,15 @@
 
 格式參考 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)，版本號遵循[語意化版本](https://semver.org/lang/zh-TW/)。
 
+## [0.7.8] - 2026-09-02
+
+### Changed
+
+- 抽屜項目的重新排序與加入收藏改由單一工作流程模組統一處理；選單與拖曳兩條路徑的失敗復原行為從此完全一致
+- 剪貼簿擷取政策（去抖、雙重複製、自我擷取歸因、持久化失敗回報）集中於獨立模組並全面納入測試
+- 設定更新改為事務式套用：任何一步失敗即反向回復，既有設定完整保留
+- Clip 的 SQLite 寫入欄位編碼與讀取路徑統一由共用編碼模組管理
+
 ## [0.7.7] - 2026-09-02
 
 ### Changed
@@ -453,6 +462,7 @@
 
 - 初始版本：剪貼簿監聽（文字／圖片／檔案路徑）、SHA-256 內容去重、容量限制與淘汰、釘選（上限 10 則、永不淘汰）、即時搜尋、Raycast 風格浮動面板（`Ctrl+Shift+V`）、貼上模擬、刪除復原、系統匣常駐、排除清單、深淺色主題跟隨系統、免安裝可攜（設定存於 exe 旁）
 
+[0.7.8]: https://github.com/LiuTouo/Mnemark/compare/v0.7.7...v0.7.8
 [0.7.7]: https://github.com/LiuTouo/Mnemark/compare/v0.7.6...v0.7.7
 [0.7.6]: https://github.com/LiuTouo/Mnemark/compare/v0.7.5...v0.7.6
 [0.7.5]: https://github.com/LiuTouo/Mnemark/compare/v0.7.4...v0.7.5
