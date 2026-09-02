@@ -1,4 +1,3 @@
-use std::fmt;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -69,25 +68,6 @@ impl From<LocatedClipError> for LocatedClipWireError {
             }
         };
         Self { code, detail }
-    }
-}
-
-impl fmt::Display for LocatedClipError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotFound => write!(f, "located_clip.not_found"),
-            Self::DrawerUnavailable => write!(f, "located_clip.drawer_unavailable"),
-            Self::HistoryPersistence(detail) => {
-                write!(f, "located_clip.history_persistence: {detail}")
-            }
-            Self::MissingContent => write!(f, "located_clip.missing_content"),
-            Self::ClipboardWrite(detail) => write!(f, "located_clip.clipboard_write: {detail}"),
-            Self::PreviewDisabled => write!(f, "located_clip.preview_disabled"),
-            Self::PreviewPublication(detail) => {
-                write!(f, "located_clip.preview_publication: {detail}")
-            }
-            Self::DrawerMutation(detail) => write!(f, "located_clip.drawer_mutation: {detail}"),
-        }
     }
 }
 
