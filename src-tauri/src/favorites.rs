@@ -10,8 +10,8 @@ use std::collections::HashSet;
 use rusqlite::{params, Connection};
 
 use crate::clip_encoding::{
-    column_exists, decode_shared_columns, ensure_column, file_paths_to_json, kind_to_str,
-    SHARED_COLUMNS,
+    column_exists, decode_shared_columns, ensure_column, with_shared_clip_column_params,
+    SHARED_COLUMNS, SHARED_COLUMN_COUNT, SHARED_PARAMETER_MARKERS,
 };
 use crate::models::{BatchMutationResult, CollectionSummary, FavoriteItem};
 
@@ -179,13 +179,11 @@ fn compact_item_sort_orders(conn: &Connection, collection_id: &str) -> Result<()
 /// Insert-or-refresh one snapshot, deduped by content hash so the same content
 /// is shared across every collection that references it.
 fn upsert_favorite_item(conn: &Connection, item: &FavoriteItem) -> Result<(), String> {
-    let file_paths_json = file_paths_to_json(item.file_paths.as_deref())?;
-    conn.execute(
-        "INSERT INTO favorite_items (content_hash, kind, text_content, image_data,
-                                     thumbnail_base64, preview, truncated, source_exe,
-                                     source_title, source_icon, captured_at, byte_size,
-                                     file_paths_json, note)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+    with_shared_clip_column_params(item, &[], |parameters| {
+        conn.execute(
+            &format!(
+                "INSERT INTO favorite_items ({SHARED_COLUMNS})
+         VALUES ({SHARED_PARAMETER_MARKERS})
          ON CONFLICT(content_hash) DO UPDATE SET
             kind = excluded.kind,
             text_content = excluded.text_content,
@@ -199,25 +197,12 @@ fn upsert_favorite_item(conn: &Connection, item: &FavoriteItem) -> Result<(), St
             captured_at = excluded.captured_at,
             byte_size = excluded.byte_size,
             file_paths_json = excluded.file_paths_json,
-            note = COALESCE(excluded.note, favorite_items.note)",
-        params![
-            item.content_hash,
-            kind_to_str(&item.kind),
-            item.text_content,
-            item.image_data,
-            item.thumbnail_base64,
-            item.preview,
-            item.truncated as i64,
-            item.source_exe,
-            item.source_title,
-            item.source_icon,
-            item.captured_at as i64,
-            item.byte_size as i64,
-            file_paths_json,
-            item.note,
-        ],
-    )
-    .map_err(|e| format!("Failed to persist favorite: {}", e))?;
+            note = COALESCE(excluded.note, favorite_items.note)"
+            ),
+            rusqlite::params_from_iter(parameters.iter().copied()),
+        )
+        .map_err(|e| format!("Failed to persist favorite: {}", e))
+    })?;
     Ok(())
 }
 
@@ -249,7 +234,7 @@ fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<FavoriteItem> {
 /// column selected by `list_items` (the first column after the shared span).
 fn row_to_item_with_added(row: &rusqlite::Row<'_>) -> rusqlite::Result<FavoriteItem> {
     let mut item = row_to_item(row)?;
-    item.added_at = Some(row.get::<_, i64>(14)? as u64);
+    item.added_at = Some(row.get::<_, i64>(SHARED_COLUMN_COUNT)? as u64);
     Ok(item)
 }
 
@@ -267,6 +252,20 @@ impl FavoritesStore {
     pub(crate) fn from_conn(conn: Connection) -> Self {
         init_schema(&conn).unwrap();
         Self { conn }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shared_row_image_for_test(
+        &self,
+        content_hash: &str,
+    ) -> Vec<rusqlite::types::Value> {
+        self.conn
+            .query_row(
+                &format!("SELECT {SHARED_COLUMNS} FROM favorite_items WHERE content_hash = ?1"),
+                params![content_hash],
+                crate::clip_encoding::shared_row_image,
+            )
+            .unwrap()
     }
 
     fn summary_for(&self, id: &str) -> Result<CollectionSummary, String> {

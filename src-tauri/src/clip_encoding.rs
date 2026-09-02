@@ -5,9 +5,12 @@
 //! (primary keys, pinned, upsert conflict clauses, membership) stay in the
 //! adapters; this module holds only encode/decode/migrate primitives.
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, ToSql};
 
-use crate::models::ClipKind;
+#[cfg(test)]
+use rusqlite::types::Value;
+
+use crate::models::{Clip, ClipKind, FavoriteItem};
 
 /// Stored-string form of a [`ClipKind`].
 pub(crate) fn kind_to_str(kind: &ClipKind) -> &'static str {
@@ -53,6 +56,87 @@ fn file_paths_from_json(file_paths_json: Option<String>) -> Option<Vec<String>> 
 pub(crate) const SHARED_COLUMNS: &str = "kind, text_content, image_data, thumbnail_base64,
         content_hash, preview, note, truncated, source_exe, source_title, source_icon,
         captured_at, byte_size, file_paths_json";
+pub(crate) const SHARED_COLUMN_COUNT: usize = 14;
+
+/// Positional parameters matching [`SHARED_COLUMNS`]. Adapters append their
+/// own fields after this stable shared span.
+pub(crate) const SHARED_PARAMETER_MARKERS: &str = "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
+
+macro_rules! bind_shared_clip_fields {
+    ($clip:expr, $trailing:expr, $operation:expr) => {{
+        let file_paths_json = file_paths_to_json($clip.file_paths.as_deref())?;
+        let kind = kind_to_str(&$clip.kind);
+        let truncated = $clip.truncated as i64;
+        let captured_at = $clip.captured_at as i64;
+        let byte_size = $clip.byte_size as i64;
+        let mut parameters: Vec<&dyn ToSql> = vec![
+            &kind,
+            &$clip.text_content,
+            &$clip.image_data,
+            &$clip.thumbnail_base64,
+            &$clip.content_hash,
+            &$clip.preview,
+            &$clip.note,
+            &truncated,
+            &$clip.source_exe,
+            &$clip.source_title,
+            &$clip.source_icon,
+            &captured_at,
+            &byte_size,
+            &file_paths_json,
+        ];
+        parameters.extend_from_slice($trailing);
+        $operation(&parameters)
+    }};
+}
+
+/// A Clip-shaped model that can bind the shared SQLite column span. The field
+/// mapping stays inside this module so adapters never enumerate it.
+pub(crate) trait EncodesSharedClipColumns {
+    fn with_shared_clip_column_params<T>(
+        &self,
+        trailing: &[&dyn ToSql],
+        operation: impl FnOnce(&[&dyn ToSql]) -> Result<T, String>,
+    ) -> Result<T, String>;
+}
+
+impl EncodesSharedClipColumns for Clip {
+    fn with_shared_clip_column_params<T>(
+        &self,
+        trailing: &[&dyn ToSql],
+        operation: impl FnOnce(&[&dyn ToSql]) -> Result<T, String>,
+    ) -> Result<T, String> {
+        bind_shared_clip_fields!(self, trailing, operation)
+    }
+}
+
+impl EncodesSharedClipColumns for FavoriteItem {
+    fn with_shared_clip_column_params<T>(
+        &self,
+        trailing: &[&dyn ToSql],
+        operation: impl FnOnce(&[&dyn ToSql]) -> Result<T, String>,
+    ) -> Result<T, String> {
+        bind_shared_clip_fields!(self, trailing, operation)
+    }
+}
+
+/// Bind [`SHARED_COLUMNS`] in canonical order for either persistent Clip
+/// role, followed by any adapter-specific parameters. The callback keeps all
+/// values borrowed during statement execution; raw image bytes are not cloned.
+pub(crate) fn with_shared_clip_column_params<T>(
+    clip: &impl EncodesSharedClipColumns,
+    trailing: &[&dyn ToSql],
+    operation: impl FnOnce(&[&dyn ToSql]) -> Result<T, String>,
+) -> Result<T, String> {
+    clip.with_shared_clip_column_params(trailing, operation)
+}
+
+#[cfg(test)]
+pub(crate) fn shared_row_image(row: &rusqlite::Row<'_>) -> rusqlite::Result<Vec<Value>> {
+    (0..SHARED_COLUMN_COUNT)
+        .map(|index| row.get(index))
+        .collect()
+}
 
 /// The decoded common column span (see [`SHARED_COLUMNS`]) — the in-memory
 /// representation each adapter embeds into its own row type.
@@ -134,6 +218,77 @@ pub(crate) fn ensure_column(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::favorites::FavoritesStore;
+    use crate::models::{Clip, FavoriteItem};
+    use crate::persistence::Persistence;
+
+    fn clip(kind: ClipKind) -> Clip {
+        let (text_content, file_paths, image_data, thumbnail_base64, truncated, byte_size) =
+            match kind {
+                ClipKind::Text => (
+                    Some("truncated text".to_string()),
+                    None,
+                    None,
+                    None,
+                    true,
+                    4_096,
+                ),
+                ClipKind::Image => (
+                    None,
+                    None,
+                    Some(vec![0, 1, 2, 255]),
+                    Some("data:image/jpeg;base64,dGh1bWI=".to_string()),
+                    false,
+                    4,
+                ),
+                ClipKind::FilePaths => (
+                    Some("C:\\資料\\one.txt\r\nC:\\two;final.pdf".to_string()),
+                    Some(vec![
+                        "C:\\資料\\one.txt".to_string(),
+                        "C:\\two;final.pdf".to_string(),
+                    ]),
+                    None,
+                    None,
+                    false,
+                    52,
+                ),
+            };
+        Clip {
+            id: "history-id".to_string(),
+            kind,
+            text_content,
+            file_paths,
+            image_data,
+            thumbnail_base64,
+            content_hash: "content-hash".to_string(),
+            preview: "preview".to_string(),
+            note: Some("note".to_string()),
+            truncated,
+            source_exe: "source.exe".to_string(),
+            source_title: "Source title".to_string(),
+            source_icon: Some("source-icon".to_string()),
+            captured_at: 1_725_000_000_123,
+            pinned: true,
+            byte_size,
+        }
+    }
+
+    fn assert_shared_columns_match_clip(actual: SharedClipColumns, expected: &Clip) {
+        assert_eq!(actual.kind, expected.kind);
+        assert_eq!(actual.text_content, expected.text_content);
+        assert_eq!(actual.file_paths, expected.file_paths);
+        assert_eq!(actual.image_data, expected.image_data);
+        assert_eq!(actual.thumbnail_base64, expected.thumbnail_base64);
+        assert_eq!(actual.content_hash, expected.content_hash);
+        assert_eq!(actual.preview, expected.preview);
+        assert_eq!(actual.note, expected.note);
+        assert_eq!(actual.truncated, expected.truncated);
+        assert_eq!(actual.source_exe, expected.source_exe);
+        assert_eq!(actual.source_title, expected.source_title);
+        assert_eq!(actual.source_icon, expected.source_icon);
+        assert_eq!(actual.captured_at, expected.captured_at);
+        assert_eq!(actual.byte_size, expected.byte_size);
+    }
 
     #[test]
     fn kind_round_trips_all_variants() {
@@ -156,7 +311,10 @@ mod tests {
             "C:\\tmp\\資料\\繁體檔名.txt".to_string(),
         ];
         let json = file_paths_to_json(Some(&paths)).unwrap();
-        assert_eq!(file_paths_from_json(json).as_deref(), Some(paths.as_slice()));
+        assert_eq!(
+            file_paths_from_json(json).as_deref(),
+            Some(paths.as_slice())
+        );
     }
 
     #[test]
@@ -185,7 +343,9 @@ mod tests {
         // not add the column twice.
         ensure_column(&conn, "t", "note", "TEXT").unwrap();
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM pragma_table_info('t')", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM pragma_table_info('t')", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(count, 2);
     }
@@ -198,15 +358,13 @@ mod tests {
     #[test]
     fn shared_columns_order_and_decode_offsets_stay_locked() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            &format!(
-                "CREATE TABLE t ({SHARED_COLUMNS});
+        conn.execute_batch(&format!(
+            "CREATE TABLE t ({SHARED_COLUMNS});
                  INSERT INTO t VALUES (
                     'Image', 'text', x'010203', 'thumb', 'hash', 'prev', 'note',
                     1, 'exe', 'title', 'icon', 123, 456, '[\"C:\\\\a.txt\",\"b;c.txt\"]'
                  );"
-            ),
-        )
+        ))
         .unwrap();
         let shared = conn
             .query_row(&format!("SELECT {SHARED_COLUMNS} FROM t"), [], |row| {
@@ -228,12 +386,61 @@ mod tests {
         assert_eq!(shared.byte_size, 456);
         assert_eq!(
             shared.file_paths.as_deref(),
-            Some(
-                &[
-                    "C:\\a.txt".to_string(),
-                    "b;c.txt".to_string(),
-                ][..]
-            )
+            Some(&["C:\\a.txt".to_string(), "b;c.txt".to_string(),][..])
         );
+    }
+
+    #[test]
+    fn shared_write_encoding_round_trips_all_clip_kinds() {
+        assert_eq!(SHARED_COLUMNS.split(',').count(), SHARED_COLUMN_COUNT);
+        assert_eq!(
+            SHARED_PARAMETER_MARKERS.split(',').count(),
+            SHARED_COLUMN_COUNT
+        );
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&format!("CREATE TABLE t ({SHARED_COLUMNS});"))
+            .unwrap();
+
+        for kind in [ClipKind::Text, ClipKind::Image, ClipKind::FilePaths] {
+            let expected = clip(kind);
+            conn.execute("DELETE FROM t", []).unwrap();
+            with_shared_clip_column_params(&expected, &[], |parameters| {
+                conn.execute(
+                    &format!(
+                        "INSERT INTO t ({SHARED_COLUMNS}) VALUES ({SHARED_PARAMETER_MARKERS})"
+                    ),
+                    rusqlite::params_from_iter(parameters.iter().copied()),
+                )
+                .map_err(|error| error.to_string())
+            })
+            .unwrap();
+
+            let actual = conn
+                .query_row(&format!("SELECT {SHARED_COLUMNS} FROM t"), [], |row| {
+                    decode_shared_columns(row, 0)
+                })
+                .unwrap();
+            assert_shared_columns_match_clip(actual, &expected);
+        }
+    }
+
+    #[test]
+    fn history_and_drawer_store_identical_shared_row_images() {
+        for kind in [ClipKind::Text, ClipKind::Image, ClipKind::FilePaths] {
+            let expected = clip(kind);
+            let mut history = Persistence::in_memory_for_test();
+            history.dump(std::slice::from_ref(&expected)).unwrap();
+
+            let mut drawer = FavoritesStore::from_conn(Connection::open_in_memory().unwrap());
+            let collection = drawer.create_collection("Parity").unwrap();
+            drawer
+                .add_favorite(&collection.id, &FavoriteItem::from(expected.clone()))
+                .unwrap();
+
+            assert_eq!(
+                history.shared_row_image_for_test(&expected.content_hash),
+                drawer.shared_row_image_for_test(&expected.content_hash),
+            );
+        }
     }
 }

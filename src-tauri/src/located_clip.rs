@@ -71,18 +71,18 @@ impl From<LocatedClipError> for LocatedClipWireError {
     }
 }
 
-pub(crate) struct LocatedClip {
-    id: String,
-    kind: ClipKind,
-    text_content: Option<String>,
-    file_paths: Option<Vec<String>>,
-    image_data: Option<Vec<u8>>,
-    note: Option<String>,
-    truncated: bool,
-    source_exe: String,
-    source_title: String,
-    captured_at: u64,
-    byte_size: u64,
+pub(crate) enum ResolvedClip {
+    History(Clip),
+    Drawer(FavoriteItem),
+}
+
+macro_rules! with_resolved_clip {
+    ($resolved:expr, |$clip:ident| $body:expr) => {
+        match $resolved {
+            ResolvedClip::History($clip) => $body,
+            ResolvedClip::Drawer($clip) => $body,
+        }
+    };
 }
 
 pub(crate) struct NoteCommit {
@@ -90,44 +90,20 @@ pub(crate) struct NoteCommit {
     pub(crate) drawer_generation: Option<u64>,
 }
 
-impl From<Clip> for LocatedClip {
+impl From<Clip> for ResolvedClip {
     fn from(clip: Clip) -> Self {
-        Self {
-            id: clip.id,
-            kind: clip.kind,
-            text_content: clip.text_content,
-            file_paths: clip.file_paths,
-            image_data: clip.image_data,
-            note: clip.note,
-            truncated: clip.truncated,
-            source_exe: clip.source_exe,
-            source_title: clip.source_title,
-            captured_at: clip.captured_at,
-            byte_size: clip.byte_size,
-        }
+        Self::History(clip)
     }
 }
 
-impl From<FavoriteItem> for LocatedClip {
+impl From<FavoriteItem> for ResolvedClip {
     fn from(item: FavoriteItem) -> Self {
-        Self {
-            id: item.id,
-            kind: item.kind,
-            text_content: item.text_content,
-            file_paths: item.file_paths,
-            image_data: item.image_data,
-            note: item.note,
-            truncated: item.truncated,
-            source_exe: item.source_exe,
-            source_title: item.source_title,
-            captured_at: item.captured_at,
-            byte_size: item.byte_size,
-        }
+        Self::Drawer(item)
     }
 }
 
 pub(crate) trait LocatedClipSource {
-    fn resolve(&self, locator: &ClipLocator) -> Result<LocatedClip, LocatedClipError>;
+    fn resolve(&self, locator: &ClipLocator) -> Result<ResolvedClip, LocatedClipError>;
     fn set_note(
         &self,
         locator: &ClipLocator,
@@ -142,10 +118,10 @@ struct HistoryAdapter<'a> {
 }
 
 impl LocatedClipSource for HistoryAdapter<'_> {
-    fn resolve(&self, locator: &ClipLocator) -> Result<LocatedClip, LocatedClipError> {
+    fn resolve(&self, locator: &ClipLocator) -> Result<ResolvedClip, LocatedClipError> {
         lock(self.history)
             .clip(&locator.id)
-            .map(LocatedClip::from)
+            .map(ResolvedClip::from)
             .ok_or(LocatedClipError::NotFound)
     }
 
@@ -174,7 +150,7 @@ struct DrawerSnapshotAdapter<'a> {
 }
 
 impl LocatedClipSource for DrawerSnapshotAdapter<'_> {
-    fn resolve(&self, locator: &ClipLocator) -> Result<LocatedClip, LocatedClipError> {
+    fn resolve(&self, locator: &ClipLocator) -> Result<ResolvedClip, LocatedClipError> {
         let drawer = lock(self.drawer);
         if !drawer.has_favorites_store() {
             return Err(LocatedClipError::DrawerUnavailable);
@@ -182,7 +158,7 @@ impl LocatedClipSource for DrawerSnapshotAdapter<'_> {
         drawer
             .get_item(&locator.id)
             .map_err(LocatedClipError::DrawerMutation)?
-            .map(LocatedClip::from)
+            .map(ResolvedClip::from)
             .ok_or(LocatedClipError::NotFound)
     }
 
@@ -227,7 +203,7 @@ impl<'a> StateLocatedClipSource<'a> {
 }
 
 impl LocatedClipSource for StateLocatedClipSource<'_> {
-    fn resolve(&self, locator: &ClipLocator) -> Result<LocatedClip, LocatedClipError> {
+    fn resolve(&self, locator: &ClipLocator) -> Result<ResolvedClip, LocatedClipError> {
         match locator.scope {
             ClipScope::History => self.history.resolve(locator),
             ClipScope::Drawer => self.drawer.resolve(locator),
@@ -336,35 +312,36 @@ where
             return Err(LocatedClipError::PreviewDisabled);
         }
         let mine = generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let clip = self.source.resolve(locator)?;
-        let image_preview_base64 = if clip.kind == ClipKind::Image {
-            Some(
-                self.platform
-                    .image_preview(
-                        clip.image_data
-                            .as_deref()
-                            .ok_or(LocatedClipError::MissingContent)?,
-                    )
-                    .map_err(LocatedClipError::PreviewPublication)?,
-            )
-        } else {
-            None
-        };
-        let payload = PreviewPayload {
-            id: clip.id,
-            kind: clip.kind,
-            text_content: clip.text_content,
-            image_preview_base64,
-            note: clip.note,
-            truncated: clip.truncated,
-            byte_size: clip.byte_size,
-            captured_at: clip.captured_at,
-            source_exe: clip.source_exe,
-            source_title: clip.source_title,
-        };
-        publish(mine, payload)
-            .await
-            .map_err(LocatedClipError::PreviewPublication)
+        with_resolved_clip!(self.source.resolve(locator)?, |clip| {
+            let image_preview_base64 = if clip.kind == ClipKind::Image {
+                Some(
+                    self.platform
+                        .image_preview(
+                            clip.image_data
+                                .as_deref()
+                                .ok_or(LocatedClipError::MissingContent)?,
+                        )
+                        .map_err(LocatedClipError::PreviewPublication)?,
+                )
+            } else {
+                None
+            };
+            let payload = PreviewPayload {
+                id: clip.id,
+                kind: clip.kind,
+                text_content: clip.text_content,
+                image_preview_base64,
+                note: clip.note,
+                truncated: clip.truncated,
+                byte_size: clip.byte_size,
+                captured_at: clip.captured_at,
+                source_exe: clip.source_exe,
+                source_title: clip.source_title,
+            };
+            publish(mine, payload)
+                .await
+                .map_err(LocatedClipError::PreviewPublication)
+        })
     }
 
     pub(crate) fn set_note(
@@ -381,51 +358,52 @@ where
     }
 
     fn write(&self, locator: &ClipLocator) -> Result<CopyOutcome, LocatedClipError> {
-        let clip = self.source.resolve(locator)?;
-        match clip.kind {
-            ClipKind::Text => self
-                .platform
-                .write_text(clip.text_content.as_deref().unwrap_or(""))
-                .map(|_| CopyOutcome::Copied)
-                .map_err(LocatedClipError::ClipboardWrite),
-            ClipKind::Image => self
-                .platform
-                .write_image(
-                    clip.image_data
-                        .as_deref()
-                        .ok_or(LocatedClipError::MissingContent)?,
-                )
-                .map(|_| CopyOutcome::Copied)
-                .map_err(LocatedClipError::ClipboardWrite),
-            ClipKind::FilePaths => {
-                let text = clip.text_content.as_deref().unwrap_or("");
-                if self.paste_files_as_files {
-                    let paths = clip
-                        .file_paths
-                        .unwrap_or_else(|| crate::clipboard::split_legacy_file_text(text));
-                    let existing = paths
-                        .into_iter()
-                        .filter(|path| self.platform.path_exists(path))
-                        .collect::<Vec<_>>();
-                    if existing.is_empty() {
-                        self.platform
-                            .write_text(text)
-                            .map(|_| CopyOutcome::MissingFilesTextFallback)
-                            .map_err(LocatedClipError::ClipboardWrite)
+        with_resolved_clip!(self.source.resolve(locator)?, |clip| {
+            match clip.kind {
+                ClipKind::Text => self
+                    .platform
+                    .write_text(clip.text_content.as_deref().unwrap_or(""))
+                    .map(|_| CopyOutcome::Copied)
+                    .map_err(LocatedClipError::ClipboardWrite),
+                ClipKind::Image => self
+                    .platform
+                    .write_image(
+                        clip.image_data
+                            .as_deref()
+                            .ok_or(LocatedClipError::MissingContent)?,
+                    )
+                    .map(|_| CopyOutcome::Copied)
+                    .map_err(LocatedClipError::ClipboardWrite),
+                ClipKind::FilePaths => {
+                    let text = clip.text_content.as_deref().unwrap_or("");
+                    if self.paste_files_as_files {
+                        let paths = clip
+                            .file_paths
+                            .unwrap_or_else(|| crate::clipboard::split_legacy_file_text(text));
+                        let existing = paths
+                            .into_iter()
+                            .filter(|path| self.platform.path_exists(path))
+                            .collect::<Vec<_>>();
+                        if existing.is_empty() {
+                            self.platform
+                                .write_text(text)
+                                .map(|_| CopyOutcome::MissingFilesTextFallback)
+                                .map_err(LocatedClipError::ClipboardWrite)
+                        } else {
+                            self.platform
+                                .write_files(&existing)
+                                .map(|_| CopyOutcome::Copied)
+                                .map_err(LocatedClipError::ClipboardWrite)
+                        }
                     } else {
                         self.platform
-                            .write_files(&existing)
+                            .write_text(text)
                             .map(|_| CopyOutcome::Copied)
                             .map_err(LocatedClipError::ClipboardWrite)
                     }
-                } else {
-                    self.platform
-                        .write_text(text)
-                        .map(|_| CopyOutcome::Copied)
-                        .map_err(LocatedClipError::ClipboardWrite)
                 }
             }
-        }
+        })
     }
 }
 
@@ -437,8 +415,8 @@ mod tests {
     use rusqlite::Connection;
 
     use super::{
-        CopyOutcome, LocatedClip, LocatedClipError, LocatedClipModule, LocatedClipPlatform,
-        LocatedClipSource, LocatedClipWireError, NoteCommit, StateLocatedClipSource,
+        CopyOutcome, LocatedClipError, LocatedClipModule, LocatedClipPlatform, LocatedClipSource,
+        LocatedClipWireError, NoteCommit, ResolvedClip, StateLocatedClipSource,
     };
     use crate::drawer::DrawerState;
     use crate::favorites::FavoritesStore;
@@ -459,20 +437,12 @@ mod tests {
     struct MemorySource;
 
     impl LocatedClipSource for MemorySource {
-        fn resolve(&self, locator: &ClipLocator) -> Result<LocatedClip, LocatedClipError> {
-            Ok(LocatedClip {
-                id: locator.id.clone(),
-                kind: ClipKind::Text,
-                text_content: Some("hello".to_string()),
-                file_paths: None,
-                image_data: None,
-                note: None,
-                truncated: false,
-                source_exe: "test.exe".to_string(),
-                source_title: "Test".to_string(),
-                captured_at: 1,
-                byte_size: 5,
-            })
+        fn resolve(&self, locator: &ClipLocator) -> Result<ResolvedClip, LocatedClipError> {
+            let mut clip = text_clip(&locator.id, "memory-text");
+            clip.text_content = Some("hello".to_string());
+            clip.preview = "hello".to_string();
+            clip.byte_size = 5;
+            Ok(ResolvedClip::History(clip))
         }
 
         fn set_note(
@@ -523,20 +493,10 @@ mod tests {
     struct ImageSource(Option<Vec<u8>>);
 
     impl LocatedClipSource for ImageSource {
-        fn resolve(&self, locator: &ClipLocator) -> Result<LocatedClip, LocatedClipError> {
-            Ok(LocatedClip {
-                id: locator.id.clone(),
-                kind: ClipKind::Image,
-                text_content: None,
-                file_paths: None,
-                image_data: self.0.clone(),
-                note: None,
-                truncated: false,
-                source_exe: "test.exe".to_string(),
-                source_title: "Test".to_string(),
-                captured_at: 1,
-                byte_size: 3,
-            })
+        fn resolve(&self, locator: &ClipLocator) -> Result<ResolvedClip, LocatedClipError> {
+            let mut clip = image_clip(&locator.id, "memory-image");
+            clip.image_data = self.0.clone();
+            Ok(ResolvedClip::History(clip))
         }
 
         fn set_note(
@@ -556,7 +516,7 @@ mod tests {
     struct NoteSource(Arc<Mutex<Vec<String>>>);
 
     impl LocatedClipSource for NoteSource {
-        fn resolve(&self, _locator: &ClipLocator) -> Result<LocatedClip, LocatedClipError> {
+        fn resolve(&self, _locator: &ClipLocator) -> Result<ResolvedClip, LocatedClipError> {
             unreachable!()
         }
 
@@ -577,20 +537,12 @@ mod tests {
     }
 
     impl LocatedClipSource for FileSource {
-        fn resolve(&self, locator: &ClipLocator) -> Result<LocatedClip, LocatedClipError> {
-            Ok(LocatedClip {
-                id: locator.id.clone(),
-                kind: ClipKind::FilePaths,
-                text_content: Some(self.text.clone()),
-                file_paths: self.paths.clone(),
-                image_data: None,
-                note: None,
-                truncated: false,
-                source_exe: "test.exe".to_string(),
-                source_title: "Test".to_string(),
-                captured_at: 1,
-                byte_size: self.text.len() as u64,
-            })
+        fn resolve(&self, locator: &ClipLocator) -> Result<ResolvedClip, LocatedClipError> {
+            let mut clip = file_clip(&locator.id, "memory-files");
+            clip.text_content = Some(self.text.clone());
+            clip.file_paths = self.paths.clone();
+            clip.byte_size = self.text.len() as u64;
+            Ok(ResolvedClip::History(clip))
         }
 
         fn set_note(

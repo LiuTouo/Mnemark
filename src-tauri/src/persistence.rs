@@ -7,7 +7,8 @@ use std::collections::HashSet;
 use rusqlite::{params, Connection};
 
 use crate::clip_encoding::{
-    decode_shared_columns, ensure_column, file_paths_to_json, kind_to_str, SHARED_COLUMNS,
+    decode_shared_columns, ensure_column, with_shared_clip_column_params, SHARED_COLUMNS,
+    SHARED_COLUMN_COUNT, SHARED_PARAMETER_MARKERS,
 };
 use crate::models::Clip;
 
@@ -75,6 +76,20 @@ impl Persistence {
         let conn = Connection::open_in_memory().unwrap();
         init_schema(&conn).unwrap();
         Self { conn }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shared_row_image_for_test(
+        &self,
+        content_hash: &str,
+    ) -> Vec<rusqlite::types::Value> {
+        self.conn
+            .query_row(
+                &format!("SELECT {SHARED_COLUMNS} FROM clips WHERE content_hash = ?1"),
+                params![content_hash],
+                crate::clip_encoding::shared_row_image,
+            )
+            .unwrap()
     }
 
     /// Fault injection: schema initialized, then the clips table dropped, so
@@ -154,7 +169,7 @@ impl Persistence {
                 let shared = decode_shared_columns(row, 1)?;
                 Ok(Clip {
                     id: row.get(0)?,
-                    pinned: row.get::<_, i64>(15)? != 0,
+                    pinned: row.get::<_, i64>(1 + SHARED_COLUMN_COUNT)? != 0,
                     kind: shared.kind,
                     text_content: shared.text_content,
                     file_paths: shared.file_paths,
@@ -361,37 +376,22 @@ pub fn reconcile_if_due(
 /// The upsert behind captures/restores and dump, written against
 /// &Connection so a transaction (which derefs to Connection) can use it.
 fn upsert_on(conn: &Connection, clip: &Clip) -> Result<(), String> {
-    let file_paths_json = file_paths_to_json(clip.file_paths.as_deref())?;
-    conn.execute(
-        "INSERT INTO clips (id, kind, text_content, image_data, thumbnail_base64,
-                            content_hash, preview, truncated, source_exe, source_title,
-                            source_icon, captured_at, pinned, byte_size, file_paths_json, note)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+    let pinned = clip.pinned as i64;
+    with_shared_clip_column_params(clip, &[&clip.id, &pinned], |parameters| {
+        conn.execute(
+            &format!(
+                "INSERT INTO clips ({SHARED_COLUMNS}, id, pinned)
+         VALUES ({SHARED_PARAMETER_MARKERS}, ?, ?)
          ON CONFLICT(content_hash) DO UPDATE SET
             captured_at = excluded.captured_at,
             source_exe = excluded.source_exe,
             source_title = excluded.source_title,
-            file_paths_json = excluded.file_paths_json",
-        params![
-            clip.id,
-            kind_to_str(&clip.kind),
-            clip.text_content,
-            clip.image_data,
-            clip.thumbnail_base64,
-            clip.content_hash,
-            clip.preview,
-            clip.truncated as i64,
-            clip.source_exe,
-            clip.source_title,
-            clip.source_icon,
-            clip.captured_at as i64,
-            clip.pinned as i64,
-            clip.byte_size as i64,
-            file_paths_json,
-            clip.note,
-        ],
-    )
-    .map_err(|e| format!("Failed to persist clip: {}", e))?;
+            file_paths_json = excluded.file_paths_json"
+            ),
+            rusqlite::params_from_iter(parameters.iter().copied()),
+        )
+        .map_err(|e| format!("Failed to persist clip: {}", e))
+    })?;
     Ok(())
 }
 
