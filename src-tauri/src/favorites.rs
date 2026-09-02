@@ -304,7 +304,7 @@ impl FavoritesStore {
             return Err("A collection with that name already exists".to_string());
         }
         let created_at = crate::now_ms();
-        let id = crate::models::Clip::new_id(&name_key, created_at);
+        let id = crate::models::content_id(&name_key, created_at);
         let sort_order: i64 = self
             .conn
             .query_row(

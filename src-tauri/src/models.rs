@@ -1,5 +1,16 @@
 use serde::{Deserialize, Serialize};
 
+/// Content-addressed ID derivation shared by Clip and Collection rows:
+/// SHA-256 over (key bytes, big-endian timestamp), hex-truncated to 16
+/// chars. Must stay byte-stable — persisted rows already carry these ids.
+pub fn content_id(key: &str, captured_at: u64) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(key.as_bytes());
+    hasher.update(captured_at.to_be_bytes());
+    hex::encode(hasher.finalize())[..16].to_string()
+}
+
 /// A unique clipboard entry.
 /// Serialize-only: the frontend receives Clips but never sends them back
 /// (commands take ids or plain text), so no Deserialize derive.
@@ -339,11 +350,7 @@ impl PanelShortcut {
 impl Clip {
     /// Generate a new unique ID based on content hash and timestamp.
     pub fn new_id(content_hash: &str, captured_at: u64) -> String {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(content_hash.as_bytes());
-        hasher.update(captured_at.to_be_bytes());
-        hex::encode(hasher.finalize())[..16].to_string()
+        content_id(content_hash, captured_at)
     }
 
     /// Clone everything except the raw image bytes (built field-by-field —
@@ -581,6 +588,16 @@ mod backward_compat_tests {
         assert!(!cfg.remember_history_filter);
         assert_eq!(cfg.ui_opacity_percent, 99);
         assert_eq!(cfg.ui_scale_percent, 100);
+    }
+
+    #[test]
+    fn content_id_matches_clip_new_id_byte_for_byte() {
+        // Collection ids minted via the neutral helper must stay identical to
+        // ids minted through Clip::new_id — persisted rows depend on it.
+        assert_eq!(
+            super::content_id("key", 42),
+            crate::models::Clip::new_id("key", 42)
+        );
     }
 
     #[test]
