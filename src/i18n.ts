@@ -83,6 +83,7 @@ const I18N: Record<string, Record<string, string>> = {
     noteSaved: "備註已儲存",
     clipNotFound: "項目已不存在",
     clipContentMissing: "項目內容不完整，無法執行此操作",
+    deferredContentExpired: "此項目為延遲內容，剪貼簿已變更，內容已無法擷取",
     historyPersistenceFailed: "歷史備註無法儲存",
     previewDisabledMessage: "預覽功能已停用",
     previewPublicationFailed: "無法更新預覽",
@@ -290,6 +291,7 @@ const I18N: Record<string, Record<string, string>> = {
     noteSaved: "Note saved",
     clipNotFound: "This item no longer exists",
     clipContentMissing: "This item's content is incomplete and cannot be used",
+    deferredContentExpired: "This item's content was deferred and the clipboard has since changed, so it can no longer be fetched",
     historyPersistenceFailed: "The history note could not be saved",
     previewDisabledMessage: "Preview is disabled",
     previewPublicationFailed: "Preview could not be updated",
@@ -449,6 +451,7 @@ export function localizeBackendError(msg: string): string {
   if (msg.includes("located_clip.drawer_unavailable")) return t("drawerUnavailable");
   if (msg.includes("located_clip.history_persistence")) return t("historyPersistenceFailed");
   if (msg.includes("located_clip.missing_content")) return t("clipContentMissing");
+  if (msg.includes("located_clip.deferred_expired")) return t("deferredContentExpired");
   if (msg.includes("located_clip.drawer_mutation")) return t("drawerActionFailed");
   if (msg.includes("Maximum") && msg.includes("pinned")) return t("pinLimitReached");
   if (msg.includes("Nothing to undo")) return t("nothingToUndo");
@@ -470,6 +473,7 @@ export function localizeLocatedClipError(error: unknown, fallbackKey?: string): 
     case "drawer_unavailable": return t("drawerUnavailable");
     case "history_persistence": return t("historyPersistenceFailed");
     case "missing_content": return t("clipContentMissing");
+    case "deferred_expired": return t("deferredContentExpired");
     case "clipboard_write": return t(fallbackKey || "copyFailed");
     case "preview_disabled": return t("previewDisabledMessage");
     case "preview_publication": return t("previewPublicationFailed");

@@ -2,7 +2,8 @@ use crate::models::{AppConfig, Clip, ClipKind};
 use sha2::{Digest, Sha256};
 use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
+    CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber,
+    IsClipboardFormatAvailable, OpenClipboard, SetClipboardData,
 };
 use windows::Win32::System::Memory::{
     GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
@@ -16,9 +17,15 @@ const CF_HDROP: u32 = 15;
 /// another app — transient, worth retrying on the next poll. `Skip` means
 /// the content is definitively not capturable (unsupported format, excluded
 /// source) — the sequence number should be consumed so we don't retry.
+/// `LostRender` means the format EXISTS but its delayed render could not be
+/// read (a third party opened the clipboard while the source app was
+/// rendering) — the caller records a deferred Clip and never re-forces the
+/// render, because every extra forced render is another chance to break a
+/// pending user paste.
 pub enum CaptureError {
     Locked,
     Skip(String),
+    LostRender,
 }
 
 pub fn hash_content(data: &[u8]) -> String {
@@ -80,32 +87,115 @@ pub fn capture_clipboard(config: &AppConfig) -> Result<Clip, CaptureError> {
         }
     }
 
-    // Try each format in priority order. A Locked result from any attempt
-    // makes the whole capture Locked — the clipboard owner may be holding it
-    // open, so the caller should retry rather than consume the sequence.
-    let mut locked = false;
-    for result in [
-        try_capture_image(config, &source_exe, &source_title, now),
-        try_capture_file_paths(&source_exe, &source_title, now),
-        try_capture_text(config, &source_exe, &source_title, now),
-    ] {
-        match result {
-            Ok(clip) => return Ok(clip),
-            Err(CaptureError::Locked) => locked = true,
-            Err(CaptureError::Skip(_)) => {}
-        }
-    }
-
-    if locked {
-        Err(CaptureError::Locked)
+    // Free format pick: IsClipboardFormatAvailable neither opens the
+    // clipboard nor forces a delayed render. Exactly one format is read —
+    // the old three-probe pattern forced up to three delayed renders per
+    // change, each a fresh chance to lose the render and break a pending
+    // user paste.
+    let kind = if format_available(CF_DIB) {
+        ClipKind::Image
+    } else if format_available(CF_HDROP) {
+        ClipKind::FilePaths
+    } else if format_available(CF_UNICODETEXT) {
+        ClipKind::Text
     } else {
-        Err(CaptureError::Skip(
+        return Err(CaptureError::Skip(
             "No supported clipboard format".to_string(),
-        ))
+        ));
+    };
+
+    let result = match kind {
+        ClipKind::Image => read_image(config, &source_exe, &source_title, now),
+        ClipKind::FilePaths => read_file_paths(&source_exe, &source_title, now),
+        ClipKind::Text => read_text(config, &source_exe, &source_title, now),
+    };
+
+    result.or_else(|err| match err {
+        // A lost render is recorded, never retried: the content lives in the
+        // source app's copy state and is served natively when the user pastes.
+        CaptureError::LostRender => Ok(deferred_clip(
+            &kind, config, &source_exe, &source_title, now,
+        )),
+        other => Err(other),
+    })
+}
+
+/// Live clipboard sequence number — the identity check for deferred Clips
+/// (a paste may skip the clipboard write only while this is unchanged).
+pub fn clipboard_sequence() -> u32 {
+    unsafe { GetClipboardSequenceNumber() }
+}
+
+fn format_available(format: u32) -> bool {
+    unsafe { IsClipboardFormatAvailable(format) }.is_ok()
+}
+
+/// Metadata-only stand-in recorded when the winner format exists but its
+/// render could not be read. The deferred sequence pins the Clip to the live
+/// clipboard state: pasting while the sequence is unchanged skips the write
+/// entirely (the content is still there; the paste target renders it itself,
+/// preserving the source app's rich formats Mnemark never stored). Anything
+/// else — clipboard changed, app restarted — expires the Clip.
+///
+/// Dedup is by source identity (kind + source window), not content: no
+/// content exists to hash. Repeated copies from the same window merge into
+/// one deferred Clip (the newest sequence wins); the edge cost is that two
+/// different never-rendered copies from the same window share one row.
+fn deferred_clip(
+    kind: &ClipKind,
+    config: &AppConfig,
+    source_exe: &str,
+    source_title: &str,
+    now: u64,
+) -> Clip {
+    let seq = clipboard_sequence();
+    let kind_key = match kind {
+        ClipKind::Text => "Text",
+        ClipKind::Image => "Image",
+        ClipKind::FilePaths => "FilePaths",
+    };
+    let content_hash = hash_content(
+        format!("mnemark-deferred\u{1f}{kind_key}\u{1f}{source_exe}\u{1f}{source_title}").as_bytes(),
+    );
+    let (label, suffix) = if config.language == "en" {
+        let label = match kind {
+            ClipKind::Text => "Text",
+            ClipKind::Image => "Image",
+            ClipKind::FilePaths => "Files",
+        };
+        (label, " (content fetched on paste)")
+    } else {
+        let label = match kind {
+            ClipKind::Text => "文字",
+            ClipKind::Image => "圖片",
+            ClipKind::FilePaths => "檔案",
+        };
+        (label, "（內容於貼上時擷取）")
+    };
+    let preview = format!("{label}{suffix}");
+
+    Clip {
+        id: Clip::new_id(&content_hash, now),
+        kind: kind.clone(),
+        text_content: None,
+        file_paths: None,
+        image_data: None,
+        thumbnail_base64: None,
+        content_hash,
+        preview,
+        note: None,
+        truncated: false,
+        source_exe: source_exe.to_string(),
+        source_title: source_title.to_string(),
+        source_icon: None,
+        captured_at: now,
+        pinned: false,
+        byte_size: 0,
+        deferred: Some(seq),
     }
 }
 
-fn try_capture_image(
+fn read_image(
     config: &AppConfig,
     source_exe: &str,
     source_title: &str,
@@ -122,8 +212,10 @@ fn try_capture_image(
         let handle = match GetClipboardData(CF_DIB) {
             Ok(h) => HGLOBAL(h.0),
             Err(_) => {
+                // The format is available (checked without opening), so NULL
+                // means a delayed render that did not arrive — not absence.
                 let _ = CloseClipboard();
-                return Err(CaptureError::Skip("No DIB image on clipboard".to_string()));
+                return Err(CaptureError::LostRender);
             }
         };
 
@@ -179,11 +271,12 @@ fn try_capture_image(
             captured_at: now,
             pinned: false,
             byte_size,
+            deferred: None,
         })
     }
 }
 
-fn try_capture_file_paths(
+fn read_file_paths(
     source_exe: &str,
     source_title: &str,
     now: u64,
@@ -199,7 +292,7 @@ fn try_capture_file_paths(
             Ok(h) => HGLOBAL(h.0),
             Err(_) => {
                 let _ = CloseClipboard();
-                return Err(CaptureError::Skip("No HDROP".to_string()));
+                return Err(CaptureError::LostRender);
             }
         };
         let mem_size = GlobalSize(handle);
@@ -296,11 +389,12 @@ fn try_capture_file_paths(
             captured_at: now,
             pinned: false,
             byte_size,
+            deferred: None,
         })
     }
 }
 
-fn try_capture_text(
+fn read_text(
     config: &AppConfig,
     source_exe: &str,
     source_title: &str,
@@ -318,7 +412,7 @@ fn try_capture_text(
             Ok(h) => HGLOBAL(h.0),
             Err(_) => {
                 let _ = CloseClipboard();
-                return Err(CaptureError::Skip("No text".to_string()));
+                return Err(CaptureError::LostRender);
             }
         };
 
@@ -385,6 +479,7 @@ fn try_capture_text(
             captured_at: now,
             pinned: false,
             byte_size: original_size,
+            deferred: None,
         })
     }
 }

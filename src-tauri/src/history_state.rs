@@ -378,7 +378,7 @@ mod tests {
             captured_at,
             pinned: false,
             byte_size: 10,
-        }
+            deferred: None,        }
     }
 
     fn image_clip(id: &str, captured_at: u64, byte_size: u64) -> Clip {

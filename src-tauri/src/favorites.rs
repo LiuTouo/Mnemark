@@ -788,7 +788,7 @@ mod tests {
             captured_at: 1,
             pinned: false,
             byte_size: 10,
-        }
+            deferred: None,        }
     }
 
     #[test]

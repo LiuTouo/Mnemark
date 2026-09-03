@@ -12,6 +12,7 @@ const LOCATED_CLIP_ERROR_CODE_VALUES = [
   "drawer_unavailable",
   "history_persistence",
   "missing_content",
+  "deferred_expired",
   "clipboard_write",
   "preview_disabled",
   "preview_publication",

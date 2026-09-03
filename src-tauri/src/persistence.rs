@@ -170,6 +170,9 @@ impl Persistence {
                 Ok(Clip {
                     id: row.get(0)?,
                     pinned: row.get::<_, i64>(1 + SHARED_COLUMN_COUNT)? != 0,
+                    // Deferred state is session-scoped: it is never persisted,
+                    // so a restored Clip is materialized (or expired).
+                    deferred: None,
                     kind: shared.kind,
                     text_content: shared.text_content,
                     file_paths: shared.file_paths,
@@ -435,7 +438,7 @@ mod tests {
             captured_at,
             pinned: false,
             byte_size: 10,
-        }
+            deferred: None,        }
     }
 
     #[test]

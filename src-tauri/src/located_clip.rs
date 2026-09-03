@@ -22,6 +22,10 @@ pub(crate) enum LocatedClipError {
     DrawerUnavailable,
     HistoryPersistence(String),
     MissingContent,
+    /// A deferred Clip whose clipboard sequence no longer matches: the
+    /// content it stood in for is gone forever (clipboard changed, or the
+    /// app restarted and the session-scoped flag was lost).
+    DeferredExpired,
     ClipboardWrite(String),
     PreviewDisabled,
     PreviewPublication(String),
@@ -35,6 +39,7 @@ enum LocatedClipErrorCode {
     DrawerUnavailable,
     HistoryPersistence,
     MissingContent,
+    DeferredExpired,
     ClipboardWrite,
     PreviewDisabled,
     PreviewPublication,
@@ -65,6 +70,11 @@ impl LocatedClipError {
                 LocatedClipErrorCode::MissingContent,
                 None,
                 "Clip content missing",
+            ),
+            Self::DeferredExpired => (
+                LocatedClipErrorCode::DeferredExpired,
+                None,
+                "Deferred clip content expired",
             ),
             Self::ClipboardWrite(detail) => (
                 LocatedClipErrorCode::ClipboardWrite,
@@ -135,6 +145,16 @@ impl ResolvedClip {
         match self {
             Self::History(clip) => clip.content_hash,
             Self::Drawer(item) => item.content_hash,
+        }
+    }
+
+    /// Deferred sequence for History clips. Drawer snapshots never carry it:
+    /// a favorite materializes its content at add time, so a deferred Clip
+    /// falls back to the pre-existing MissingContent path there.
+    fn deferred_sequence(&self) -> Option<u32> {
+        match self {
+            Self::History(clip) => clip.deferred,
+            Self::Drawer(_) => None,
         }
     }
 }
@@ -479,7 +499,20 @@ where
     }
 
     fn write(&self, locator: &ClipLocator) -> Result<CopyOutcome, LocatedClipError> {
-        with_resolved_clip!(self.source.resolve(locator)?, |clip| {
+        let resolved = self.source.resolve(locator)?;
+        // A deferred Clip stands in for content the monitor never read
+        // (delayed-render source, lost render). While the clipboard sequence
+        // is unchanged, the content is still on the clipboard — skip the
+        // write entirely so the paste target renders it itself, preserving
+        // the source app's rich formats Mnemark never stored. Once the
+        // sequence moved, that content is gone forever.
+        if let Some(seq) = resolved.deferred_sequence() {
+            if crate::clipboard::clipboard_sequence() == seq {
+                return Ok(CopyOutcome::Copied);
+            }
+            return Err(LocatedClipError::DeferredExpired);
+        }
+        with_resolved_clip!(resolved, |clip| {
             match clip.kind {
                 ClipKind::Text => self
                     .platform
@@ -1017,7 +1050,7 @@ mod tests {
             captured_at: 1,
             pinned: false,
             byte_size: 7,
-        }
+            deferred: None,        }
     }
 
     fn image_clip(id: &str, hash: &str) -> Clip {
@@ -1036,6 +1069,70 @@ mod tests {
         clip.file_paths = Some(vec!["C:\\one.txt".to_string()]);
         clip.byte_size = 10;
         clip
+    }
+
+    fn deferred_clip(id: &str, seq: u32) -> Clip {
+        let mut clip = text_clip(id, "deferred-hash");
+        clip.text_content = None;
+        clip.byte_size = 0;
+        clip.deferred = Some(seq);
+        clip
+    }
+
+    /// A deferred Clip stands in for content that is still live on the
+    /// clipboard: while the sequence number is unchanged, the write is
+    /// skipped entirely — the paste target renders the delayed content
+    /// itself — and the action still counts as copied.
+    #[tokio::test]
+    async fn deferred_clip_skips_the_write_while_the_clipboard_is_untouched() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let history = history_state(&[deferred_clip("d1", crate::clipboard::clipboard_sequence())]);
+        let drawer = Mutex::new(DrawerState::new(None));
+        let module = test_module(
+            StateLocatedClipSource::new(&history, &drawer),
+            RecordingClipboard(Arc::clone(&events)),
+        );
+
+        let locator = ClipLocator {
+            scope: ClipScope::History,
+            id: "d1".to_string(),
+        };
+        assert_eq!(module.copy(&locator).unwrap(), CopyOutcome::Copied);
+        assert!(
+            events.lock().unwrap().is_empty(),
+            "no platform write may run"
+        );
+        module
+            .paste(&locator, || async {})
+            .await
+            .unwrap();
+        assert!(
+            events.lock().unwrap().is_empty(),
+            "paste must also skip the platform write"
+        );
+    }
+
+    /// Once the clipboard moved on, the content a deferred Clip stood in for
+    /// is gone forever — the paste fails with DeferredExpired instead of
+    /// silently writing the WRONG clipboard content into the target app.
+    #[test]
+    fn deferred_clip_expires_once_the_clipboard_moved_on() {
+        let stale = crate::clipboard::clipboard_sequence().wrapping_add(1);
+        let history = history_state(&[deferred_clip("d1", stale)]);
+        let drawer = Mutex::new(DrawerState::new(None));
+        let module = test_module(
+            StateLocatedClipSource::new(&history, &drawer),
+            RecordingClipboard(Arc::new(Mutex::new(Vec::new()))),
+        );
+
+        let locator = ClipLocator {
+            scope: ClipScope::History,
+            id: "d1".to_string(),
+        };
+        assert_eq!(
+            module.copy(&locator),
+            Err(LocatedClipError::DeferredExpired)
+        );
     }
 
     async fn exercise_production_adapter_contract(

@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod clipboard_busy_probe; // regression probes: delayed-render capture/paste interference
 mod capture_policy;
 mod clip_encoding;
 mod clipboard;
@@ -746,6 +748,11 @@ impl ClipboardCapturer for Win32ClipboardCapturer {
         match clipboard::capture_clipboard(config) {
             Ok(clip) => ClipboardCaptureOutcome::Captured(Box::new(clip)),
             Err(clipboard::CaptureError::Locked) => ClipboardCaptureOutcome::Locked,
+            // Lost renders are converted to deferred Clips inside
+            // capture_clipboard; this arm is defense in depth only.
+            Err(clipboard::CaptureError::LostRender) => {
+                ClipboardCaptureOutcome::Skipped("lost render".to_string())
+            }
             Err(clipboard::CaptureError::Skip(reason)) => ClipboardCaptureOutcome::Skipped(reason),
         }
     }

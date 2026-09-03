@@ -21,6 +21,10 @@ export interface Clip {
   captured_at: number;
   pinned: boolean;
   byte_size: number;
+  /** Some(sequence) for a deferred Clip: content was never read (delayed
+   * render lost at capture). The value pins the live clipboard state — pasting
+   * while unchanged skips the clipboard write; changed means expired. */
+  deferred?: number | null;
 }
 
 /** A durable favorite snapshot. Mirrors `Clip` minus `pinned`, plus membership time. */

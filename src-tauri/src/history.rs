@@ -61,6 +61,10 @@ impl HistoryStore {
             existing.captured_at = clip.captured_at;
             existing.source_exe = clip.source_exe.clone();
             existing.source_title = clip.source_title.clone();
+            // Deferred state tracks the newest capture of this identity: a
+            // re-copy refreshes the pinned sequence (and materialized
+            // content clears it).
+            existing.deferred = clip.deferred;
             let result = existing.clone();
             self.move_to_front(&clip.content_hash);
             return (result, Vec::new());
@@ -333,7 +337,7 @@ mod tests {
             captured_at,
             pinned: false,
             byte_size,
-        }
+            deferred: None,        }
     }
 
     fn text_clip(id: &str, captured_at: u64) -> Clip {

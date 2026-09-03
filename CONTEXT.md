@@ -40,7 +40,8 @@ The foreground application window that was active when a Clip was captured.
 The background Rust thread that watches the Windows clipboard by polling `GetClipboardSequenceNumber` every 200ms. Runs for the lifetime of the app.
 
 **Behavior:**
-- On clipboard change: reads available formats, determines Clip kind by priority (Image > FilePaths > Text), computes content hash, deduplicates, applies exclusion list, applies debounce (200ms), stores valid Clips in History.
+- On clipboard change: picks ONE format by priority (Image > FilePaths > Text) using the open-free `IsClipboardFormatAvailable`, then reads it in a single clipboard session — one open, one `GetClipboardData`, one close. Computes content hash, deduplicates, applies exclusion list, applies debounce (200ms), stores valid Clips in History.
+- Deferred capture: if the winner format is available but its render could not be read (a delayed-render source like Office whose render was lost to an interleaving clipboard opener), the monitor records a **deferred Clip** — a metadata-only stand-in (kind, source, placeholder preview, the capture-time clipboard sequence). Lost renders are never retried by the monitor: every extra forced render is another chance to break a pending user paste. Repeated copies from the same source window merge into one deferred Clip (dedup is by source identity, not content).
 - Exclusion list: a set of executable names (e.g. `1Password.exe`, `Bitwarden.exe`, `KeePass.exe`). Clips captured while any of these is the foreground window are discarded.
 - Debounce: a clipboard change observed within 200ms of the previous capture is deferred, then captures the latest content once the window passes; if that yields the same content hash first observed inside the window, it is silently dropped (handles double Ctrl+C). Re-copying the same content AFTER the window counts as a new copy — `captured_at` and `source` refresh and the Clip moves to the top.
 - Pause: when monitoring is paused (via Tray menu), all clipboard changes are ignored. On resume, the current clipboard content is NOT automatically captured — only new changes are recorded. Paused copies are permanently lost.
@@ -133,6 +134,8 @@ The action of selecting a Clip and inserting it into the previously focused appl
 2. Simulate `Ctrl+V` to the previously focused window.
 
 If phase 2 fails (target window vanished, etc.), the content remains on the clipboard for manual `Ctrl+V`.
+
+**Deferred Clips:** pasting a deferred Clip never rewrites the clipboard. While the live clipboard sequence still matches the Clip's capture-time sequence, phase 1 is skipped entirely — the content is still on the clipboard and the paste target renders it itself, preserving the source app's rich native formats. If the sequence has moved on, the deferred content is gone forever and the paste fails with `deferred_expired`. The deferred flag is session-scoped and does not survive an app restart.
 
 For FilePaths Clips, phase 1 depends on the `paste_files_as_files` setting (default on): on writes a real CF_HDROP plus a CF_UNICODETEXT companion (non-file targets still get path text); off writes the `;`-joined path text. See `docs/adr/0001-cfhdrop-file-paste.md`.
 

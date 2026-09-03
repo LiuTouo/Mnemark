@@ -54,6 +54,13 @@ pub struct Clip {
     pub pinned: bool,
     /// Byte size of the original content (pre-truncation for text)
     pub byte_size: u64,
+    /// Some(sequence number) for a DEFERRED Clip: content was never read
+    /// (delayed-render source whose render was lost or pending). The value is
+    /// the clipboard sequence at capture time — a paste must skip the write
+    /// while the live sequence still matches (the clipboard then still holds
+    /// this content, which the paste target renders itself), and any other
+    /// value means the content is gone forever. None for materialized Clips.
+    pub deferred: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -359,6 +366,7 @@ impl Clip {
     /// per image per call is pure waste.
     pub fn meta_clone(&self) -> Clip {
         Clip {
+            deferred: self.deferred,
             id: self.id.clone(),
             kind: self.kind.clone(),
             text_content: self.text_content.clone(),
