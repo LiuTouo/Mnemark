@@ -117,7 +117,7 @@ pub fn update_channel() -> &'static str {
 /// The minisign public key, mirrored from tauri.conf.json
 /// (`plugins.updater.pubkey`). The same key verifies NSIS updater artifacts
 /// and portable-update downloads — keep the two in sync when rotating keys.
-const UPDATE_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ5QjAzOEE4RUJCOTM4MjAKUldRZ09MbnJxRGl3Mlp3NTlQaVNtTmxJS1B1NjRtQ3JjdFlPaklzR2V6d0ZQQ1hoak1NSDdyWDIK";
+const UPDATE_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVCNTRDQjIwNDE2NEMzMDEKUldRQncyUkJJTXRVNi9BV2VWbXk0dzluR055SXZkNUdoYUlCallpZGVKOEdKS3VzVmRTMFQ0aUUK";
 
 /// A portable exe is ~15 MB; anything wildly bigger is not an update.
 const MAX_DOWNLOAD_BYTES: u64 = 128 * 1024 * 1024;

@@ -42,6 +42,13 @@ X 是唯一一座「舊鑰簽、新公鑰內嵌」的橋。懷疑外洩時，這
 - 檢查 GitHub audit log（Settings → Audit log）：异常的 secret 存取、未知裝置、workflow run 來源。
 - 若懷疑攻擊者已發布偽造更新：除了換鑰，在 release 頁面刪除偽造資產、必要时撤销該 release，並在 X 的 release notes 說明。
 
+### 舊私鑰遺失（無法簽橋 release）
+
+雙 release 舞步需要舊私鑰簽橋版 X；鑰匙遺失時此路不通，改走單 release：
+
+- 直接產生新 keypair、換兩處公鑰、secrets 換新私鑰，下個 release 以新鑰簽。
+- **代價**：所有已安裝的舊版 client 內嵌舊公鑰，會拒絕新簽章的更新 — 自動更新靜默失效，必須手動下載安裝一次新版；之後恢復正常。（2026-09-04 即因此走了這條路：舊鑰 D9B038A8EBB93820 只存於 GitHub secrets，無法讀出。）
+
 ## 環境保護（一次性設定，輪替前先做）
 
 1. Settings → Environments → New environment → `release-signing`。
