@@ -745,12 +745,14 @@ impl ClipboardSequenceReader for Win32SequenceReader {
 struct Win32SourceSampler;
 
 impl ClipboardSourceSampler for Win32SourceSampler {
-    /// Foreground identity at this instant. The capture policy calls this once
-    /// per new clipboard sequence and freezes the result for all later ticks
-    /// consuming that sequence — deferred captures and history-lock retries
-    /// never re-sample here, so a focus change after a password manager's copy
-    /// cannot re-attribute the content to another app.
-    fn sample(&mut self) -> ClipboardSource {
+    /// Foreground identity at this instant, or `None` when it cannot be
+    /// determined with confidence. The capture policy calls this once per new
+    /// clipboard sequence and freezes the result for all later ticks consuming
+    /// that sequence — deferred captures and history-lock retries never
+    /// re-sample here, so a focus change after a password manager's copy
+    /// cannot re-attribute the content to another app; a `None` sample skips
+    /// the sequence conservatively.
+    fn sample(&mut self) -> Option<ClipboardSource> {
         clipboard::get_foreground_info()
     }
 }

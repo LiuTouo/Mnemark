@@ -85,8 +85,8 @@ fn truncate_text(text: &str, limit: usize) -> (String, bool) {
 /// sample the monitor froze at first observation of this sequence, never a
 /// fresh foreground read. The exclusion decision and clip attribution
 /// therefore always name the app that owned the copy, even when a deferred
-/// capture runs after focus has moved elsewhere. An unresolvable source
-/// ("Unknown") is never re-sampled to fill the gap.
+/// capture runs after focus has moved elsewhere. An undeterminable source
+/// never reaches here: the policy skips the sequence conservatively.
 pub fn capture_clipboard(
     config: &AppConfig,
     source: &ClipboardSource,
@@ -120,21 +120,15 @@ pub fn capture_clipboard(
     };
 
     let result = match kind {
-        ClipKind::Image => read_image(config, &source.exe, &source.title, now),
-        ClipKind::FilePaths => read_file_paths(&source.exe, &source.title, now),
-        ClipKind::Text => read_text(config, &source.exe, &source.title, now),
+        ClipKind::Image => read_image(config, source, now),
+        ClipKind::FilePaths => read_file_paths(source, now),
+        ClipKind::Text => read_text(config, source, now),
     };
 
     result.or_else(|err| match err {
         // A lost render is recorded, never retried: the content lives in the
         // source app's copy state and is served natively when the user pastes.
-        CaptureError::LostRender => Ok(deferred_clip(
-            &kind,
-            config,
-            &source.exe,
-            &source.title,
-            now,
-        )),
+        CaptureError::LostRender => Ok(deferred_clip(&kind, config, source, now)),
         other => Err(other),
     })
 }
@@ -160,13 +154,7 @@ fn format_available(format: u32) -> bool {
 /// content exists to hash. Repeated copies from the same window merge into
 /// one deferred Clip (the newest sequence wins); the edge cost is that two
 /// different never-rendered copies from the same window share one row.
-fn deferred_clip(
-    kind: &ClipKind,
-    config: &AppConfig,
-    source_exe: &str,
-    source_title: &str,
-    now: u64,
-) -> Clip {
+fn deferred_clip(kind: &ClipKind, config: &AppConfig, source: &ClipboardSource, now: u64) -> Clip {
     let seq = clipboard_sequence();
     let kind_key = match kind {
         ClipKind::Text => "Text",
@@ -174,8 +162,11 @@ fn deferred_clip(
         ClipKind::FilePaths => "FilePaths",
     };
     let content_hash = hash_content(
-        format!("mnemark-deferred\u{1f}{kind_key}\u{1f}{source_exe}\u{1f}{source_title}")
-            .as_bytes(),
+        format!(
+            "mnemark-deferred\u{1f}{kind_key}\u{1f}{}\u{1f}{}",
+            source.exe, source.title
+        )
+        .as_bytes(),
     );
     let (label, suffix) = if config.language == "en" {
         let label = match kind {
@@ -205,8 +196,8 @@ fn deferred_clip(
         preview,
         note: None,
         truncated: false,
-        source_exe: source_exe.to_string(),
-        source_title: source_title.to_string(),
+        source_exe: source.exe.clone(),
+        source_title: source.title.clone(),
         source_icon: None,
         captured_at: now,
         pinned: false,
@@ -217,8 +208,7 @@ fn deferred_clip(
 
 fn read_image(
     config: &AppConfig,
-    source_exe: &str,
-    source_title: &str,
+    source: &ClipboardSource,
     now: u64,
 ) -> Result<Clip, CaptureError> {
     unsafe {
@@ -293,8 +283,8 @@ fn read_image(
             preview: String::from("Image"),
             note: None,
             truncated: false,
-            source_exe: source_exe.to_string(),
-            source_title: source_title.to_string(),
+            source_exe: source.exe.clone(),
+            source_title: source.title.clone(),
             source_icon: None,
             captured_at: now,
             pinned: false,
@@ -352,7 +342,7 @@ fn parse_hdrop_list(buf: &[u8], file_offset: usize, min_offset: usize) -> Option
     Some(files)
 }
 
-fn read_file_paths(source_exe: &str, source_title: &str, now: u64) -> Result<Clip, CaptureError> {
+fn read_file_paths(source: &ClipboardSource, now: u64) -> Result<Clip, CaptureError> {
     use windows::Win32::UI::Shell::DROPFILES;
 
     unsafe {
@@ -447,8 +437,8 @@ fn read_file_paths(source_exe: &str, source_title: &str, now: u64) -> Result<Cli
             preview,
             note: None,
             truncated: false,
-            source_exe: source_exe.to_string(),
-            source_title: source_title.to_string(),
+            source_exe: source.exe.clone(),
+            source_title: source.title.clone(),
             source_icon: None,
             captured_at: now,
             pinned: false,
@@ -458,12 +448,7 @@ fn read_file_paths(source_exe: &str, source_title: &str, now: u64) -> Result<Cli
     }
 }
 
-fn read_text(
-    config: &AppConfig,
-    source_exe: &str,
-    source_title: &str,
-    now: u64,
-) -> Result<Clip, CaptureError> {
+fn read_text(config: &AppConfig, source: &ClipboardSource, now: u64) -> Result<Clip, CaptureError> {
     unsafe {
         if OpenClipboard(HWND(std::ptr::null_mut())).is_err() {
             return Err(CaptureError::Locked);
@@ -547,8 +532,8 @@ fn read_text(
             preview,
             note: None,
             truncated,
-            source_exe: source_exe.to_string(),
-            source_title: source_title.to_string(),
+            source_exe: source.exe.clone(),
+            source_title: source.title.clone(),
             source_icon: None,
             captured_at: now,
             pinned: false,
@@ -913,7 +898,11 @@ pub fn foreground_is_desktop() -> bool {
     }
 }
 
-pub fn get_foreground_info() -> ClipboardSource {
+/// Foreground source at this instant, or `None` when it cannot be determined
+/// with confidence (no foreground window, or its executable could not be
+/// resolved). The caller applies the conservative policy to `None` — the
+/// capture policy skips such a sequence entirely.
+pub fn get_foreground_info() -> Option<ClipboardSource> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
@@ -925,10 +914,7 @@ pub fn get_foreground_info() -> ClipboardSource {
 
     let hwnd = unsafe { GetForegroundWindow() };
     if hwnd.0.is_null() {
-        return ClipboardSource {
-            exe: String::from("Unknown"),
-            title: String::new(),
-        };
+        return None;
     }
     unsafe {
         let mut buf = [0u16; 256];
@@ -938,7 +924,7 @@ pub fn get_foreground_info() -> ClipboardSource {
         let mut pid = 0u32;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
         let exe = if pid == 0 {
-            String::from("Unknown")
+            None
         } else {
             match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
                 Ok(process) => {
@@ -956,17 +942,16 @@ pub fn get_foreground_info() -> ClipboardSource {
                         std::path::Path::new(&full)
                             .file_name()
                             .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_else(|| String::from("Unknown"))
                     } else {
-                        String::from("Unknown")
+                        None
                     };
                     let _ = CloseHandle(process);
                     name
                 }
-                Err(_) => String::from("Unknown"),
+                Err(_) => None,
             }
         };
-        ClipboardSource { exe, title }
+        exe.map(|exe| ClipboardSource { exe, title })
     }
 }
 

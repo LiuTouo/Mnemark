@@ -73,9 +73,10 @@ pub(crate) trait ClipboardCapturer {
 /// Foreground source sampler. Called by the policy exactly once per new
 /// clipboard sequence; the returned sample is frozen into the pending
 /// observation, so a focus change after the copy can never re-attribute the
-/// content on a deferred tick or history-lock retry.
+/// content on a deferred tick or history-lock retry. `None` means the source
+/// could not be determined with confidence.
 pub(crate) trait ClipboardSourceSampler {
-    fn sample(&mut self) -> ClipboardSource;
+    fn sample(&mut self) -> Option<ClipboardSource>;
 }
 
 pub(crate) trait CaptureHistory {
@@ -143,10 +144,19 @@ impl CapturePolicy {
                 (pending.first_seen_at, pending.source.clone())
             }
             _ => {
+                // Conservative policy for an undeterminable source: it could
+                // be an excluded app that lost its window mid-copy — skip the
+                // sequence instead of storing under a guess. Never re-sampled.
+                let Some(source) = sampler.sample() else {
+                    self.consume_sequence(sequence);
+                    return CaptureDecision::Skip {
+                        consumed_sequence: sequence,
+                        reason: SkipReason::Capture("Source could not be determined".to_string()),
+                    };
+                };
                 // Freeze the source at first observation: deferred ticks and
                 // lock retries reuse this sample instead of re-sampling the
                 // foreground, which by then may name a different app.
-                let source = sampler.sample();
                 self.pending_observation = Some(PendingObservation {
                     sequence,
                     first_seen_at: observation.observed_at,
@@ -367,11 +377,11 @@ mod tests {
     /// an empty result — an unexpected extra sample fails the test loudly.
     struct FakeSourceSampler {
         calls: usize,
-        samples: Vec<ClipboardSource>,
+        samples: Vec<Option<ClipboardSource>>,
     }
 
     impl ClipboardSourceSampler for FakeSourceSampler {
-        fn sample(&mut self) -> ClipboardSource {
+        fn sample(&mut self) -> Option<ClipboardSource> {
             self.calls += 1;
             self.samples.remove(0)
         }
@@ -385,9 +395,9 @@ mod tests {
     }
 
     impl ClipboardSourceSampler for FixedSourceSampler {
-        fn sample(&mut self) -> ClipboardSource {
+        fn sample(&mut self) -> Option<ClipboardSource> {
             self.calls += 1;
-            source("Editor.exe")
+            Some(source("Editor.exe"))
         }
     }
 
@@ -927,9 +937,9 @@ mod tests {
                 // the foreground is Browser.exe — sampling then would
                 // misattribute. A third sample is never taken.
                 samples: vec![
-                    source("Editor.exe"),
-                    source("Vault.exe"),
-                    source("Browser.exe"),
+                    Some(source("Editor.exe")),
+                    Some(source("Vault.exe")),
+                    Some(source("Browser.exe")),
                 ],
             },
             "Mnemark.exe".to_string(),
@@ -989,7 +999,7 @@ mod tests {
             RecordingEmitter::default(),
             FakeSourceSampler {
                 calls: 0,
-                samples: vec![source("Editor.exe"), source("Browser.exe")],
+                samples: vec![Some(source("Editor.exe")), Some(source("Browser.exe"))],
             },
             "Mnemark.exe".to_string(),
         );
@@ -1002,6 +1012,41 @@ mod tests {
             monitor.capturer.sources_seen,
             vec![source("Editor.exe"), source("Editor.exe")]
         );
+    }
+
+    #[test]
+    fn undeterminable_source_is_skipped_conservatively() {
+        let mut monitor = ClipboardMonitor::new(
+            FakeSequenceReader { sequence: 1 },
+            FakeCapturer {
+                calls: 0,
+                sources_seen: Vec::new(),
+                results: vec![],
+            },
+            FakeHistory::default(),
+            RecordingEmitter::default(),
+            FakeSourceSampler {
+                calls: 0,
+                samples: vec![None],
+            },
+            "Mnemark.exe".to_string(),
+        );
+
+        monitor.tick(true, &AppConfig::default(), 1_000);
+        monitor.tick(true, &AppConfig::default(), 1_200);
+
+        assert_eq!(monitor.capturer.calls, 0);
+        assert!(monitor.history.state.clips_for_ipc().is_empty());
+        assert!(matches!(
+            monitor.emitter.decisions.as_slice(),
+            [
+                CaptureDecision::Skip {
+                    consumed_sequence: 1,
+                    reason: SkipReason::Capture(reason),
+                },
+                CaptureDecision::NoChange,
+            ] if reason == "Source could not be determined"
+        ));
     }
 
     #[test]

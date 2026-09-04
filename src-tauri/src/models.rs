@@ -67,12 +67,12 @@ pub struct Clip {
 /// first observed and then frozen: the exclusion decision and clip attribution
 /// must keep using this sample on deferred ticks and history-lock retries, so
 /// a focus change after the copy can never re-attribute the content to
-/// whatever app is foreground by capture time.
+/// whatever app is foreground by capture time. A `None` sample (foreground or
+/// its executable could not be resolved) is conservative: the sequence is
+/// skipped entirely, never stored and never re-sampled.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ClipboardSource {
     /// Executable name of the foreground application at observation time
-    /// ("Unknown" when it could not be resolved — treated as potentially
-    /// sensitive and never re-sampled on later ticks).
     pub exe: String,
     /// Window title at observation time
     pub title: String,
