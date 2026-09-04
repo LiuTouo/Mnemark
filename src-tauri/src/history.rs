@@ -337,7 +337,8 @@ mod tests {
             captured_at,
             pinned: false,
             byte_size,
-            deferred: None,        }
+            deferred: None,
+        }
     }
 
     fn text_clip(id: &str, captured_at: u64) -> Clip {

@@ -1050,7 +1050,8 @@ mod tests {
             captured_at: 1,
             pinned: false,
             byte_size: 7,
-            deferred: None,        }
+            deferred: None,
+        }
     }
 
     fn image_clip(id: &str, hash: &str) -> Clip {
@@ -1102,10 +1103,7 @@ mod tests {
             events.lock().unwrap().is_empty(),
             "no platform write may run"
         );
-        module
-            .paste(&locator, || async {})
-            .await
-            .unwrap();
+        module.paste(&locator, || async {}).await.unwrap();
         assert!(
             events.lock().unwrap().is_empty(),
             "paste must also skip the platform write"

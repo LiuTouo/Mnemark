@@ -37,8 +37,10 @@ mod probes {
     use windows::Win32::System::DataExchange::{
         CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
     };
-    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::System::Memory::{
+        GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, RegisterClassW,
         TranslateMessage, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW,
@@ -54,7 +56,8 @@ mod probes {
     /// within its own brief retry budget.
     const BUSY_THRESHOLD_MS: u128 = 100;
 
-    static RENDER_DELAY_MS_STATIC: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(RENDER_DELAY_MS);
+    static RENDER_DELAY_MS_STATIC: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(RENDER_DELAY_MS);
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -67,24 +70,22 @@ mod probes {
     static TEST_WNDCLASS_REGISTERED: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
 
     fn register_test_wndclass() -> u16 {
-        *TEST_WNDCLASS_REGISTERED.get_or_init(|| {
-            unsafe {
-                let hinstance = GetModuleHandleW(PCWSTR::null()).expect("GetModuleHandleW");
-                let class_name = wide("MnemarkBusyProbeWnd");
-                let wc = WNDCLASSW {
-                    style: Default::default(),
-                    lpfnWndProc: Some(probe_wndproc),
-                    cbClsExtra: 0,
-                    cbWndExtra: 0,
-                    hInstance: hinstance.into(),
-                    hIcon: Default::default(),
-                    hCursor: Default::default(),
-                    hbrBackground: Default::default(),
-                    lpszMenuName: PCWSTR::null(),
-                    lpszClassName: PCWSTR::from_raw(class_name.as_ptr()),
-                };
-                RegisterClassW(&wc)
-            }
+        *TEST_WNDCLASS_REGISTERED.get_or_init(|| unsafe {
+            let hinstance = GetModuleHandleW(PCWSTR::null()).expect("GetModuleHandleW");
+            let class_name = wide("MnemarkBusyProbeWnd");
+            let wc = WNDCLASSW {
+                style: Default::default(),
+                lpfnWndProc: Some(probe_wndproc),
+                cbClsExtra: 0,
+                cbWndExtra: 0,
+                hInstance: hinstance.into(),
+                hIcon: Default::default(),
+                hCursor: Default::default(),
+                hbrBackground: Default::default(),
+                lpszMenuName: PCWSTR::null(),
+                lpszClassName: PCWSTR::from_raw(class_name.as_ptr()),
+            };
+            RegisterClassW(&wc)
         })
     }
 
@@ -113,7 +114,7 @@ mod probes {
     ) -> LRESULT {
         if msg == WM_RENDERFORMAT {
             let fmt = wparam.0 as u32;
-            let t0 = std::time::Instant::now(); 
+            let t0 = std::time::Instant::now();
             let mask = 1u64 << (fmt.min(63));
             RENDERED_FORMATS.fetch_or(mask, Ordering::Relaxed);
             if ONE_SHOT.load(Ordering::Relaxed) {
@@ -126,20 +127,16 @@ mod probes {
             let delay = RENDER_DELAY_MS_STATIC.load(Ordering::Relaxed);
             std::thread::sleep(Duration::from_millis(delay));
             RENDER_TOTAL_MS.fetch_add(delay, Ordering::Relaxed);
-            RENDER_LOG
-                .lock()
-                .expect("render log")
-                .push(fmt);
+            RENDER_LOG.lock().expect("render log").push(fmt);
 
-            println!( 
-                "render fmt={} done in {} ms",
-                fmt,
-                t0.elapsed().as_millis()
-            );
+            println!("render fmt={} done in {} ms", fmt, t0.elapsed().as_millis());
 
             if fmt == CF_UNICODETEXT {
                 // Render a small UTF-16 string, NUL-terminated, GMEM_MOVEABLE.
-                let text: Vec<u16> = "mnemark probe".encode_utf16().chain(std::iter::once(0)).collect();
+                let text: Vec<u16> = "mnemark probe"
+                    .encode_utf16()
+                    .chain(std::iter::once(0))
+                    .collect();
                 if let Ok(hmem) = GlobalAlloc(GMEM_MOVEABLE, text.len() * 2) {
                     let ptr = GlobalLock(hmem);
                     if !ptr.is_null() {
@@ -158,9 +155,8 @@ mod probes {
                     if !ptr.is_null() {
                         // biSize=40, 1x1, 1 plane, 24bpp, BI_RGB, rest zero.
                         let header: [u8; 40] = [
-                            40, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 24, 0,
-                            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                            0, 0, 0, 0, 0, 0, 0, 0,
+                            40, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0,
+                            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                         ];
                         std::ptr::copy_nonoverlapping(header.as_ptr(), ptr as *mut u8, 40);
                         let _ = GlobalUnlock(hmem);
@@ -315,12 +311,16 @@ mod probes {
                     chars.push(c);
                     p = unsafe { p.add(1) };
                 }
-                unsafe { let _ = GlobalUnlock(h); };
+                unsafe {
+                    let _ = GlobalUnlock(h);
+                };
                 String::from_utf16_lossy(&chars)
             };
             println!("direct: read text = {:?}", text);
         }
-        unsafe { let _ = CloseClipboard(); };
+        unsafe {
+            let _ = CloseClipboard();
+        };
         shared.stop.store(true, Ordering::Relaxed);
     }
 
@@ -359,10 +359,7 @@ mod probes {
             .expect("competitor report");
 
         let summary = match &outcome {
-            Ok(clip) => format!(
-                "Ok(deferred={:?}, kind={:?})",
-                clip.deferred, clip.kind
-            ),
+            Ok(clip) => format!("Ok(deferred={:?}, kind={:?})", clip.deferred, clip.kind),
             Err(crate::clipboard::CaptureError::Locked) => "Err(Locked)".to_string(),
             Err(crate::clipboard::CaptureError::LostRender) => "Err(LostRender)".to_string(),
             Err(crate::clipboard::CaptureError::Skip(reason)) => {
@@ -370,8 +367,14 @@ mod probes {
             }
         };
         println!("capture outcome: {}", summary);
-        println!("renders forced: {} ms total", RENDER_TOTAL_MS.load(Ordering::Relaxed));
-        println!("competitor failed opens: {}, max busy {} ms", fail_count, max_busy);
+        println!(
+            "renders forced: {} ms total",
+            RENDER_TOTAL_MS.load(Ordering::Relaxed)
+        );
+        println!(
+            "competitor failed opens: {}, max busy {} ms",
+            fail_count, max_busy
+        );
 
         // Deterministic distinguisher, immune to render-retry timing inside
         // one GetClipboardData wait: the winner (DIB) render is forced, but
@@ -438,7 +441,9 @@ mod probes {
                 return (false, "open failed".to_string(), t0.elapsed().as_millis());
             }
             let read = unsafe { GetClipboardData(CF_UNICODETEXT) };
-            unsafe { let _ = CloseClipboard(); };
+            unsafe {
+                let _ = CloseClipboard();
+            };
             let detail = match &read {
                 Ok(_) => "got data".to_string(),
                 Err(e) => format!("NULL ({})", e),

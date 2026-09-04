@@ -114,7 +114,11 @@ pub fn capture_clipboard(config: &AppConfig) -> Result<Clip, CaptureError> {
         // A lost render is recorded, never retried: the content lives in the
         // source app's copy state and is served natively when the user pastes.
         CaptureError::LostRender => Ok(deferred_clip(
-            &kind, config, &source_exe, &source_title, now,
+            &kind,
+            config,
+            &source_exe,
+            &source_title,
+            now,
         )),
         other => Err(other),
     })
@@ -155,7 +159,8 @@ fn deferred_clip(
         ClipKind::FilePaths => "FilePaths",
     };
     let content_hash = hash_content(
-        format!("mnemark-deferred\u{1f}{kind_key}\u{1f}{source_exe}\u{1f}{source_title}").as_bytes(),
+        format!("mnemark-deferred\u{1f}{kind_key}\u{1f}{source_exe}\u{1f}{source_title}")
+            .as_bytes(),
     );
     let (label, suffix) = if config.language == "en" {
         let label = match kind {
@@ -313,11 +318,7 @@ fn parse_hdrop_list(buf: &[u8], file_offset: usize, min_offset: usize) -> Option
     Some(files)
 }
 
-fn read_file_paths(
-    source_exe: &str,
-    source_title: &str,
-    now: u64,
-) -> Result<Clip, CaptureError> {
+fn read_file_paths(source_exe: &str, source_title: &str, now: u64) -> Result<Clip, CaptureError> {
     use windows::Win32::UI::Shell::DROPFILES;
 
     unsafe {

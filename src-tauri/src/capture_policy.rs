@@ -383,7 +383,8 @@ mod tests {
             captured_at,
             pinned: false,
             byte_size: id.len() as u64,
-            deferred: None,        }
+            deferred: None,
+        }
     }
 
     fn captured(clip: Clip) -> ClipboardCaptureOutcome {

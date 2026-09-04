@@ -270,7 +270,8 @@ mod tests {
             captured_at: 1_725_000_000_123,
             pinned: true,
             byte_size,
-            deferred: None,        }
+            deferred: None,
+        }
     }
 
     fn assert_shared_columns_match_clip(actual: SharedClipColumns, expected: &Clip) {
