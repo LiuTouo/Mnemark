@@ -4,6 +4,20 @@
 
 格式參考 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)，版本號遵循[語意化版本](https://semver.org/lang/zh-TW/)。
 
+## [0.8.1] - 2026-09-04
+
+### Security
+
+- **更新簽章金鑰輪替**：更新簽署改用新金鑰。已安裝 v0.8.0 或更早版本者，自動更新會靜默失效——請至 [Release 頁](https://github.com/LiuTouo/Mnemark/releases/latest)手動下載安裝本版一次，之後自動更新恢復正常
+- 發布 workflow 的第三方 Actions 全數固定至審核過的 commit SHA，簽章改於受保護環境（需人工批准）中執行
+- 可攜版更新改為驗證簽章 manifest（綁定版本、架構、內容摘要），舊簽章產物無法在新版 tag 下重播
+- 修正可攜版更新器 URL 允許清單可被 query/fragment 語法繞過，改以標準 URL 解析器驗證實際連線目標
+- 修正剪貼簿來源排除在延遲擷取時重新取樣前景程式的問題：來源於首次觀察時凍結，密碼管理器內容不會因切換視窗而被誤存
+- 停用持久化時，已保存的剪貼簿歷史現在立即從資料庫刪除（原為延遲至多 72 小時）
+- 修正檔案清單（CF_HDROP）格式的畸形偏移可導致未對齊指標解參照
+- 剪貼簿擷取在配置記憶體前受固定上限保護（圖片、文字、檔案清單），超大資料直接捨棄
+- runtime 資料 sidecar 檔案（.tmp/.bak/journal/WAL/SHM）補進 gitignore
+
 ## [0.8.0] - 2026-09-03
 
 ### Fixed
@@ -488,6 +502,7 @@
 
 - 初始版本：剪貼簿監聽（文字／圖片／檔案路徑）、SHA-256 內容去重、容量限制與淘汰、釘選（上限 10 則、永不淘汰）、即時搜尋、Raycast 風格浮動面板（`Ctrl+Shift+V`）、貼上模擬、刪除復原、系統匣常駐、排除清單、深淺色主題跟隨系統、免安裝可攜（設定存於 exe 旁）
 
+[0.8.1]: https://github.com/LiuTouo/Mnemark/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/LiuTouo/Mnemark/compare/v0.7.9...v0.8.0
 [0.7.9]: https://github.com/LiuTouo/Mnemark/compare/v0.7.8...v0.7.9
 [0.7.8]: https://github.com/LiuTouo/Mnemark/compare/v0.7.7...v0.7.8

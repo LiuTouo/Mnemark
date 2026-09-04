@@ -1,6 +1,6 @@
 [package]
 name = "mnemark"
-version = "0.8.0"
+version = "0.8.1"
 description = "Modern lightweight clipboard history tool"
 authors = ["LiuT"]
 edition = "2021"
