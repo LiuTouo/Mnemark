@@ -276,6 +276,43 @@ fn read_image(
     }
 }
 
+/// Validate a CF_HDROP `pFiles` offset and decode the double-NUL-terminated
+/// UTF-16 path list it points at, from raw bytes. The offset must be even
+/// (UTF-16 alignment), clear the DROPFILES header (`min_offset` is
+/// `size_of::<DROPFILES>()`), and land inside the allocation; every read is
+/// bounds-checked and alignment-safe (`u16::from_le_bytes` over the byte
+/// slice), so a malformed payload can never trigger an unaligned deref or an
+/// out-of-bounds read. A missing terminator just ends the walk at the edge
+/// of the buffer; a zero-length *leading* entry (i.e. an empty list) is
+/// malformed. Returns None for any malformed payload.
+fn parse_hdrop_list(buf: &[u8], file_offset: usize, min_offset: usize) -> Option<Vec<String>> {
+    if file_offset < min_offset || !file_offset.is_multiple_of(2) || file_offset >= buf.len() {
+        return None;
+    }
+    let mut files = Vec::new();
+    let mut pos = file_offset;
+    while pos.checked_add(2).is_some_and(|n| n <= buf.len()) {
+        let mut chars = Vec::new();
+        while pos.checked_add(2).is_some_and(|n| n <= buf.len()) {
+            let c = u16::from_le_bytes([buf[pos], buf[pos + 1]]);
+            if c == 0 {
+                break;
+            }
+            chars.push(c);
+            pos += 2;
+        }
+        if chars.is_empty() {
+            break;
+        }
+        files.push(String::from_utf16_lossy(&chars));
+        pos += 2; // skip this entry's NUL terminator
+    }
+    if files.is_empty() {
+        return None;
+    }
+    Some(files)
+}
+
 fn read_file_paths(
     source_exe: &str,
     source_title: &str,
@@ -314,35 +351,19 @@ fn read_file_paths(
             return Err(CaptureError::Skip("ANSI HDROP not supported".to_string()));
         }
         let file_offset = dropfiles.pFiles as usize;
-        if file_offset >= mem_size {
-            let _ = GlobalUnlock(handle);
-            let _ = CloseClipboard();
-            return Err(CaptureError::Skip("Bad HDROP offset".to_string()));
-        }
-        // Walk the double-NUL-terminated list but never past the allocation:
-        // clipboard data is untrusted and may lack proper terminators.
-        let base = ptr as usize + file_offset;
-        let end = ptr as usize + mem_size;
-
-        let mut files = Vec::new();
-        let mut pos = base;
-        while pos + 2 <= end {
-            let mut chars = Vec::new();
-            let mut pp = pos as *const u16;
-            while (pp as usize) + 2 <= end {
-                let c = *pp;
-                if c == 0 {
-                    break;
-                }
-                chars.push(c);
-                pp = pp.add(1);
+        // Treat the locked HGLOBAL as raw bytes: clipboard data is untrusted,
+        // so the pFiles offset and every read are validated against the
+        // allocation instead of dereferencing offset-derived typed pointers
+        // (an odd offset made `*const u16` deref unaligned = UB).
+        let buf = std::slice::from_raw_parts(ptr as *const u8, mem_size);
+        let files = match parse_hdrop_list(buf, file_offset, std::mem::size_of::<DROPFILES>()) {
+            Some(files) => files,
+            None => {
+                let _ = GlobalUnlock(handle);
+                let _ = CloseClipboard();
+                return Err(CaptureError::Skip("Bad HDROP payload".to_string()));
             }
-            if chars.is_empty() {
-                break;
-            }
-            files.push(String::from_utf16_lossy(&chars));
-            pos = pp as usize + 2; // skip this entry's NUL terminator
-        }
+        };
 
         let _ = GlobalUnlock(handle);
         let _ = CloseClipboard();
@@ -1157,6 +1178,7 @@ pub fn simulate_ctrl_v() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use super::parse_hdrop_list;
     use super::truncate_text;
 
     #[test]
@@ -1199,6 +1221,74 @@ mod tests {
         assert!(truncated);
         assert_eq!(content.len(), 99);
         assert_eq!(content.chars().count(), 33);
+    }
+
+    /// Build a byte payload that looks like the tail of a DROPFILES buffer:
+    /// `min_offset` header bytes followed by the double-NUL-terminated
+    /// UTF-16 list produced from `entries`.
+    fn hdrop_payload(entries: &[&str], min_offset: usize) -> Vec<u8> {
+        let mut buf = vec![0xEEu8; min_offset]; // header placeholder
+        for entry in entries {
+            for unit in entry.encode_utf16() {
+                buf.extend_from_slice(&unit.to_le_bytes());
+            }
+            buf.extend_from_slice(&[0, 0]); // entry NUL
+        }
+        buf.extend_from_slice(&[0, 0]); // list terminator
+        buf
+    }
+
+    #[test]
+    fn normal_wide_list_parses_entry_for_entry() {
+        let buf = hdrop_payload(&["C:\\a.txt", "D:\\資料夾\\報告.docx"], 20);
+        let files = parse_hdrop_list(&buf, 20, 20).unwrap();
+        assert_eq!(files, vec!["C:\\a.txt", "D:\\資料夾\\報告.docx"]);
+    }
+
+    #[test]
+    fn odd_offset_is_rejected() {
+        let buf = hdrop_payload(&["C:\\a.txt"], 20);
+        assert_eq!(parse_hdrop_list(&buf, 21, 20), None);
+    }
+
+    #[test]
+    fn offset_inside_the_dropfiles_header_is_rejected() {
+        let buf = hdrop_payload(&["C:\\a.txt"], 20);
+        assert_eq!(parse_hdrop_list(&buf, 4, 20), None);
+        assert_eq!(parse_hdrop_list(&buf, 19, 20), None);
+    }
+
+    #[test]
+    fn offset_past_the_allocation_is_rejected() {
+        let buf = hdrop_payload(&["C:\\a.txt"], 20);
+        let len = buf.len();
+        assert_eq!(parse_hdrop_list(&buf, len, 20), None);
+        assert_eq!(parse_hdrop_list(&buf, len + 4, 20), None);
+    }
+
+    #[test]
+    fn missing_terminator_terminates_bounded_without_panic() {
+        // No list terminator and an entry that runs to the last byte: the
+        // walk must stop at the allocation edge and keep what it parsed.
+        let mut buf = vec![0xEEu8; 20];
+        buf.extend_from_slice(&0x0041u16.to_le_bytes()); // 'A', no NUL after
+        assert_eq!(parse_hdrop_list(&buf, 20, 20), Some(vec!["A".to_string()]));
+    }
+
+    #[test]
+    fn zero_length_leading_entry_is_rejected() {
+        let mut buf = vec![0xEEu8; 20];
+        buf.extend_from_slice(&[0, 0]); // empty first entry
+        buf.extend_from_slice(&0x0041u16.to_le_bytes());
+        buf.extend_from_slice(&[0, 0, 0, 0]);
+        assert_eq!(parse_hdrop_list(&buf, 20, 20), None);
+    }
+
+    #[test]
+    fn trailing_zero_length_entry_still_ends_the_list_normally() {
+        // "a\0\0": the second NUL is the terminator, not a malformed entry.
+        let buf = hdrop_payload(&["a"], 20);
+        assert_eq!(parse_hdrop_list(&buf, 20, 20), Some(vec!["a".to_string()]));
     }
 }
 
