@@ -11,16 +11,17 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      # Actions pinned to full 40-hex SHAs (CWE-829) — see release.yml.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable (2026-09-03)
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: src-tauri
 
@@ -43,3 +44,25 @@ jobs:
 
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
+
+  # CWE-829 policy: no workflow may reference an action by a mutable ref.
+  # Fails any PR that introduces one, so pins can't silently drift back.
+  workflow-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Workflow YAML is valid
+        run: python3 -c "import glob, yaml; [yaml.safe_load(open(f, encoding='utf-8')) for f in glob.glob('.github/workflows/*.y*ml')]"
+
+      - name: "All uses: refs pinned to full commit SHAs"
+        run: |
+          status=0
+          while IFS= read -r line; do
+            case "$line" in *'uses: ./'*) continue ;; esac
+            if ! grep -Eq 'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)?@[0-9a-f]{40}\s*#\s*\S' <<<"$line"; then
+              echo "UNPINNED: $line"
+              status=1
+            fi
+          done < <(grep -hE '^[[:space:]]*(-[[:space:]]+)?uses:' .github/workflows/*.y*ml)
+          exit $status
