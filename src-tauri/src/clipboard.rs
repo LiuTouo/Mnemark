@@ -1,4 +1,4 @@
-use crate::models::{AppConfig, Clip, ClipKind, HARD_PAYLOAD_CAP_BYTES};
+use crate::models::{AppConfig, Clip, ClipKind, ClipboardSource, HARD_PAYLOAD_CAP_BYTES};
 use sha2::{Digest, Sha256};
 use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
 use windows::Win32::System::DataExchange::{
@@ -81,16 +81,23 @@ fn truncate_text(text: &str, limit: usize) -> (String, bool) {
     (text[..end].to_string(), true)
 }
 
-pub fn capture_clipboard(config: &AppConfig) -> Result<Clip, CaptureError> {
+/// Capture the clipboard content attributed to `source` — the foreground
+/// sample the monitor froze at first observation of this sequence, never a
+/// fresh foreground read. The exclusion decision and clip attribution
+/// therefore always name the app that owned the copy, even when a deferred
+/// capture runs after focus has moved elsewhere. An unresolvable source
+/// ("Unknown") is never re-sampled to fill the gap.
+pub fn capture_clipboard(
+    config: &AppConfig,
+    source: &ClipboardSource,
+) -> Result<Clip, CaptureError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64;
 
-    let (source_exe, source_title) = get_foreground_info();
-
     for excluded in &config.exclusion_list {
-        if source_exe.to_lowercase() == excluded.to_lowercase() {
+        if source.exe.to_lowercase() == excluded.to_lowercase() {
             return Err(CaptureError::Skip("Source is excluded".to_string()));
         }
     }
@@ -113,9 +120,9 @@ pub fn capture_clipboard(config: &AppConfig) -> Result<Clip, CaptureError> {
     };
 
     let result = match kind {
-        ClipKind::Image => read_image(config, &source_exe, &source_title, now),
-        ClipKind::FilePaths => read_file_paths(&source_exe, &source_title, now),
-        ClipKind::Text => read_text(config, &source_exe, &source_title, now),
+        ClipKind::Image => read_image(config, &source.exe, &source.title, now),
+        ClipKind::FilePaths => read_file_paths(&source.exe, &source.title, now),
+        ClipKind::Text => read_text(config, &source.exe, &source.title, now),
     };
 
     result.or_else(|err| match err {
@@ -124,8 +131,8 @@ pub fn capture_clipboard(config: &AppConfig) -> Result<Clip, CaptureError> {
         CaptureError::LostRender => Ok(deferred_clip(
             &kind,
             config,
-            &source_exe,
-            &source_title,
+            &source.exe,
+            &source.title,
             now,
         )),
         other => Err(other),
@@ -906,7 +913,7 @@ pub fn foreground_is_desktop() -> bool {
     }
 }
 
-pub fn get_foreground_info() -> (String, String) {
+pub fn get_foreground_info() -> ClipboardSource {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
@@ -918,7 +925,10 @@ pub fn get_foreground_info() -> (String, String) {
 
     let hwnd = unsafe { GetForegroundWindow() };
     if hwnd.0.is_null() {
-        return (String::from("Unknown"), String::new());
+        return ClipboardSource {
+            exe: String::from("Unknown"),
+            title: String::new(),
+        };
     }
     unsafe {
         let mut buf = [0u16; 256];
@@ -956,7 +966,7 @@ pub fn get_foreground_info() -> (String, String) {
                 Err(_) => String::from("Unknown"),
             }
         };
-        (exe, title)
+        ClipboardSource { exe, title }
     }
 }
 

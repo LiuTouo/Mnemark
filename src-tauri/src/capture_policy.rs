@@ -5,7 +5,7 @@
 //! adapters; tests supply in-memory fakes through the same interface.
 
 use crate::history_state::HistoryState;
-use crate::models::{AppConfig, Clip, ClipboardUpdate};
+use crate::models::{AppConfig, Clip, ClipboardSource, ClipboardUpdate};
 
 pub(crate) const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 
@@ -65,7 +65,17 @@ pub(crate) trait ClipboardSequenceReader {
 }
 
 pub(crate) trait ClipboardCapturer {
-    fn capture(&mut self, config: &AppConfig) -> ClipboardCaptureOutcome;
+    /// Capture the clipboard content attributed to `source` — the sample the
+    /// policy froze at first observation, never a fresh foreground read.
+    fn capture(&mut self, config: &AppConfig, source: &ClipboardSource) -> ClipboardCaptureOutcome;
+}
+
+/// Foreground source sampler. Called by the policy exactly once per new
+/// clipboard sequence; the returned sample is frozen into the pending
+/// observation, so a focus change after the copy can never re-attribute the
+/// content on a deferred tick or history-lock retry.
+pub(crate) trait ClipboardSourceSampler {
+    fn sample(&mut self) -> ClipboardSource;
 }
 
 pub(crate) trait CaptureHistory {
@@ -84,6 +94,9 @@ struct PreviousCapture {
 struct PendingObservation {
     sequence: u32,
     first_seen_at: u64,
+    /// Source frozen at first observation; reused verbatim by every later
+    /// tick that consumes this sequence.
+    source: ClipboardSource,
 }
 
 struct CapturePolicy {
@@ -101,15 +114,17 @@ struct CaptureObservation<'a> {
 }
 
 impl CapturePolicy {
-    fn consume<C, H>(
+    fn consume<C, H, S>(
         &mut self,
         observation: CaptureObservation<'_>,
         capturer: &mut C,
         history: &mut H,
+        sampler: &mut S,
     ) -> CaptureDecision
     where
         C: ClipboardCapturer,
         H: CaptureHistory,
+        S: ClipboardSourceSampler,
     {
         let sequence = observation.sequence;
         if !observation.running {
@@ -123,14 +138,21 @@ impl CapturePolicy {
             return CaptureDecision::NoChange;
         }
 
-        let first_seen_at = match &self.pending_observation {
-            Some(pending) if pending.sequence == sequence => pending.first_seen_at,
+        let (first_seen_at, source) = match &self.pending_observation {
+            Some(pending) if pending.sequence == sequence => {
+                (pending.first_seen_at, pending.source.clone())
+            }
             _ => {
+                // Freeze the source at first observation: deferred ticks and
+                // lock retries reuse this sample instead of re-sampling the
+                // foreground, which by then may name a different app.
+                let source = sampler.sample();
                 self.pending_observation = Some(PendingObservation {
                     sequence,
                     first_seen_at: observation.observed_at,
+                    source: source.clone(),
                 });
-                observation.observed_at
+                (observation.observed_at, source)
             }
         };
 
@@ -147,7 +169,7 @@ impl CapturePolicy {
             }
         }
 
-        match capturer.capture(observation.config) {
+        match capturer.capture(observation.config, &source) {
             ClipboardCaptureOutcome::Captured(clip) => {
                 let clip = *clip;
                 let content_hash = clip.content_hash.clone();
@@ -231,26 +253,29 @@ fn is_double_copy(
             && within_debounce(first_seen_at, previous.observed_at, debounce_ms))
 }
 
-pub(crate) struct ClipboardMonitor<R, C, H, E> {
+pub(crate) struct ClipboardMonitor<R, C, H, E, S> {
     sequence_reader: R,
     capturer: C,
     history: H,
     emitter: E,
+    source_sampler: S,
     policy: CapturePolicy,
 }
 
-impl<R, C, H, E> ClipboardMonitor<R, C, H, E>
+impl<R, C, H, E, S> ClipboardMonitor<R, C, H, E, S>
 where
     R: ClipboardSequenceReader,
     C: ClipboardCapturer,
     H: CaptureHistory,
     E: CaptureEmitter,
+    S: ClipboardSourceSampler,
 {
     pub(crate) fn new(
         sequence_reader: R,
         capturer: C,
         history: H,
         emitter: E,
+        source_sampler: S,
         self_exe: String,
     ) -> Self {
         Self {
@@ -258,6 +283,7 @@ where
             capturer,
             history,
             emitter,
+            source_sampler,
             policy: CapturePolicy {
                 last_sequence: 0,
                 previous_capture: None,
@@ -278,6 +304,7 @@ where
             },
             &mut self.capturer,
             &mut self.history,
+            &mut self.source_sampler,
         );
         self.emitter.emit(decision);
     }
@@ -320,13 +347,54 @@ mod tests {
     #[derive(Default)]
     struct FakeCapturer {
         calls: usize,
+        sources_seen: Vec<ClipboardSource>,
         results: Vec<ClipboardCaptureOutcome>,
     }
 
     impl ClipboardCapturer for FakeCapturer {
-        fn capture(&mut self, _config: &AppConfig) -> ClipboardCaptureOutcome {
+        fn capture(
+            &mut self,
+            _config: &AppConfig,
+            source: &ClipboardSource,
+        ) -> ClipboardCaptureOutcome {
             self.calls += 1;
+            self.sources_seen.push(source.clone());
             self.results.remove(0)
+        }
+    }
+
+    /// Returns each canned sample once, then panics like FakeCapturer does on
+    /// an empty result — an unexpected extra sample fails the test loudly.
+    struct FakeSourceSampler {
+        calls: usize,
+        samples: Vec<ClipboardSource>,
+    }
+
+    impl ClipboardSourceSampler for FakeSourceSampler {
+        fn sample(&mut self) -> ClipboardSource {
+            self.calls += 1;
+            self.samples.remove(0)
+        }
+    }
+
+    /// Returns the same foreground sample every time; existing tests do not
+    /// care about the source.
+    #[derive(Default)]
+    struct FixedSourceSampler {
+        calls: usize,
+    }
+
+    impl ClipboardSourceSampler for FixedSourceSampler {
+        fn sample(&mut self) -> ClipboardSource {
+            self.calls += 1;
+            source("Editor.exe")
+        }
+    }
+
+    fn source(exe: &str) -> ClipboardSource {
+        ClipboardSource {
+            exe: exe.to_string(),
+            title: format!("{exe} title"),
         }
     }
 
@@ -398,6 +466,7 @@ mod tests {
             FakeCapturer::default(),
             FakeHistory::default(),
             RecordingEmitter::default(),
+            FixedSourceSampler::default(),
             "Mnemark.exe".to_string(),
         );
 
@@ -416,10 +485,12 @@ mod tests {
             FakeSequenceReader { sequence: 1 },
             FakeCapturer {
                 calls: 0,
+                sources_seen: Vec::new(),
                 results: vec![captured(clip("clip-a", "hash-a", 1_000, "Editor.exe"))],
             },
             FakeHistory::default(),
             RecordingEmitter::default(),
+            FixedSourceSampler::default(),
             "Mnemark.exe".to_string(),
         );
 
@@ -446,10 +517,12 @@ mod tests {
             FakeSequenceReader { sequence: 1 },
             FakeCapturer {
                 calls: 0,
+                sources_seen: Vec::new(),
                 results: vec![captured(clip("paused", "hash-paused", 1_000, "Editor.exe"))],
             },
             FakeHistory::default(),
             RecordingEmitter::default(),
+            FixedSourceSampler::default(),
             "Mnemark.exe".to_string(),
         );
 
@@ -480,6 +553,7 @@ mod tests {
             FakeSequenceReader { sequence: 1 },
             FakeCapturer {
                 calls: 0,
+                sources_seen: Vec::new(),
                 results: vec![
                     captured(clip("first", "same-hash", 0, "Editor.exe")),
                     captured(clip("double", "same-hash", 200, "Editor.exe")),
@@ -487,6 +561,7 @@ mod tests {
             },
             FakeHistory::default(),
             RecordingEmitter::default(),
+            FixedSourceSampler::default(),
             "Mnemark.exe".to_string(),
         );
 
@@ -526,6 +601,7 @@ mod tests {
             FakeSequenceReader { sequence: 1 },
             FakeCapturer {
                 calls: 0,
+                sources_seen: Vec::new(),
                 results: vec![
                     captured(clip("original-id", "same-hash", 0, "Original.exe")),
                     captured(clip("echo-id", "same-hash", 300, "Mnemark.exe")),
@@ -533,6 +609,7 @@ mod tests {
             },
             FakeHistory::default(),
             RecordingEmitter::default(),
+            FixedSourceSampler::default(),
             "Mnemark.exe".to_string(),
         );
 
@@ -566,6 +643,7 @@ mod tests {
             FakeSequenceReader { sequence: 1 },
             FakeCapturer {
                 calls: 0,
+                sources_seen: Vec::new(),
                 results: vec![
                     captured(clip("first", "hash-a", 0, "Editor.exe")),
                     captured(clip("second", "hash-b", 200, "Editor.exe")),
@@ -573,6 +651,7 @@ mod tests {
             },
             FakeHistory::default(),
             RecordingEmitter::default(),
+            FixedSourceSampler::default(),
             "Mnemark.exe".to_string(),
         );
 
@@ -607,10 +686,12 @@ mod tests {
             FakeSequenceReader { sequence: 1 },
             FakeCapturer {
                 calls: 0,
+                sources_seen: Vec::new(),
                 results: vec![ClipboardCaptureOutcome::Skipped("excluded".to_string())],
             },
             FakeHistory::default(),
             RecordingEmitter::default(),
+            FixedSourceSampler::default(),
             "Mnemark.exe".to_string(),
         );
 
@@ -636,6 +717,7 @@ mod tests {
             FakeSequenceReader { sequence: 1 },
             FakeCapturer {
                 calls: 0,
+                sources_seen: Vec::new(),
                 results: vec![
                     ClipboardCaptureOutcome::Locked,
                     captured(clip("retry", "hash-retry", 50, "Editor.exe")),
@@ -643,6 +725,7 @@ mod tests {
             },
             FakeHistory::default(),
             RecordingEmitter::default(),
+            FixedSourceSampler::default(),
             "Mnemark.exe".to_string(),
         );
 
@@ -674,6 +757,7 @@ mod tests {
             FakeSequenceReader { sequence: 1 },
             FakeCapturer {
                 calls: 0,
+                sources_seen: Vec::new(),
                 results: vec![
                     captured(clip("first", "same-hash", 0, "Editor.exe")),
                     captured(clip("retry", "same-hash", 50, "Editor.exe")),
@@ -681,6 +765,7 @@ mod tests {
             },
             history,
             RecordingEmitter::default(),
+            FixedSourceSampler::default(),
             "Mnemark.exe".to_string(),
         );
 
@@ -713,6 +798,7 @@ mod tests {
             FakeSequenceReader { sequence: 1 },
             FakeCapturer {
                 calls: 0,
+                sources_seen: Vec::new(),
                 results: vec![
                     captured(clip("first", "same-hash", 0, "Editor.exe")),
                     captured(clip("recopy", "same-hash", 200, "Editor.exe")),
@@ -720,6 +806,7 @@ mod tests {
             },
             FakeHistory::default(),
             RecordingEmitter::default(),
+            FixedSourceSampler::default(),
             "Mnemark.exe".to_string(),
         );
 
@@ -748,6 +835,7 @@ mod tests {
             FakeSequenceReader { sequence: 1 },
             FakeCapturer {
                 calls: 0,
+                sources_seen: Vec::new(),
                 results: vec![
                     captured(clip("old-id", "same-hash", 0, "First.exe")),
                     captured(clip("middle-id", "middle-hash", 300, "Middle.exe")),
@@ -756,6 +844,7 @@ mod tests {
             },
             FakeHistory::default(),
             RecordingEmitter::default(),
+            FixedSourceSampler::default(),
             "Mnemark.exe".to_string(),
         );
 
@@ -785,10 +874,12 @@ mod tests {
             FakeSequenceReader { sequence: 1 },
             FakeCapturer {
                 calls: 0,
+                sources_seen: Vec::new(),
                 results: vec![captured(clip("failed", "hash-failed", 1_000, "Editor.exe"))],
             },
             history,
             RecordingEmitter::default(),
+            FixedSourceSampler::default(),
             "Mnemark.exe".to_string(),
         );
 
@@ -807,6 +898,110 @@ mod tests {
             ] if !message.is_empty()
         ));
         assert_eq!(monitor.capturer.calls, 1);
+    }
+
+    #[test]
+    fn focus_change_during_debounce_cannot_re_attribute_the_source() {
+        let config = AppConfig {
+            debounce_ms: 200,
+            ..Default::default()
+        };
+        let mut monitor = ClipboardMonitor::new(
+            FakeSequenceReader { sequence: 1 },
+            FakeCapturer {
+                calls: 0,
+                sources_seen: Vec::new(),
+                results: vec![
+                    captured(clip("first", "hash-first", 0, "Editor.exe")),
+                    // The capturer enforces the exclusion list, so the frozen
+                    // Vault.exe sample is rejected even though focus moved on.
+                    ClipboardCaptureOutcome::Skipped("excluded".to_string()),
+                ],
+            },
+            FakeHistory::default(),
+            RecordingEmitter::default(),
+            FakeSourceSampler {
+                calls: 0,
+                // Sequence 1 arms the debounce. Sequence 2 is FIRST observed
+                // while Vault.exe is still foreground; by the delayed capture
+                // the foreground is Browser.exe — sampling then would
+                // misattribute. A third sample is never taken.
+                samples: vec![
+                    source("Editor.exe"),
+                    source("Vault.exe"),
+                    source("Browser.exe"),
+                ],
+            },
+            "Mnemark.exe".to_string(),
+        );
+
+        // A capture arms the debounce window; then the excluded app copies
+        // and loses focus before the window expires.
+        monitor.tick(true, &config, 0);
+        monitor.sequence_reader.sequence = 2;
+        monitor.tick(true, &config, 100);
+        monitor.tick(true, &config, 200);
+
+        assert_eq!(monitor.source_sampler.calls, 2);
+        assert_eq!(
+            monitor.capturer.sources_seen,
+            vec![source("Editor.exe"), source("Vault.exe")]
+        );
+        assert!(matches!(
+            monitor.emitter.decisions.as_slice(),
+            [
+                CaptureDecision::Store {
+                    consumed_sequence: 1,
+                    ..
+                },
+                CaptureDecision::Defer {
+                    pending_sequence: 2,
+                    reason: DeferReason::Debounce,
+                },
+                CaptureDecision::Skip {
+                    consumed_sequence: 2,
+                    reason: SkipReason::Capture(reason),
+                },
+            ] if reason == "excluded"
+        ));
+        // Only the arming capture (Editor.exe) is stored; the frozen excluded
+        // sample never reaches history.
+        assert_eq!(monitor.history.state.clips_for_ipc().len(), 1);
+    }
+
+    #[test]
+    fn history_lock_retry_keeps_the_first_sampled_source() {
+        let history = FakeHistory {
+            locked_attempts: 1,
+            ..Default::default()
+        };
+        let mut monitor = ClipboardMonitor::new(
+            FakeSequenceReader { sequence: 1 },
+            FakeCapturer {
+                calls: 0,
+                sources_seen: Vec::new(),
+                results: vec![
+                    captured(clip("first", "hash-retry", 0, "Editor.exe")),
+                    captured(clip("retry", "hash-retry", 50, "Editor.exe")),
+                ],
+            },
+            history,
+            RecordingEmitter::default(),
+            FakeSourceSampler {
+                calls: 0,
+                samples: vec![source("Editor.exe"), source("Browser.exe")],
+            },
+            "Mnemark.exe".to_string(),
+        );
+
+        monitor.tick(true, &AppConfig::default(), 0);
+        monitor.tick(true, &AppConfig::default(), 50);
+
+        assert_eq!(monitor.source_sampler.calls, 1);
+        assert_eq!(
+            monitor.capturer.sources_seen,
+            vec![source("Editor.exe"), source("Editor.exe")]
+        );
     }
 
     #[test]

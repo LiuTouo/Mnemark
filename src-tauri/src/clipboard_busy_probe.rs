@@ -26,7 +26,16 @@
 #[cfg(test)]
 mod probes {
     use crate::clipboard::capture_clipboard;
-    use crate::models::AppConfig;
+    use crate::models::{AppConfig, ClipboardSource};
+
+    /// Fixed attribution for probe captures; the probes exercise clipboard
+    /// locking and rendering, not source sampling.
+    fn probe_source() -> ClipboardSource {
+        ClipboardSource {
+            exe: "probe.exe".to_string(),
+            title: String::new(),
+        }
+    }
 
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
@@ -350,7 +359,7 @@ mod probes {
         let competitor = spawn_competitor(shared.clone());
         std::thread::sleep(Duration::from_millis(100));
 
-        let outcome = capture_clipboard(&AppConfig::default());
+        let outcome = capture_clipboard(&AppConfig::default(), &probe_source());
 
         std::thread::sleep(Duration::from_millis(50));
         shared.stop.store(true, Ordering::Relaxed);
@@ -428,7 +437,7 @@ mod probes {
         let config = AppConfig::default();
         let cap = std::thread::spawn(move || {
             let t0 = Instant::now();
-            let r = capture_clipboard(&config);
+            let r = capture_clipboard(&config, &probe_source());
             (r.is_ok(), t0.elapsed().as_millis())
         });
 
@@ -480,7 +489,7 @@ mod probes {
 
         let config = AppConfig::default();
         let capture_start = Instant::now();
-        let outcome = capture_clipboard(&config);
+        let outcome = capture_clipboard(&config, &probe_source());
         let capture_elapsed = capture_start.elapsed();
 
         std::thread::sleep(Duration::from_millis(50));

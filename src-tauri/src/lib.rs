@@ -19,7 +19,7 @@ mod update;
 use capture_policy::{
     CaptureDecision, CaptureEmitter, CaptureHistory, CaptureStoreOutcome, CaptureStoreRequest,
     ClipboardCaptureOutcome, ClipboardCapturer, ClipboardMonitor, ClipboardSequenceReader,
-    SkipReason,
+    ClipboardSourceSampler, SkipReason,
 };
 use config_transaction::{run_config_update, ConfigEffects};
 use drawer::{DrawerMutation, DrawerState, DrawerViewInvalidation, DrawerViewState};
@@ -31,8 +31,8 @@ use located_clip::{
     LockedStateLocatedClipSource, StateLocatedClipSource, SystemLocatedClipPlatform,
 };
 use models::{
-    AppConfig, BatchMutationResult, Clip, ClipLocator, CollectionSummary, PanelShortcut,
-    PreviewPayload, CURRENT_TUTORIAL_VERSION,
+    AppConfig, BatchMutationResult, Clip, ClipLocator, ClipboardSource, CollectionSummary,
+    PanelShortcut, PreviewPayload, CURRENT_TUTORIAL_VERSION,
 };
 use panel_session::{PanelSession, PasteAction, SystemForegroundWindowSource, SystemPanelClock};
 use persistence::Persistence;
@@ -742,11 +742,24 @@ impl ClipboardSequenceReader for Win32SequenceReader {
     }
 }
 
+struct Win32SourceSampler;
+
+impl ClipboardSourceSampler for Win32SourceSampler {
+    /// Foreground identity at this instant. The capture policy calls this once
+    /// per new clipboard sequence and freezes the result for all later ticks
+    /// consuming that sequence — deferred captures and history-lock retries
+    /// never re-sample here, so a focus change after a password manager's copy
+    /// cannot re-attribute the content to another app.
+    fn sample(&mut self) -> ClipboardSource {
+        clipboard::get_foreground_info()
+    }
+}
+
 struct Win32ClipboardCapturer;
 
 impl ClipboardCapturer for Win32ClipboardCapturer {
-    fn capture(&mut self, config: &AppConfig) -> ClipboardCaptureOutcome {
-        match clipboard::capture_clipboard(config) {
+    fn capture(&mut self, config: &AppConfig, source: &ClipboardSource) -> ClipboardCaptureOutcome {
+        match clipboard::capture_clipboard(config, source) {
             Ok(clip) => ClipboardCaptureOutcome::Captured(Box::new(clip)),
             Err(clipboard::CaptureError::Locked) => ClipboardCaptureOutcome::Locked,
             // Lost renders are converted to deferred Clips inside
@@ -841,6 +854,7 @@ fn start_monitor(
             Win32ClipboardCapturer,
             SharedCaptureHistory { history },
             TauriCaptureEmitter { app: app_handle },
+            Win32SourceSampler,
             self_exe,
         );
 
