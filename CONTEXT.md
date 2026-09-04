@@ -53,7 +53,7 @@ The ordered, in-memory collection of all Clips. Managed by the Rust backend, exp
 
 **Capacity:** dual limit for images — count (`image_count_limit`, default 10) and memory (`image_memory_budget`, default 50 MB). Text: max 100 Clips (configurable). FilePaths Clips count toward text. Eviction is oldest-unpinned-first on whichever image limit is breached first.
 
-**Persistence:** in-memory by default. Optional SQLite write-through persistence via the `persist` config option (Settings checkbox). The database (`mnemark.db`) lives in the data dir — next to the exe for portable builds, `%APPDATA%\Mnemark` for installed builds (see Portable). When enabled, every capture/delete/pin/eviction is mirrored to SQLite and the History is reloaded on startup. Disabling persistence deletes `mnemark.db`.
+**Persistence:** in-memory by default. Optional SQLite write-through persistence via the `persist` config option (Settings checkbox). The database (`mnemark.db`) lives in the data dir — next to the exe for portable builds, `%APPDATA%\Mnemark` for installed builds (see Portable). When enabled, every capture/delete/pin/eviction is mirrored to SQLite and the History is reloaded on startup. Disabling persistence immediately deletes all saved history rows in one transaction (a failed deletion keeps persistence enabled and surfaces the error); the `mnemark.db` file itself stays in place because it also hosts Drawer data.
 
 ### Pin
 A marker on a Clip that keeps it at the top of the History, above a visual divider.

@@ -254,6 +254,13 @@ impl FavoritesStore {
         Self { conn }
     }
 
+    /// Give up the connection so a test can hand the same database (with the
+    /// favorites schema installed) to another module.
+    #[cfg(test)]
+    pub(crate) fn into_conn(self) -> Connection {
+        self.conn
+    }
+
     #[cfg(test)]
     pub(crate) fn shared_row_image_for_test(
         &self,
@@ -788,7 +795,8 @@ mod tests {
             captured_at: 1,
             pinned: false,
             byte_size: 10,
-            deferred: None,        }
+            deferred: None,
+        }
     }
 
     #[test]

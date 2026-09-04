@@ -142,10 +142,10 @@ impl Persistence {
         p
     }
 
-    /// Record the current time as the last-cleanup gate. Disabling persistence
-    /// calls this so the leftover DB survives a 72-hour grace before a later
-    /// startup reconciliation purges its now-stale rows.
-    pub fn record_last_cleanup(&self, now_ms: u64) -> Result<(), String> {
+    /// Record the current time as the last-cleanup gate — the timestamp the
+    /// startup reconciliation uses to decide whether a purge is due.
+    #[cfg(test)]
+    pub(crate) fn record_last_cleanup(&self, now_ms: u64) -> Result<(), String> {
         set_meta(&self.conn, LAST_CLEANUP_KEY, now_ms as i64)
     }
 
@@ -277,13 +277,15 @@ impl Persistence {
     }
 }
 
-/// Disable persistence: record the durable last-cleanup gate, then drop the
-/// live connection. If the gate write fails the connection is left installed so
-/// the caller surfaces the error (and rollback stays truthful) instead of
-/// reporting success without a stored 72-hour baseline.
+/// Disable persistence: transactionally delete every persisted history row
+/// (an empty active set is exactly the disabled case of the stale-row
+/// reconciliation), then drop the live connection — success is reported only
+/// after the deletion committed. If the deletion fails the connection is left
+/// installed so the caller surfaces the error (and rollback stays truthful)
+/// instead of reporting success while rows survive on disk.
 pub fn disable(persistence: &mut Option<Persistence>, now_ms: u64) -> Result<(), String> {
-    if let Some(p) = persistence.as_ref() {
-        p.record_last_cleanup(now_ms)?;
+    if let Some(p) = persistence.as_mut() {
+        reconcile_stale(&mut p.conn, &[], now_ms)?;
     }
     *persistence = None;
     Ok(())
@@ -438,7 +440,8 @@ mod tests {
             captured_at,
             pinned: false,
             byte_size: 10,
-            deferred: None,        }
+            deferred: None,
+        }
     }
 
     #[test]
@@ -649,12 +652,63 @@ mod tests {
     }
 
     #[test]
-    fn disable_writes_gate_then_drops_connection() {
+    fn disable_drops_connection_on_success() {
         let mut p = test_persistence();
         p.dump(&[clip("a", "ha", 1)]).unwrap();
         let mut opt = Some(p);
         disable(&mut opt, 5_000_000).unwrap();
         assert!(opt.is_none());
+    }
+
+    #[test]
+    fn reconcile_on_empty_table_is_harmless() {
+        let mut p = test_persistence();
+        reconcile_stale(&mut p.conn, &[], 1_000).unwrap();
+        assert!(p.load_all().unwrap().is_empty());
+        assert_eq!(last_cleanup_ms(&p.conn).unwrap(), Some(1_000));
+    }
+
+    #[test]
+    fn disable_reopen_shows_zero_clips_rows() {
+        // Shared-cache in-memory DB: the keep-alive connection plays the
+        // "reopen" role and outlives the connection disable drops.
+        let conn = Connection::open("file:disable_reopen?mode=memory&cache=shared").unwrap();
+        init_schema(&conn).unwrap();
+        let mut p = Persistence::from_conn(conn);
+        p.dump(&[clip("a", "ha", 1), clip("b", "hb", 2)]).unwrap();
+        let keep = Connection::open("file:disable_reopen?mode=memory&cache=shared").unwrap();
+        disable(&mut Some(p), 5_000_000).unwrap();
+        let count: i64 = keep
+            .query_row("SELECT COUNT(*) FROM clips", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn disable_delete_failure_keeps_connection_and_rows() {
+        let mut opt = Some(Persistence::writes_fail_seeded_for_test(&[clip(
+            "a", "ha", 1,
+        )]));
+        assert!(disable(&mut opt, 5_000_000).is_err());
+        assert!(opt.is_some(), "delete failure must not drop the connection");
+        // The row survives the failed disable, so persistence stays truthful.
+        assert_eq!(opt.as_ref().unwrap().load_all().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn disable_leaves_drawer_tables_untouched() {
+        let favs =
+            crate::favorites::FavoritesStore::from_conn(Connection::open_in_memory().unwrap());
+        favs.create_collection("work").unwrap();
+        let conn = favs.into_conn();
+        init_schema(&conn).unwrap();
+        let mut p = Persistence::from_conn(conn);
+        p.dump(&[clip("a", "ha", 1)]).unwrap();
+
+        reconcile_stale(&mut p.conn, &[], 5_000_000).unwrap();
+        assert!(p.load_all().unwrap().is_empty());
+        let favs = crate::favorites::FavoritesStore::from_conn(p.conn);
+        assert_eq!(favs.list_collections().unwrap().len(), 1);
     }
 
     #[test]
@@ -668,8 +722,10 @@ mod tests {
     }
 
     #[test]
-    fn disable_lifecycle_records_gate_then_purges_after_grace() {
-        // Disable: record the gate timestamp and leave rows in place.
+    fn stale_gate_purges_rows_after_grace() {
+        // Defense-in-depth: rows predating an immediate purge (older builds,
+        // failed writes) with a stale gate timestamp are purged by the
+        // startup reconciliation once due — idempotent on an empty table.
         let mut p = test_persistence();
         p.dump(&[clip("a", "ha", 1)]).unwrap();
         let disabled_at = 50_000_000;

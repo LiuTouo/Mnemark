@@ -1,8 +1,8 @@
-#[cfg(test)]
-mod clipboard_busy_probe; // regression probes: delayed-render capture/paste interference
 mod capture_policy;
 mod clip_encoding;
 mod clipboard;
+#[cfg(test)]
+mod clipboard_busy_probe; // regression probes: delayed-render capture/paste interference
 mod config_transaction;
 mod drawer;
 mod favorites;
@@ -229,9 +229,10 @@ pub(crate) fn now_ms() -> u64 {
 /// Apply the persistence side of a config change, through the aggregate. When
 /// enabling: the History module opens the database and atomically dumps the
 /// current in-memory History before entering write-through mode. When
-/// disabling: the durable last-cleanup gate is written before the connection
-/// is dropped — the DB file stays in place for a later startup to
-/// reconcile/purge. Any failure leaves the previous mode intact.
+/// disabling: every persisted history row is deleted in one transaction
+/// before the connection is dropped — the DB file stays in place (it hosts
+/// Drawer data), but no clips rows survive the toggle. Any failure leaves the
+/// previous mode intact.
 fn apply_persist(state: &AppState, enabled: bool) -> Result<(), String> {
     let mut history = lock(&state.history);
     if enabled {

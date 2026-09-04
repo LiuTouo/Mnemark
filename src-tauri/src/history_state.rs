@@ -264,10 +264,10 @@ impl HistoryState {
         Ok(())
     }
 
-    /// Disable write-through: record the durable last-cleanup gate, then drop
-    /// the live connection. A gate failure keeps the connection installed —
-    /// the error propagates instead of reporting success without a stored
-    /// 72-hour cleanup baseline.
+    /// Disable write-through: transactionally delete every persisted history
+    /// row, then drop the live connection. A purge failure keeps the
+    /// connection installed — the error propagates instead of reporting
+    /// success while rows survive on disk.
     pub(crate) fn disable_persistence(&mut self, now: u64) -> Result<(), HistoryError> {
         persistence::disable(&mut self.persistence, now).map_err(HistoryError::Persistence)
     }
@@ -378,7 +378,8 @@ mod tests {
             captured_at,
             pinned: false,
             byte_size: 10,
-            deferred: None,        }
+            deferred: None,
+        }
     }
 
     fn image_clip(id: &str, captured_at: u64, byte_size: u64) -> Clip {
