@@ -10,6 +10,13 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
+    # Protected-environment gate (CWE-829): every release waits for manual
+    # approval BEFORE this job — and with it the signing key and publish
+    # token — runs at all. Requires the `release-signing` environment to
+    # exist in repo Settings → Environments with required reviewers, and the
+    # TAURI_SIGNING_* secrets to live in that environment (not repo-level).
+    # Procedure: docs/release-key-rotation.md
+    environment: release-signing
     steps:
       # Third-party actions are pinned to full 40-hex SHAs (CWE-829): this
       # workflow holds contents: write and the updater signing key, so a
