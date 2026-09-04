@@ -54,7 +54,9 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       # The portable build is the same raw exe the NSIS bundle was made from.
-      # Asset name convention: the About-page updater matches /portable/i + .exe.
+      # Asset name convention: the About-page updater picks the signed
+      # manifest (*.manifest.json) and the backend derives the exe name
+      # (Mnemark_<tag>_x64-portable.exe) from it.
       - name: Stage portable exe
         shell: pwsh
         run: Copy-Item "src-tauri/target/release/mnemark.exe" "Mnemark_${{ github.ref_name }}_x64-portable.exe"
@@ -68,11 +70,40 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npx tauri signer sign "Mnemark_${{ github.ref_name }}_x64-portable.exe"
 
+      # Signed update manifest: binds the portable exe to this repository, the
+      # exact version, channel, architecture, and the artifact's file name,
+      # byte length, and SHA-256. The backend verifies the signature, then
+      # every field, then the artifact digest — so a re-uploaded old artifact
+      # under a newer tag, a swapped/truncated artifact, or a non-strict
+      # upgrade are all rejected. Field names/values must match
+      # update::UpdateManifest (RELEASE_REPO, channel "portable",
+      # std::env::consts::ARCH).
+      - name: Build and sign portable update manifest
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $exe = "Mnemark_${{ github.ref_name }}_x64-portable.exe"
+          $manifest = [ordered]@{
+            repository   = "LiuTouo/Mnemark"
+            version      = "${{ github.ref_name }}".TrimStart('v')
+            channel      = "portable"
+            architecture = "x86_64"
+            file         = $exe
+            length       = (Get-Item $exe).Length
+            sha256       = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          }
+          # UTF-8 without BOM — the backend verifies the raw bytes it parsed.
+          [System.IO.File]::WriteAllText("$exe.manifest.json",
+            ($manifest | ConvertTo-Json -Compress), [System.Text.UTF8Encoding]::new($false))
+          npx tauri signer sign "$exe.manifest.json"
+
       - name: Upload portable asset
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ github.ref_name }}" "Mnemark_${{ github.ref_name }}_x64-portable.exe" "Mnemark_${{ github.ref_name }}_x64-portable.exe.sig" --clobber
+        run: gh release upload "${{ github.ref_name }}" "Mnemark_${{ github.ref_name }}_x64-portable.exe" "Mnemark_${{ github.ref_name }}_x64-portable.exe.sig" "Mnemark_${{ github.ref_name }}_x64-portable.exe.manifest.json" "Mnemark_${{ github.ref_name }}_x64-portable.exe.manifest.json.sig" --clobber
 
       # tauri-action creates the release with the commit message as body.
       # Replace it with this version's CHANGELOG section (header line dropped —

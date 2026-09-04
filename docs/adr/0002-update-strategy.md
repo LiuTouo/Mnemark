@@ -28,17 +28,24 @@ against a portable exe.
   (ureq) to `clipflow-update.exe` next to the running exe — the webview's
   fetch can't follow GitHub's asset CDN redirect (no CORS headers). The
   user quits and overwrites manually; Windows cannot replace a running exe.
-- **Portable verification**: CI signs the portable exe with the same minisign
-  key as the NSIS updater artifacts (`tauri signer sign`, uploading
-  `<asset>.sig`). `download_portable_update` accepts only https URLs on
-  `github.com` / `*.githubusercontent.com`, re-validating every redirect
-  hop, and writes `clipflow-update.exe` ONLY after the downloaded bytes
-  verify against the pubkey embedded in the binary — the webview picks the
-  release asset but cannot turn that into an arbitrary-URL file drop.
-  Since #25 the URLs are parsed with the `url` crate (the same WHATWG
-  grammar ureq's request API uses), which also rejects userinfo/credentials
-  and non-443 ports; a redirect `Location` is resolved against the current
-  URL before being re-validated.
+- **Portable verification**: CI ships a signed update manifest next to the
+  portable exe — `<asset>.manifest.json` (+ `.sig`, signed with the same
+  minisign key as the NSIS updater artifacts). The manifest binds the
+  repository, the exact version, the channel (`portable`), the
+  architecture, and the artifact's file name, byte length, and SHA-256.
+  `download_portable_update` takes only the manifest URL (https +
+  `github.com` / `*.githubusercontent.com`, every redirect hop
+  re-validated) and makes every trust decision in Rust: verify the
+  signature over the raw manifest bytes, check every field binding and the
+  strict upgrade against the running version, download the artifact from a
+  URL derived from the verified manifest, then check its length + SHA-256.
+  Only then is `mnemark-update.exe` written — the webview picks the release
+  but cannot turn that into an arbitrary-URL file drop, and an old signed
+  artifact re-uploaded under a newer tag fails the version binding (#32);
+  the unsigned tag is never trusted. Since #25 the URLs are parsed with the
+  `url` crate (the same WHATWG grammar ureq's request API uses), which also
+  rejects userinfo/credentials and non-443 ports; a redirect `Location` is
+  resolved against the current URL before being re-validated.
 - **Config/data location**: portable keeps everything next to the exe;
   installed builds use `%APPDATA%\ClipFlow` (the install dir may be
   Program Files, which is not user-writable). See `models::data_dir`.
@@ -54,8 +61,9 @@ against a portable exe.
   automatic update path is dead — they must be replaced manually once.
 - Before the first CI release, `latest.json` 404s; checks fail silently
   (logged), the About page shows "no release yet".
-- Releases cut before portable signing existed have no `.sig` asset; the
-  About page refuses them with "no signature file". Since updates only move
-  forward, this only blocks "updating" toward those older releases.
+- Releases cut before the signed manifest existed (and before portable
+  signing, likewise) have no `.manifest.json` asset; the About page refuses
+  them with "no signed update manifest". Since updates only move forward,
+  this only blocks "updating" toward those older releases.
 - Losing the signing private key breaks updates permanently; it must be
   backed up alongside the repo secrets.

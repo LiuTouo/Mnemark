@@ -4,16 +4,17 @@
 //!   must NEVER run on portable — it would run the NSIS installer over a
 //!   portable exe.
 //! - portable (raw exe anywhere else): the About page checks GitHub for a
-//!   newer release, then Rust downloads the new exe (the webview's fetch
-//!   dies on CORS when GitHub redirects to the CDN) and the user overwrites
-//!   the old exe manually after quitting.
+//!   newer release, then Rust downloads the signed update manifest (the
+//!   webview's fetch dies on CORS when GitHub redirects to the CDN), verifies
+//!   it, downloads the manifest-bound exe, and the user overwrites the old
+//!   exe manually after quitting.
 //!
 //! Channel detection reads the NSIS uninstall registry key — the only
 //! reliable marker, since the install location is user-selectable
 //! (per-user %LOCALAPPDATA%\Programs or per-machine Program Files).
 
 use crate::models::AppConfig;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
@@ -247,6 +248,131 @@ fn verify_with_pubkey(data: &[u8], sig_file: &str, pubkey_b64: &str) -> Result<(
         .map_err(|e| format!("Signature verification failed: {e}"))
 }
 
+/// The GitHub repository releases are fetched from. The manifest binds every
+/// update to this value, so a manifest signed for a different repo is worthless.
+const RELEASE_REPO: &str = "LiuTouo/Mnemark";
+
+/// Signed update manifest, produced by the release workflow next to the
+/// portable exe (`<asset>.manifest.json` + `.sig`, same minisign key). It
+/// binds the release to a repository, exact version, channel, architecture,
+/// and the artifact's file name, byte length, and SHA-256 — so a re-uploaded
+/// old artifact can't pass as a newer release, and an artifact can't be
+/// swapped or truncated under a valid signature. The signature covers the
+/// raw manifest bytes; the manifest is parsed only after they verify.
+#[derive(Debug, Deserialize, PartialEq)]
+struct UpdateManifest {
+    repository: String,
+    version: String,
+    channel: String,
+    architecture: String,
+    file: String,
+    length: u64,
+    sha256: String,
+}
+
+fn parse_manifest(bytes: &[u8]) -> Result<UpdateManifest, String> {
+    serde_json::from_slice(bytes).map_err(|e| format!("Invalid update manifest: {e}"))
+}
+
+/// Compare dotted numeric versions ("1.2.3", leading 'v' tolerated). Same lax
+/// semantics as the About page's cmpSemver: up to three parts, missing = 0.
+fn cmp_version(a: &str, b: &str) -> std::cmp::Ordering {
+    let parse = |s: &str| -> Vec<u64> {
+        s.trim_start_matches('v')
+            .split('.')
+            .map(|p| p.parse().unwrap_or(0))
+            .collect()
+    };
+    let (pa, pb) = (parse(a), parse(b));
+    for i in 0..3 {
+        match pa
+            .get(i)
+            .copied()
+            .unwrap_or(0)
+            .cmp(&pb.get(i).copied().unwrap_or(0))
+        {
+            std::cmp::Ordering::Equal => continue,
+            other => return other,
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+/// All field-binding and strict-upgrade checks the verified manifest must
+/// pass against this installation: the release must come from our repo, be
+/// a portable x86_64 artifact, and be strictly newer than the running exe.
+fn check_manifest(manifest: &UpdateManifest, running: &str) -> Result<(), String> {
+    if manifest.repository != RELEASE_REPO {
+        return Err(format!(
+            "Manifest repository '{}' is not '{RELEASE_REPO}'",
+            manifest.repository
+        ));
+    }
+    if manifest.channel != "portable" {
+        return Err(format!(
+            "Manifest channel '{}' is not 'portable'",
+            manifest.channel
+        ));
+    }
+    if manifest.architecture != std::env::consts::ARCH {
+        return Err(format!(
+            "Manifest architecture '{}' is not '{}'",
+            manifest.architecture,
+            std::env::consts::ARCH
+        ));
+    }
+    if cmp_version(&manifest.version, running) != std::cmp::Ordering::Greater {
+        return Err(format!(
+            "Manifest version v{} is not newer than the running v{running}",
+            manifest.version
+        ));
+    }
+    // File-name binding: the artifact must be exactly the portable exe this
+    // version should ship as. One equality check pins the CI naming
+    // convention AND rules out path tricks ("../", separators) in one go —
+    // anything else simply cannot equal the expected name.
+    let expected_file = format!("Mnemark_v{}_x64-portable.exe", manifest.version);
+    if manifest.file != expected_file {
+        return Err(format!(
+            "Manifest file '{}' does not match the expected portable artifact '{expected_file}'",
+            manifest.file
+        ));
+    }
+    Ok(())
+}
+
+/// Artifact download URL, derived ONLY from the signature-verified manifest —
+/// never from a URL the webview supplied.
+fn artifact_url(manifest: &UpdateManifest) -> Result<String, String> {
+    let url = format!(
+        "https://github.com/{RELEASE_REPO}/releases/download/v{}/{}",
+        manifest.version, manifest.file
+    );
+    validate_download_url(&url)?;
+    Ok(url)
+}
+
+/// Length + SHA-256 binding: the downloaded bytes must be exactly what the
+/// signed manifest describes.
+fn verify_artifact(bytes: &[u8], manifest: &UpdateManifest) -> Result<(), String> {
+    if bytes.len() as u64 != manifest.length {
+        return Err(format!(
+            "Downloaded artifact is {} bytes, manifest says {}",
+            bytes.len(),
+            manifest.length
+        ));
+    }
+    use sha2::Digest;
+    let digest = hex::encode(sha2::Sha256::digest(bytes));
+    if digest != manifest.sha256.to_ascii_lowercase() {
+        return Err(format!(
+            "Artifact SHA-256 mismatch: got {digest}, manifest says {}",
+            manifest.sha256
+        ));
+    }
+    Ok(())
+}
+
 /// Where a downloaded portable update is staged: next to the running exe.
 fn portable_update_dest() -> Option<PathBuf> {
     std::env::current_exe()
@@ -301,22 +427,38 @@ pub fn cleanup_stale_portable_update() {
 
 /// Download the newer portable exe next to the running one. Rust-side
 /// because GitHub's asset CDN omits CORS headers, so webview fetch fails.
-/// The exe is written ONLY after its minisign signature verifies — an
-/// unverified byte never becomes mnemark-update.exe. Returns the dest path.
+///
+/// The webview supplies only the manifest URL; every trust decision happens
+/// here: verify the manifest signature over its raw bytes, parse it, bind it
+/// to this repo/channel/architecture and a strictly newer version than the
+/// running exe, derive the artifact URL from the verified manifest, verify
+/// the downloaded bytes against the manifest's length + SHA-256 — and only
+/// then is an unverified byte ever written. Returns the dest path.
 #[tauri::command]
-pub async fn download_portable_update(url: String, sig_url: String) -> Result<String, String> {
+pub async fn download_portable_update(
+    app: tauri::AppHandle,
+    manifest_url: String,
+) -> Result<String, String> {
     if is_installed_build() {
         return Err("Portable download is only for portable builds".to_string());
     }
-    validate_download_url(&url)?;
-    validate_download_url(&sig_url)?;
+    validate_download_url(&manifest_url)?;
     let dest = portable_update_dest().ok_or_else(|| "No exe dir".to_string())?;
+    let running = app.package_info().version.to_string();
 
     tauri::async_runtime::spawn_blocking(move || {
-        let exe_bytes = download_validated(&url)?;
+        // The manifest and its signature arrive together and must verify
+        // before anything else is fetched or decided.
+        let manifest_bytes = download_validated(&manifest_url)?;
+        let sig_url = format!("{manifest_url}.sig");
         let sig_bytes = download_validated(&sig_url)?;
         let sig_text = String::from_utf8(sig_bytes).map_err(|e| e.to_string())?;
-        verify_with_pubkey(&exe_bytes, &sig_text, UPDATE_PUBKEY)?;
+        verify_with_pubkey(&manifest_bytes, &sig_text, UPDATE_PUBKEY)?;
+        let manifest = parse_manifest(&manifest_bytes)?;
+        check_manifest(&manifest, &running)?;
+
+        let exe_bytes = download_validated(&artifact_url(&manifest)?)?;
+        verify_artifact(&exe_bytes, &manifest)?;
         let staging = dest.with_extension("staging");
         stage_atomic(&dest, &staging, &exe_bytes)?;
         Ok(dest.to_string_lossy().to_string())
@@ -491,6 +633,28 @@ mod tests {
     const TEST_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlDRDFFNTQ5OTdDNDExQTUKUldTbEVjU1hTZVhSbkwrR3FaVWNMejFiTDROak9PL1RNeGliak81WW9ENTltQXFxTEI4MlJ3Q1QK";
     const TEST_SIG: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTbEVjU1hTZVhSbk50c0Y4dmYzNVlzZmh2Z3FYaTk2V0RQNW43VUxicjMvMEsraXhBSzFOcDhKcURKUXVmREFMYzVvaG1RUU13K3ArTjVhVkVqMklVUnNiMWVLRUdsVmc0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0NzgyMTAyCWZpbGU6ZHVtbXkuZXhlClRibDZJK20rRGFoekUwS25TZ01pSGdYZnA0Si9jQkNKampHTFphYmdOSnUyVXVpMzlTb0MzRDVFVVYxT082MjIxbFhoOUVESk14RTJjM1ZvZ1JzRERBPT0K";
     const TEST_DATA: &[u8] = b"dummy-portable-exe-bytes-for-signature-test";
+
+    // A second keypair + a signed manifest, generated with `npx tauri signer
+    // generate/sign` — same formats the release pipeline emits. FULL_MANIFEST
+    // describes TEST_DATA (length 43, its SHA-256) at version 0.9.0, so the
+    // signature, field binding, and digest checks can all pass together.
+    const MANIFEST_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDU1MUUwQ0RGOUY5NDhGODAKUldTQWo1U2Yzd3dlVlFDR3paOWtmbXVrZWcveGVFMFN0ekF5ZERqTTIwVVVHTGFLTko2Q2dhMHEK";
+    const FULL_MANIFEST: &str = "{\"architecture\":\"x86_64\",\"channel\":\"portable\",\"file\":\"Mnemark_v0.9.0_x64-portable.exe\",\"length\":43,\"repository\":\"LiuTouo/Mnemark\",\"sha256\":\"f64bd477ab66e2d4d60545eb4a163d991d6f932a94739fbd7abda4bb056204e8\",\"version\":\"0.9.0\"}";
+    const FULL_MANIFEST_SIG: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTQWo1U2Yzd3dlVlp1ZUoxa1pjVHY1UnduZ2k1QmVMZlloSUovYlhuRjRYcXZORHB4TW1CQmdLdVhEUThPZHJsY2h6RjJOaTkvNWRlaUJROS8vVmE3SXVPT205YnhpandrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4NDk3Mzc2CWZpbGU6ZnVsbC5qc29uCml6Z3ovMzk5WHJiaDBUVG5aNXJ2dDlMUDZ6aXlQMUVETk5KaU9VbDg4QU8ya0tpYnVRb1ZNWmQ3a09VcS82dEN6N0RwQzQxQ1cxbDhYNW1pakN5d0RnPT0K";
+
+    /// A manifest every check accepts on this machine (arch = build arch,
+    /// version 0.9.0 > the 0.8.0 running version the tests pass in).
+    fn valid_manifest() -> UpdateManifest {
+        UpdateManifest {
+            repository: RELEASE_REPO.to_string(),
+            version: "0.9.0".to_string(),
+            channel: "portable".to_string(),
+            architecture: std::env::consts::ARCH.to_string(),
+            file: "Mnemark_v0.9.0_x64-portable.exe".to_string(),
+            length: TEST_DATA.len() as u64,
+            sha256: "f64bd477ab66e2d4d60545eb4a163d991d6f932a94739fbd7abda4bb056204e8".to_string(),
+        }
+    }
 
     #[test]
     fn verifies_a_real_tauri_cli_signature() {
@@ -706,5 +870,113 @@ mod tests {
         );
         assert!(dest.join("keep.txt").exists(), "dest must be untouched");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- Signed update manifest (issue #32) -------------------------------
+
+    /// The happy path a release ships: signature over the raw manifest bytes
+    /// verifies, the parsed manifest passes every field binding, and the
+    /// artifact the manifest describes matches TEST_DATA exactly.
+    #[test]
+    fn signed_manifest_verifies_and_binds_the_artifact() {
+        verify_with_pubkey(FULL_MANIFEST.as_bytes(), FULL_MANIFEST_SIG, MANIFEST_PUBKEY).unwrap();
+        let manifest = parse_manifest(FULL_MANIFEST.as_bytes()).unwrap();
+        assert_eq!(manifest, valid_manifest());
+        check_manifest(&manifest, "0.8.0").unwrap();
+        verify_artifact(TEST_DATA, &manifest).unwrap();
+    }
+
+    #[test]
+    fn tampered_manifest_bytes_are_rejected() {
+        let mut bytes = FULL_MANIFEST.as_bytes().to_vec();
+        bytes[10] ^= 0x01;
+        assert!(verify_with_pubkey(&bytes, FULL_MANIFEST_SIG, MANIFEST_PUBKEY).is_err());
+    }
+
+    #[test]
+    fn manifest_signed_by_another_key_is_rejected() {
+        // The production UPDATE_PUBKEY did not sign this fixture.
+        assert!(
+            verify_with_pubkey(FULL_MANIFEST.as_bytes(), FULL_MANIFEST_SIG, UPDATE_PUBKEY).is_err()
+        );
+    }
+
+    #[test]
+    fn parse_manifest_rejects_garbage_and_missing_fields() {
+        assert!(parse_manifest(b"not json").is_err());
+        assert!(parse_manifest(b"{}").is_err());
+        let no_channel = r#"{"architecture":"x86_64","file":"x.exe","length":1,"repository":"LiuTouo/Mnemark","sha256":"ab","version":"0.9.0"}"#;
+        assert!(parse_manifest(no_channel.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn version_binding_rejects_an_old_artifact_under_a_new_tag() {
+        // The replay: a release writer re-uploads a genuinely signed old
+        // manifest under a newer tag. The tag is unsigned and the backend
+        // never sees it — only the version INSIDE the manifest counts.
+        let mut old = valid_manifest();
+        old.version = "0.8.0".to_string();
+        assert!(check_manifest(&old, "0.8.0").is_err());
+        old.version = "0.7.9".to_string();
+        assert!(check_manifest(&old, "0.8.0").is_err());
+    }
+
+    #[test]
+    fn field_bindings_reject_wrong_repository_channel_and_architecture() {
+        let mut wrong = valid_manifest();
+        wrong.repository = "EvilCorp/Mnemark".to_string();
+        assert!(check_manifest(&wrong, "0.8.0").is_err());
+
+        wrong = valid_manifest();
+        wrong.channel = "installed".to_string();
+        assert!(check_manifest(&wrong, "0.8.0").is_err());
+
+        wrong = valid_manifest();
+        wrong.architecture = "aarch64".to_string();
+        assert!(check_manifest(&wrong, "0.8.0").is_err());
+
+        // File-name binding: any name other than the convention for this
+        // version is rejected — including path escapes like "../x.exe",
+        // which could otherwise redirect the artifact fetch.
+        wrong = valid_manifest();
+        wrong.file = "other.exe".to_string();
+        assert!(check_manifest(&wrong, "0.8.0").is_err());
+
+        wrong = valid_manifest();
+        wrong.file = "../Mnemark_v0.9.0_x64-portable.exe".to_string();
+        assert!(check_manifest(&wrong, "0.8.0").is_err());
+    }
+
+    #[test]
+    fn digest_binding_rejects_a_swapped_or_truncated_artifact() {
+        let manifest = valid_manifest();
+
+        // Same length, different bytes: a valid signature over DIFFERENT
+        // bytes must not make this artifact pass.
+        let mut swapped = TEST_DATA.to_vec();
+        swapped[0] ^= 0xFF;
+        assert!(verify_artifact(&swapped, &manifest).is_err());
+
+        let truncated = &TEST_DATA[..TEST_DATA.len() - 1];
+        assert!(verify_artifact(truncated, &manifest).is_err());
+
+        assert!(verify_artifact(TEST_DATA, &manifest).is_ok());
+    }
+
+    #[test]
+    fn artifact_url_is_derived_from_the_verified_manifest() {
+        assert_eq!(
+            artifact_url(&valid_manifest()).unwrap(),
+            "https://github.com/LiuTouo/Mnemark/releases/download/v0.9.0/Mnemark_v0.9.0_x64-portable.exe"
+        );
+    }
+
+    #[test]
+    fn cmp_version_compares_numerically_and_tolerates_a_v_prefix() {
+        use std::cmp::Ordering;
+        assert_eq!(cmp_version("0.9.0", "0.8.0"), Ordering::Greater);
+        assert_eq!(cmp_version("v0.9.0", "0.9.0"), Ordering::Equal);
+        assert_eq!(cmp_version("1.2.3", "1.2.10"), Ordering::Less);
+        assert_eq!(cmp_version("1.2", "1.2.0"), Ordering::Equal);
     }
 }

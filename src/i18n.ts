@@ -132,8 +132,7 @@ const I18N: Record<string, Record<string, string>> = {
     installing: "正在下載更新；程式將關閉，完成後自動重新開啟…",
     restartNow: "立即重新啟動",
     downloadingUpdate: "正在下載更新…",
-    portableAssetMissing: "此版本未提供免安裝檔案",
-    portableSigMissing: "此版本未提供簽章檔，無法驗證更新",
+    portableManifestMissing: "此版本未提供簽章的更新資訊檔，無法驗證更新",
     portableUpdateReady: "已下載至 {path}。請結束 Mnemark，再用新檔案取代舊的執行檔。",
     openFolder: "開啟資料夾",
     // Drawer sidebar
@@ -340,8 +339,7 @@ const I18N: Record<string, Record<string, string>> = {
     installing: "Downloading update; Mnemark will close and reopen automatically…",
     restartNow: "Restart now",
     downloadingUpdate: "Downloading update…",
-    portableAssetMissing: "No portable build in this release",
-    portableSigMissing: "This release has no signature file — cannot verify the update",
+    portableManifestMissing: "This release has no signed update manifest — cannot verify the update",
     portableUpdateReady: "Downloaded to {path}. Quit Mnemark, then replace the old exe with the new file.",
     openFolder: "Open folder",
     // Drawer sidebar

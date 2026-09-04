@@ -95,31 +95,29 @@ async function portableCheck() {
     return;
   }
 
-  const asset = data.assets.find((a) => /portable/i.test(a.name) && a.name.endsWith(".exe"));
-  if (!asset) {
-    setStatus(t("portableAssetMissing"));
-    return;
-  }
-  // CI signs the portable exe with the updater minisign key; without the
-  // signature the backend refuses the download, so don't start one.
-  const sigAsset = data.assets.find((a) => a.name === `${asset.name}.sig`);
-  if (!sigAsset) {
-    setStatus(t("portableSigMissing"));
+  // CI uploads a signed manifest binding the exe to this repo, an exact
+  // version, channel, architecture, and the artifact's file name/length/
+  // SHA-256. The backend (download_portable_update) verifies the signature
+  // and enforces every binding — including that the manifest version is
+  // strictly newer than the running one — so the tag check above is only a
+  // cheap pre-filter, not the trust decision.
+  const manifest = data.assets.find((a) => a.name.endsWith(".manifest.json"));
+  if (!manifest) {
+    setStatus(t("portableManifestMissing"));
     return;
   }
 
   setStatus(t("updateAvailable", { v: latest }));
-  await portableDownload(asset, sigAsset);
+  await portableDownload(manifest);
 }
 
 /** The actual download runs in Rust (update::download_portable_update):
  * GitHub's asset CDN omits CORS headers, so webview fetch always fails. */
-async function portableDownload(asset: GhAsset, sigAsset: GhAsset) {
+async function portableDownload(manifest: GhAsset) {
   setStatus(t("downloadingUpdate"));
   try {
     const path = await invoke<string>("download_portable_update", {
-      url: asset.browser_download_url,
-      sigUrl: sigAsset.browser_download_url,
+      manifestUrl: manifest.browser_download_url,
     });
     setStatus(t("portableUpdateReady", { path }));
     show("btn-open-folder", true);
