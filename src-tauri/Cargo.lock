@@ -2021,6 +2021,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tokio",
  "ureq",
+ "url",
  "windows 0.58.0",
 ]
 

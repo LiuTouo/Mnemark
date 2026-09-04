@@ -35,6 +35,10 @@ against a portable exe.
   hop, and writes `clipflow-update.exe` ONLY after the downloaded bytes
   verify against the pubkey embedded in the binary — the webview picks the
   release asset but cannot turn that into an arbitrary-URL file drop.
+  Since #25 the URLs are parsed with the `url` crate (the same WHATWG
+  grammar ureq's request API uses), which also rejects userinfo/credentials
+  and non-443 ports; a redirect `Location` is resolved against the current
+  URL before being re-validated.
 - **Config/data location**: portable keeps everything next to the exe;
   installed builds use `%APPDATA%\ClipFlow` (the install dir may be
   Program Files, which is not user-writable). See `models::data_dir`.

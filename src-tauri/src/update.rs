@@ -17,6 +17,7 @@ use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
+use url::Url;
 
 fn to_wide(s: &str) -> Vec<u16> {
     use std::ffi::OsStr;
@@ -130,24 +131,55 @@ fn is_allowed_host(host: &str) -> bool {
             .ends_with(".githubusercontent.com")
 }
 
-/// Enforce https + the host allowlist on an absolute URL. Applied to the
-/// initial URL and to every redirect target.
-fn validate_download_url(url: &str) -> Result<(), String> {
-    let rest = url
-        .strip_prefix("https://")
-        .ok_or_else(|| "Download URL must be https".to_string())?;
-    let authority = rest.split('/').next().unwrap_or_default();
-    // Strip any userinfo ("user@host") before comparing hosts.
-    let host_port = authority.rsplit('@').next().unwrap_or_default();
-    let host = host_port.split(':').next().unwrap_or_default();
-    if host.is_empty() || !is_allowed_host(host) {
+/// Enforce https + the host allowlist on an already-parsed URL: no
+/// credentials, no non-default port, host must be github.com or
+/// *.githubusercontent.com. Parsing happens once, with the same grammar
+/// the ureq request API uses — so the validated host is always the host
+/// the client connects to, and a `?query` or `#fragment` can no longer
+/// smuggle an "@allowed.host" past the check.
+fn validate_parsed(url: &Url) -> Result<(), String> {
+    if url.scheme() != "https" {
+        return Err("Download URL must be https".to_string());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("Download URL must not contain credentials".to_string());
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| "Download URL has no host".to_string())?;
+    if !is_allowed_host(host) {
         return Err(format!("Download host '{host}' is not allowed"));
+    }
+    if let Some(port) = url.port() {
+        if port != 443 {
+            return Err(format!("Download port {port} is not allowed"));
+        }
     }
     Ok(())
 }
 
-/// GET `start_url`, following at most 5 redirects with each hop re-validated
-/// (https + host allowlist). The body is capped at MAX_DOWNLOAD_BYTES.
+/// Parse `raw` once with the shared URL grammar, then enforce https + the
+/// host allowlist. Returns the parsed URL for the download loop.
+fn validate_download_url(raw: &str) -> Result<Url, String> {
+    let url = Url::parse(raw).map_err(|e| format!("Invalid download URL: {e}"))?;
+    validate_parsed(&url)?;
+    Ok(url)
+}
+
+/// Resolve a `Location` header against the current URL (WHATWG join, so
+/// relative references resolve the way a browser would) and re-validate
+/// the resolved target before the next hop.
+fn resolve_redirect(current: &Url, location: &str) -> Result<Url, String> {
+    let next = current
+        .join(location)
+        .map_err(|e| format!("Invalid redirect Location: {e}"))?;
+    validate_parsed(&next)?;
+    Ok(next)
+}
+
+/// GET `start_url`, following at most 5 redirects with each hop resolved
+/// and re-validated (https + host allowlist). The body is capped at
+/// MAX_DOWNLOAD_BYTES.
 fn download_validated(start_url: &str) -> Result<Vec<u8>, String> {
     use std::io::Read;
 
@@ -157,10 +189,9 @@ fn download_validated(start_url: &str) -> Result<Vec<u8>, String> {
         .timeout_read(std::time::Duration::from_secs(120))
         .build();
 
-    let mut url = start_url.to_string();
+    let mut url = validate_download_url(start_url)?;
     for _ in 0..5 {
-        validate_download_url(&url)?;
-        let resp = match agent.get(&url).call() {
+        let resp = match agent.get(url.as_str()).call() {
             Ok(resp) => resp,
             Err(ureq::Error::Status(_, resp)) => resp, // 3xx arrives here with redirects(0)
             Err(e) => return Err(format!("Download failed: {e}")),
@@ -170,7 +201,7 @@ fn download_validated(start_url: &str) -> Result<Vec<u8>, String> {
             let location = resp
                 .header("Location")
                 .ok_or_else(|| "Redirect without Location".to_string())?;
-            url = location.to_string();
+            url = resolve_redirect(&url, location)?;
             continue;
         }
         if status != 200 {
@@ -537,6 +568,81 @@ mod tests {
             "/relative/path", // redirects must stay absolute
         ] {
             assert!(validate_download_url(bad).is_err(), "should reject: {bad}");
+        }
+    }
+
+    /// The old hand-rolled splitter validated whatever sat after the first
+    /// '/', so a host lookalike in the query or fragment passed while the
+    /// HTTP client connected to the real (attacker) host. With the shared
+    /// grammar, the authority ends at '?', '#' and '\' — same as ureq.
+    #[test]
+    fn query_or_fragment_lookalike_host_is_rejected() {
+        for bad in [
+            "https://attacker.example?@github.com/",
+            "https://attacker.example#@github.com/",
+        ] {
+            assert!(validate_download_url(bad).is_err(), "should reject: {bad}");
+        }
+    }
+
+    /// The validated host must equal the host the request API would
+    /// connect to — encoded delimiters and backslashes stay out of the
+    /// authority under the shared grammar.
+    #[test]
+    fn validated_host_matches_the_grammar_the_client_parses() {
+        // Encoded '?' is path data, not a query delimiter.
+        let encoded = validate_download_url("https://github.com/%3f@evil.com").unwrap();
+        assert_eq!(encoded.host_str(), Some("github.com"));
+
+        // WHATWG: '\' ends the authority like '/' for special schemes.
+        let backslash = validate_download_url("https://github.com\\@evil.com/x").unwrap();
+        assert_eq!(backslash.host_str(), Some("github.com"));
+
+        // IPv6 hosts never satisfy the allowlist, bracketed or not.
+        for bad in ["https://[::1]/x", "https://[2001:db8::]/x"] {
+            assert!(validate_download_url(bad).is_err(), "should reject: {bad}");
+        }
+    }
+
+    #[test]
+    fn non_default_port_is_rejected() {
+        assert!(validate_download_url("https://github.com:8443/x").is_err());
+        assert!(validate_download_url("https://github.com:443/x").is_ok());
+    }
+
+    /// Credentials are rejected even when the host itself is allowed —
+    /// unlike `github.com@evil.com`, where the host check fires first.
+    #[test]
+    fn credentials_on_an_allowed_host_are_rejected() {
+        assert!(validate_download_url("https://user:pass@github.com/x").is_err());
+        assert!(validate_download_url("https://user@github.com/x").is_err());
+    }
+
+    /// A relative `Location` resolves against the current URL (browser
+    /// rules) and the resolved target is re-validated before the next hop.
+    #[test]
+    fn relative_redirect_resolves_and_revalidates() {
+        let start = validate_download_url(
+            "https://github.com/LiuTouo/Mnemark/releases/download/v1.0.0/x.exe",
+        )
+        .unwrap();
+
+        let next = resolve_redirect(&start, "../../v1.2.0/x.exe").unwrap();
+        assert_eq!(
+            next.as_str(),
+            "https://github.com/LiuTouo/Mnemark/releases/v1.2.0/x.exe"
+        );
+
+        for bad in [
+            "https://attacker.example/x", // absolute cross-host hop
+            "//attacker.example/x",       // scheme-relative hop
+            "http://github.com/x",        // downgrade
+        ] {
+            let target = start.join(bad).unwrap();
+            assert!(
+                resolve_redirect(&start, bad).is_err(),
+                "should reject redirect to: {target}"
+            );
         }
     }
 

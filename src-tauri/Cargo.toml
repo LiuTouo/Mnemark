@@ -47,6 +47,9 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # Portable-update downloads run in Rust: the webview's fetch dies on CORS
 # when GitHub redirects asset downloads to the CDN (no ACAO header).
 ureq = { version = "2", default-features = false, features = ["tls"] }
+# Portable-update URL validation parses with the same grammar the ureq
+# request API uses, so the validated host is always the connected host.
+url = "2"
 
 [dev-dependencies]
 # Guards the plugins.shell.open regex in tauri.conf.json: the shell plugin
