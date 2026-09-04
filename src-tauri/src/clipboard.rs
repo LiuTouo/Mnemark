@@ -1,4 +1,4 @@
-use crate::models::{AppConfig, Clip, ClipKind};
+use crate::models::{AppConfig, Clip, ClipKind, HARD_PAYLOAD_CAP_BYTES};
 use sha2::{Digest, Sha256};
 use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
 use windows::Win32::System::DataExchange::{
@@ -12,6 +12,14 @@ use windows::Win32::System::Memory::{
 const CF_DIB: u32 = 8;
 const CF_UNICODETEXT: u32 = 13;
 const CF_HDROP: u32 = 15;
+
+/// File-list budgets, enforced while the UTF-16 list is walked — the
+/// materialized `Vec<String>` never exceeds them. The per-entry ceiling is
+/// the Windows path limit (32767 UTF-16 units); the total and count budgets
+/// bound any real selection many times over.
+const FILE_LIST_MAX_ENTRY_UNITS: usize = 32767;
+const FILE_LIST_MAX_ENTRIES: usize = 10_000;
+const FILE_LIST_TOTAL_BYTES: usize = 1024 * 1024;
 
 /// Why a capture attempt failed. `Locked` means the clipboard is held by
 /// another app — transient, worth retrying on the next poll. `Skip` means
@@ -229,6 +237,14 @@ fn read_image(
             let _ = CloseClipboard();
             return Err(CaptureError::Skip("Empty image data".to_string()));
         }
+        // Hard cap before the copy: the allocation size is attacker-chosen,
+        // and the copy below would materialize all of it.
+        if mem_size as usize > HARD_PAYLOAD_CAP_BYTES {
+            let _ = CloseClipboard();
+            return Err(CaptureError::Skip(
+                "Image data over the hard cap".to_string(),
+            ));
+        }
         let ptr = GlobalLock(handle);
         if ptr.is_null() {
             let _ = CloseClipboard();
@@ -241,14 +257,14 @@ fn read_image(
         // Enforce the per-image size limit: oversized images are downscaled
         // and re-encoded as 24bpp DIB, so even pinned images stay bounded.
         let limit = (config.image_size_limit_mb as usize) * 1024 * 1024;
-        let dib_data = if dib_data.len() > limit {
-            match decode_clipboard_image(&dib_data) {
-                Ok(img) => downscale_to_limit(&img, limit),
-                // Can't process what we can't decode — keep the original bytes.
-                Err(_) => dib_data,
+        let dib_data = match bounded_image(dib_data, limit) {
+            Some(d) => d,
+            None => {
+                // Undecodable AND over the limit: nothing storable remains.
+                return Err(CaptureError::Skip(
+                    "Image over the size limit cannot be re-encoded".to_string(),
+                ));
             }
-        } else {
-            dib_data
         };
 
         let byte_size = dib_data.len() as u64;
@@ -289,12 +305,16 @@ fn read_image(
 /// slice), so a malformed payload can never trigger an unaligned deref or an
 /// out-of-bounds read. A missing terminator just ends the walk at the edge
 /// of the buffer; a zero-length *leading* entry (i.e. an empty list) is
-/// malformed. Returns None for any malformed payload.
+/// malformed. Walk budgets (`FILE_LIST_*`) reject a payload whose entry
+/// length, entry count, or total size exceeds them — the caller never
+/// materializes an attacker-sized list. Returns None for any malformed or
+/// over-budget payload.
 fn parse_hdrop_list(buf: &[u8], file_offset: usize, min_offset: usize) -> Option<Vec<String>> {
     if file_offset < min_offset || !file_offset.is_multiple_of(2) || file_offset >= buf.len() {
         return None;
     }
     let mut files = Vec::new();
+    let mut total_units = 0usize;
     let mut pos = file_offset;
     while pos.checked_add(2).is_some_and(|n| n <= buf.len()) {
         let mut chars = Vec::new();
@@ -303,11 +323,18 @@ fn parse_hdrop_list(buf: &[u8], file_offset: usize, min_offset: usize) -> Option
             if c == 0 {
                 break;
             }
+            if chars.len() >= FILE_LIST_MAX_ENTRY_UNITS {
+                return None; // path beyond the per-entry budget
+            }
             chars.push(c);
             pos += 2;
         }
         if chars.is_empty() {
             break;
+        }
+        total_units += chars.len();
+        if files.len() >= FILE_LIST_MAX_ENTRIES || total_units * 2 > FILE_LIST_TOTAL_BYTES {
+            return None; // count or total-size budget exceeded
         }
         files.push(String::from_utf16_lossy(&chars));
         pos += 2; // skip this entry's NUL terminator
@@ -337,6 +364,14 @@ fn read_file_paths(source_exe: &str, source_title: &str, now: u64) -> Result<Cli
         if mem_size < std::mem::size_of::<DROPFILES>() {
             let _ = CloseClipboard();
             return Err(CaptureError::Skip("HDROP data too small".to_string()));
+        }
+        // Hard cap before the lock and the byte-slice view: the allocation
+        // size is attacker-chosen.
+        if mem_size as usize > HARD_PAYLOAD_CAP_BYTES {
+            let _ = CloseClipboard();
+            return Err(CaptureError::Skip(
+                "HDROP data over the hard cap".to_string(),
+            ));
         }
         let ptr = GlobalLock(handle);
         if ptr.is_null() {
@@ -438,11 +473,21 @@ fn read_text(
             }
         };
 
+        // Hard cap before the lock and the char scan: the allocation size is
+        // attacker-chosen, and the scan below materializes every unit.
+        if GlobalSize(handle) as usize > HARD_PAYLOAD_CAP_BYTES {
+            let _ = CloseClipboard();
+            return Err(CaptureError::Skip(
+                "Text data over the hard cap".to_string(),
+            ));
+        }
+
         let ptr = GlobalLock(handle);
         if ptr.is_null() {
             let _ = CloseClipboard();
             return Err(CaptureError::Skip("Cannot lock text data".to_string()));
         }
+
         // Scan for the NUL terminator but never past the allocation: a
         // clipboard owner is not required to terminate, and reading past
         // the block is UB. Unterminated data is taken whole.
@@ -554,6 +599,20 @@ fn encode_dib_24bpp(img: &image::DynamicImage) -> Vec<u8> {
         out.extend_from_slice(&padding[..pad_len]);
     }
     out
+}
+
+/// Bring a captured DIB within the storage `limit`. An oversized payload is
+/// downscaled and re-encoded; when it cannot be decoded, the raw bytes are
+/// dropped (`None`) instead of retained — an attacker-sized blob must never
+/// reach storage just because we failed to understand it.
+fn bounded_image(dib_data: Vec<u8>, limit: usize) -> Option<Vec<u8>> {
+    if dib_data.len() <= limit {
+        return Some(dib_data);
+    }
+    match decode_clipboard_image(&dib_data) {
+        Ok(img) => Some(downscale_to_limit(&img, limit)),
+        Err(_) => None,
+    }
 }
 
 /// Downscale until the 24bpp DIB encoding fits within `limit` bytes.
@@ -1179,8 +1238,10 @@ pub fn simulate_ctrl_v() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_hdrop_list;
-    use super::truncate_text;
+    use super::{
+        parse_hdrop_list, truncate_text, FILE_LIST_MAX_ENTRIES, FILE_LIST_MAX_ENTRY_UNITS,
+        FILE_LIST_TOTAL_BYTES,
+    };
 
     #[test]
     fn file_path_hash_is_unambiguous_about_delimiter_characters() {
@@ -1290,6 +1351,45 @@ mod tests {
         // "a\0\0": the second NUL is the terminator, not a malformed entry.
         let buf = hdrop_payload(&["a"], 20);
         assert_eq!(parse_hdrop_list(&buf, 20, 20), Some(vec!["a".to_string()]));
+    }
+
+    #[test]
+    fn entry_at_the_per_item_budget_is_accepted() {
+        let long = "A".repeat(FILE_LIST_MAX_ENTRY_UNITS);
+        let buf = hdrop_payload(&[&long], 20);
+        assert_eq!(parse_hdrop_list(&buf, 20, 20), Some(vec![long]));
+    }
+
+    #[test]
+    fn entry_over_the_per_item_budget_is_rejected() {
+        // One UTF-16 unit past the Windows path ceiling: reject, never
+        // materialize an unbounded single path.
+        let long = "A".repeat(FILE_LIST_MAX_ENTRY_UNITS + 1);
+        let buf = hdrop_payload(&[&long], 20);
+        assert_eq!(parse_hdrop_list(&buf, 20, 20), None);
+    }
+
+    #[test]
+    fn entry_over_the_count_budget_is_rejected() {
+        // Each entry is tiny; only the entry count breaches the budget.
+        let entries: Vec<String> = (0..=FILE_LIST_MAX_ENTRIES)
+            .map(|i| format!("C:\\f{i}.txt"))
+            .collect();
+        let refs: Vec<&str> = entries.iter().map(String::as_str).collect();
+        let buf = hdrop_payload(&refs, 20);
+        assert_eq!(parse_hdrop_list(&buf, 20, 20), None);
+    }
+
+    #[test]
+    fn file_list_over_the_total_byte_budget_is_rejected() {
+        // ~2 KiB entries, each under the per-item cap and far under the
+        // count cap; only the accumulated total breaches the budget.
+        let entry = "A".repeat(1024);
+        let count = FILE_LIST_TOTAL_BYTES / (1024 * 2) + 8;
+        let entries: Vec<String> = (0..count).map(|i| format!("{entry}{i}")).collect();
+        let refs: Vec<&str> = entries.iter().map(String::as_str).collect();
+        let buf = hdrop_payload(&refs, 20);
+        assert_eq!(parse_hdrop_list(&buf, 20, 20), None);
     }
 }
 
@@ -1404,5 +1504,41 @@ mod dib_tests {
             .unwrap();
         let img = image::load_from_memory(&bytes).unwrap();
         assert_eq!(img.dimensions(), (100, 100));
+    }
+
+    /// Solid-color bottom-up 24bpp DIB of the given size.
+    fn solid_dib(width: usize, height: usize) -> Vec<u8> {
+        let stride = (width * 3).div_ceil(4) * 4;
+        let mut dib = dib_header(width as i32, height as i32, 24);
+        let row = vec![0u8; stride];
+        for _ in 0..height {
+            dib.extend_from_slice(&row);
+        }
+        dib
+    }
+
+    #[test]
+    fn payload_within_the_limit_passes_through_untouched() {
+        let dib = solid_dib(2, 2);
+        let out = super::bounded_image(dib.clone(), 1024 * 1024).unwrap();
+        assert_eq!(out, dib);
+    }
+
+    #[test]
+    fn oversized_decodable_image_is_re_encoded_under_the_limit() {
+        // ~30 KB solid DIB against a 1 KiB limit: must come back downscaled,
+        // never as the original oversized bytes.
+        let dib = solid_dib(100, 100);
+        let out = super::bounded_image(dib.clone(), 1024).unwrap();
+        assert!(out.len() <= 1024);
+        assert_ne!(out, dib);
+    }
+
+    #[test]
+    fn oversized_undecodable_payload_is_dropped_not_kept() {
+        // Garbage that no decoder accepts and that exceeds the limit: the
+        // raw bytes must not survive into storage.
+        let junk = vec![0xEEu8; 64];
+        assert_eq!(super::bounded_image(junk, 32), None);
     }
 }

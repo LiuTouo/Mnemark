@@ -10,7 +10,7 @@ use crate::clip_encoding::{
     decode_shared_columns, ensure_column, with_shared_clip_column_params, SHARED_COLUMNS,
     SHARED_COLUMN_COUNT, SHARED_PARAMETER_MARKERS,
 };
-use crate::models::Clip;
+use crate::models::{Clip, HARD_PAYLOAD_CAP_BYTES};
 
 /// Minimum time between stale-row reconciliations: 72 hours, in milliseconds
 /// (the same unit as `Clip::captured_at` and the monitor's clock).
@@ -154,18 +154,33 @@ impl Persistence {
         reconcile_if_due(&mut self.conn, active_ids, now_ms)
     }
 
-    /// Load every Clip, oldest first, so in-memory insertion order and
-    /// capacity eviction produce the correct final state.
+    /// Load every Clip within the byte policy, oldest first, so in-memory
+    /// insertion order and capacity eviction produce the correct final state.
+    /// Rows whose stored payload exceeds [`HARD_PAYLOAD_CAP_BYTES`] are
+    /// filtered out by SQLite itself — an oversized blob is never handed to
+    /// the app — and stay on disk until the stale-row reconciliation purges
+    /// them as absent from the active set.
     pub fn load_all(&self) -> Result<Vec<Clip>, String> {
+        self.load_all_with_cap(HARD_PAYLOAD_CAP_BYTES)
+    }
+
+    /// `load_all` with the byte policy made explicit so tests can exercise
+    /// rejection without materializing a cap-sized blob.
+    fn load_all_with_cap(&self, cap: usize) -> Result<Vec<Clip>, String> {
         let mut stmt = self
             .conn
             .prepare(&format!(
                 "SELECT id, {SHARED_COLUMNS}, pinned
-                 FROM clips ORDER BY captured_at ASC"
+                 FROM clips
+                 WHERE length(CAST(COALESCE(image_data, x'') AS BLOB)) <= ?1
+                   AND length(CAST(COALESCE(text_content, '') AS BLOB)) <= ?1
+                   AND length(CAST(COALESCE(thumbnail_base64, '') AS BLOB)) <= ?1
+                   AND length(CAST(COALESCE(file_paths_json, '') AS BLOB)) <= ?1
+                 ORDER BY captured_at ASC"
             ))
             .map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map([], |row| {
+            .query_map([cap as i64], |row| {
                 let shared = decode_shared_columns(row, 1)?;
                 Ok(Clip {
                     id: row.get(0)?,
@@ -743,5 +758,28 @@ mod tests {
             .reconcile_if_due(&[], disabled_at + CLEANUP_INTERVAL_MS)
             .unwrap());
         assert!(p.load_all().unwrap().is_empty());
+    }
+
+    #[test]
+    fn load_all_skips_rows_beyond_the_byte_policy() {
+        // A row whose payload exceeds the cap never materializes in memory
+        // (SQLite filters it out before any blob is handed to us); rows
+        // within the policy load normally.
+        let mut p = test_persistence();
+        let mut big = clip("big", "hb", 2);
+        big.kind = ClipKind::Image;
+        big.image_data = Some(vec![0u8; 64]);
+        p.dump(&[clip("ok", "ha", 1), big]).unwrap();
+
+        let loaded = p.load_all_with_cap(16).unwrap();
+        let ids: Vec<&str> = loaded.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, vec!["ok"]);
+
+        // Refused, not deleted: the oversized row stays on disk.
+        let count: i64 = p
+            .conn
+            .query_row("SELECT COUNT(*) FROM clips", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
     }
 }

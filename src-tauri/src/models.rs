@@ -387,6 +387,15 @@ impl Clip {
     }
 }
 
+/// Hard ceiling on any single clipboard payload Mnemark will materialize,
+/// checked before a reader copies the clipboard allocation into memory
+/// (a same-session app can otherwise force arbitrary allocations in the
+/// always-running monitor). Deliberately NOT user-configurable: it sits
+/// above every clamp in [`AppConfig::sanitized`] as a fixed safety ceiling
+/// (CWE-770/CWE-789), and the persistence reload filter applies the same
+/// value so an oversized stored row never re-enters memory.
+pub const HARD_PAYLOAD_CAP_BYTES: usize = 512 * 1024 * 1024;
+
 /// User-configurable settings stored in mnemark.config.json
 /// Missing fields fall back to defaults so older config files keep working.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -797,7 +806,7 @@ mod favorites_shortcut_tests {
 
 #[cfg(test)]
 mod sanitize_tests {
-    use super::AppConfig;
+    use super::{AppConfig, HARD_PAYLOAD_CAP_BYTES};
 
     #[test]
     fn zeros_are_raised_to_the_minimum() {
@@ -918,6 +927,20 @@ mod sanitize_tests {
         }
         .sanitized();
         assert_eq!(hundred.ui_opacity_percent, 100);
+    }
+
+    #[test]
+    fn hard_payload_cap_sits_above_every_configurable_limit() {
+        // The hard cap is the safety ceiling: even the hand-edited-config
+        // maxima must stay below it, or a user could raise their way past it.
+        let cfg = AppConfig {
+            text_size_limit_kb: u64::MAX,
+            image_size_limit_mb: u64::MAX,
+            ..Default::default()
+        }
+        .sanitized();
+        assert!(HARD_PAYLOAD_CAP_BYTES > cfg.text_size_limit_kb as usize * 1024);
+        assert!(HARD_PAYLOAD_CAP_BYTES > cfg.image_size_limit_mb as usize * 1024 * 1024);
     }
 }
 
