@@ -421,6 +421,19 @@
 .scenario-batch .panel-position {
   top: 15%;
 }
+.scenario-batch .app-panel {
+  display: flex;
+  flex-direction: column;
+  max-height: 65cqw;
+}
+.scenario-batch .app-panel > :not(.app-list) {
+  flex-shrink: 0;
+}
+.scenario-batch .app-list {
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
 .batch-toolbar {
   display: flex;
   justify-content: space-between;
