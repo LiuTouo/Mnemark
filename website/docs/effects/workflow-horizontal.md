@@ -1,0 +1,19 @@
+# workflow-horizontal
+
+## 來源確認
+
+參考 <https://appycamper.com/> Impact 橫向卡片，並非 About 人物卡。Webflow `a-22` / `Sidescroll` 將 `.impact-sidescroll` 從 x:0vw 移到 -216vw，設定 keyframe 0 到 60；事件使用 scroll progress smoothing 50。About 的 `Founders` 使用的是兩個人物不同幅度的垂直位移，未用於本站工作流卡片。
+
+## 本站設計
+
+四張工作流卡片依序保留在 DOM。桌面 pin 整個場景，卡片列 x = -overflow × progress；overflow 依實際卡片寬、間隔、視窗寬與左右 padding 計算，不照搬 -216vw。捲動長度為 max(overflow, 1.8 × viewport height)。
+
+場景標題保持固定，卡片向左移動。第一張從左側內容邊界開始；最後一張可完整停留。沒有自由播放、無限輪播或捲動方向攔截。
+
+內容：AI 提示詞、日常回覆、研究創作、開發除錯。卡片顯示用途、三步工作流與結果，不使用虛構使用者或成功數據。每張具有獨立的可讀文字，不把資訊放進背景圖。
+
+手機／短視窗／reduced motion：一般文流中的原生水平捲動容器，前後鈕與方向鍵可用；reduced motion 使用立即定位。沒有 JS 時仍可手動水平捲動。
+
+## 驗收
+
+順向、反向與視窗重設後，第一與第四張不得出現不可到達區域。點擊導覽跳入或跳離本區時不留下異常空白。切換語言後重新量測文字與卡片尺寸；鍵盤能走完整段，手機可滑動並使用按鈕。
