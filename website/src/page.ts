@@ -1,3 +1,4 @@
+import { renderDemoFrame } from "./demo";
 import { copy, type Locale, type Feature, type FeatureId } from "./content";
 
 type Release = {
@@ -71,91 +72,12 @@ function heroCards(locale: Locale) {
 }
 
 function demoFrame(id: FeatureId, step: number, locale: Locale) {
-  const zh = locale === "zh";
-  const prompt = zh
-    ? "摘要這份文件的三個重點"
-    : "Write a summary of this document in three points";
-  const reply = zh
-    ? "收到，謝謝你的更新。我會在確認後回覆。"
-    : "Thanks for the update. I'll get back to you once confirmed.";
-  const rows = [
-    ["text", prompt, "ChatGPT · 10:42"],
-    ["link", "https://github.com/LiuTouo/Mnemark", "Chrome · 10:40"],
-    ["text", reply, "Outlook · 10:38"],
-    [
-      "image",
-      zh ? "專案靈感.png" : "Project inspiration.png",
-      "Snipping Tool · 10:35",
-    ],
-    ["file", zh ? "專案提案.pdf" : "Project proposal.pdf", "Explorer · 10:31"],
-  ];
-  const searching = id === "search" && step >= 1;
-  const drawer = id === "drawers" && step >= 1;
-  const preview = id === "preview" && step >= 1;
-  const pinned = id === "pin" && step >= 1;
-  const multi = id === "batch" && step >= 1;
-  let visibleRows =
-    searching || (drawer && step === 3)
-      ? [rows[0]]
-      : id === "capture" && step === 3
-        ? [rows[3]]
-        : rows;
-  if (id === "capture" && step === 0) visibleRows = rows.slice(0, 2);
-  if (id === "batch" && step === 3) visibleRows = rows.slice(2);
-  const searchText = searching
-    ? zh
-      ? "摘要"
-      : "summary"
-    : zh
-      ? "搜尋剪貼簿歷史…"
-      : "Search clipboard history…";
-  const settings = id === "settings";
-  const panel = `<div class="app-panel ${preview ? "has-preview" : ""} ${settings ? "settings-panel" : ""}">
-    <div class="app-title"><span class="app-mark">m</span><strong>${settings ? (zh ? "設定" : "Settings") : "Mnemark"}</strong><span class="app-title-right">${icon("pin")}${icon("drawer")}</span></div>
-    ${
-      settings
-        ? `<div class="settings-body"><h4>${zh ? "依你的方式工作" : "Work your way"}</h4>${[
-            [zh ? "全域快捷鍵" : "Global shortcut", "Ctrl + Shift + V"],
-            [
-              zh ? "外觀主題" : "Appearance",
-              step >= 1 ? (zh ? "深色" : "Dark") : zh ? "跟隨系統" : "System",
-            ],
-            [
-              zh ? "保存歷史紀錄" : "Save history",
-              `<span class="fake-toggle ${step >= 2 ? "is-on" : ""}"></span>`,
-            ],
-            [
-              zh ? "預覽內容" : "Content preview",
-              '<span class="fake-toggle is-on"></span>',
-            ],
-          ]
-            .map(
-              ([label, val]) =>
-                `<div class="setting-line"><span>${label}</span><b>${val}</b></div>`,
-            )
-            .join(
-              "",
-            )}${step >= 3 ? `<div class="exclusion">${zh ? "排除程式" : "Excluded apps"}<p>1Password · Bitwarden · KeePass</p></div>` : `<div class="local-note">${icon("drawer")}${zh ? "資料在本機管理" : "Your data, managed locally"}</div>`}</div>`
-        : `
-    <div class="app-search ${searching ? "is-searching" : ""}">${icon("search")}<span>${searchText}</span><kbd>/</kbd></div>
-    <div class="app-tabs">${(zh ? ["全部", "文字", "圖片", "檔案", "連結"] : ["All", "Text", "Images", "Files", "Links"]).map((t, i) => `<span class="${i === (id === "capture" && step === 3 ? 2 : 0) ? "selected" : ""}">${t}</span>`).join("")}</div>
-    <div class="app-workspace">${drawer ? `<aside class="app-drawers"><small>${zh ? "我的抽屜" : "MY DRAWERS"}</small><div class="drawer-active">${icon("drawer")}${zh ? "AI 提示詞" : "AI prompts"}<b>${step >= 2 ? "1" : "0"}</b></div><div>${icon("drawer")}${zh ? "工作回覆" : "Work replies"}</div><div class="new-drawer">+ ${zh ? "新增抽屜" : "New drawer"}</div></aside>` : ""}
-    <div class="app-list">${pinned ? `<div class="pin-label">${icon("pin")}${zh ? "已釘選" : "PINNED"} · 1 / 10</div>` : ""}${visibleRows.map((row, i) => `<div class="app-row ${i === 0 ? "row-selected" : ""} ${multi && i < 3 ? "row-checked" : ""}">${multi ? `<span class="fake-check">${i < 3 ? icon("check") : ""}</span>` : `<div class="row-kind kind-${row[0]}">${icon(row[0])}</div>`}<div class="row-main"><p>${pinned && i === 0 ? reply : row[1]}</p><small>${row[2]}</small></div><span class="row-action">${pinned && i === 0 ? icon("pin") : "···"}</span></div>`).join("")}</div>
-    ${preview ? `<aside class="app-preview"><small>${zh ? "預覽" : "PREVIEW"}</small><p>${prompt}</p><p class="preview-body">${zh ? "請依照以下結構整理：<br>1. 核心問題<br>2. 重要發現<br>3. 下一步行動<br><br>使用清楚、簡潔的語言。" : "Please use this structure:<br>1. The core problem<br>2. Key findings<br>3. Next steps<br><br>Keep the language clear and concise."}</p>${step >= 2 ? `<div class="preview-note">${icon("note")}${zh ? "每週整理會議紀錄時使用" : "Use for the weekly meeting recap"}</div>` : ""}<small>ChatGPT · 10:42</small></aside>` : ""}</div>
-    <div class="app-footer"><span>${multi && step === 2 ? (zh ? "已加入「專案素材」 · 3 則" : "Added to Project · 3 items") : id === "batch" && step === 3 ? (zh ? "已刪除 2 則 · 復原" : "Deleted 2 items · Undo") : id === "pin" && step === 3 ? (zh ? "已複製 · 面板保持開啟" : "Copied · Panel stays open") : zh ? "↑ ↓ 選取" : "↑ ↓ Select"}</span><span>↵ ${zh ? "貼上" : "Paste"}</span></div>`
-    }
-  </div>`;
-  return `<div class="demo-frame" data-frame="${step}" ${step > 0 ? 'style="opacity:0;visibility:hidden"' : ""}>
-    <div class="desktop-paper"><span>${icon("spark")}${zh ? "你的工作視窗" : "YOUR WORKSPACE"}</span><div class="paper-lines"></div><div class="compose-box">${id === "search" && step === 3 ? `<span class="pasted-text">${prompt}</span>${icon("check")}` : `<span>${zh ? "從這裡繼續你的工作…" : "Pick up where you left off…"}</span>`}</div></div>
-    <div class="panel-position ${id === "search" && step === 3 ? "panel-pasted" : ""}">${panel}</div>
-    ${id === "drawers" && step === 2 ? `<div class="drag-chip">${icon("text")}${zh ? "摘要提示詞" : "Summary prompt"}</div>` : ""}
-    <svg class="demo-cursor cursor-${step}" viewBox="0 0 24 30" aria-hidden="true"><path d="M2 2v24l7-7 5 9 4-2-5-9h10z" fill="#fff" stroke="#24252a" stroke-width="1.5"/></svg>
-  </div>`;
+  return renderDemoFrame(id, step, locale, icon);
 }
 
 function featureSection(feature: Feature, index: number, locale: Locale) {
   const c = copy[locale];
-  return `<section class="feature-chapter" id="feature-${feature.id}" data-chapter="${feature.id}" aria-labelledby="title-${feature.id}">
+  return `<section class="feature-chapter" style="--chapter-order:${index + 1}" id="feature-${feature.id}" data-chapter="${feature.id}" aria-labelledby="title-${feature.id}">
     <div class="feature-stage wrap">
       <div class="feature-name"><span class="index">${String(index + 1).padStart(2, "0")} / 07</span><span>${escapeHtml(feature.name)}</span><span class="feature-line"></span></div>
       <div class="feature-story"><h3 id="title-${feature.id}">${lines(feature.title)}</h3><p>${escapeHtml(feature.description)}</p><ol class="demo-steps">${feature.steps.map((s, i) => `<li data-step="${i}" class="${i === 0 ? "current" : ""}"><span>${String(i + 1).padStart(2, "0")}</span>${escapeHtml(s)}</li>`).join("")}</ol><p class="feature-detail">${escapeHtml(feature.detail)}</p></div>
@@ -174,7 +96,7 @@ export function renderPage(locale: Locale, base: string, release: Release) {
   const head = `<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#111312"><title>${escapeHtml(c.title)}</title><meta name="description" content="${escapeHtml(c.description)}"><link rel="icon" href="${base}icon.svg" type="image/svg+xml"><link rel="canonical" href="${pageUrl}"><link rel="alternate" hreflang="zh-Hant" href="${url}"><link rel="alternate" hreflang="en" href="${url}en/"><link rel="alternate" hreflang="x-default" href="${url}"><meta property="og:type" content="website"><meta property="og:title" content="${escapeHtml(c.title)}"><meta property="og:description" content="${escapeHtml(c.description)}"><meta property="og:url" content="${pageUrl}"><meta property="og:image" content="${url}social.png"><meta property="og:locale" content="${locale === "zh" ? "zh_TW" : "en_US"}">`;
   const body = `<a class="skip-link" href="#main">${c.skip}</a>
   <header class="site-header"><a class="brand" href="#top" aria-label="Mnemark — ${c.top}"><img src="${base}icon.svg" width="36" height="36" alt=""><span>IA_LiuT<span class="brand-caption">MAKER OF MNEMARK</span></span></a><button class="menu-toggle" type="button" aria-expanded="false" aria-controls="site-nav">${c.menu}<span>+</span></button><nav id="site-nav" aria-label="${c.menu}">${anchors.map((a, i) => `<a href="#${a}">${c.nav[i]}</a>`).join("")}<a class="locale-link" href="${base}${locale === "zh" ? "en/" : ""}" lang="${locale === "zh" ? "en" : "zh-Hant"}" aria-label="${c.language}">${icon("globe")}${locale === "zh" ? "EN" : "繁中"}</a><a class="nav-download" href="#download">${locale === "zh" ? "下載" : "Download"}${icon("arrow")}</a></nav></header>
-  <main id="main"><section class="hero" id="top" aria-labelledby="hero-title"><div class="cloud" aria-hidden="true">${heroCards(locale)}</div><div class="hero-center"><div class="eyebrow"><span class="status-dot"></span>${c.label}</div><h1 id="hero-title">Mnemark<span class="title-dot">.</span></h1><p class="hero-line">${lines(c.heroLine)}</p>${downloadButtons}<div class="hero-meta">${c.platform}<span> / </span>${c.open}</div></div><div class="hero-bottom wrap"><a href="#overview" class="scroll-link">${icon("down")}<span>${c.scroll}<small>01 — 06</small></span></a><p>${lines(c.heroDesc)}</p><button class="motion-toggle" type="button" aria-pressed="false" aria-label="${c.motion}" data-on="${c.motionOn}" data-off="${c.motionOff}">${icon("pause")}<span>${c.motionOn}</span></button></div></section>
+  <main id="main"><section class="hero" id="top" aria-labelledby="hero-title"><div class="cloud" aria-hidden="true">${heroCards(locale)}</div><div class="hero-center"><div class="eyebrow"><span class="status-dot"></span>${c.label}</div><h1 id="hero-title">Mnemark<span class="title-dot">.</span></h1><p class="hero-line">${lines(c.heroLine)}</p>${downloadButtons}<div class="hero-meta">${c.platform}<span> / </span>${c.open}</div></div><div class="hero-bottom wrap"><a href="#overview" class="scroll-link">${icon("down")}<span>${c.scroll}<small>01 — 06</small></span></a><p>${lines(c.heroDesc)}</p></div></section>
   <section id="overview" class="overview wrap section-space" aria-labelledby="overview-title"><div class="section-label"><span>01 / ${c.nav[0]}</span>${icon("copy")}</div><div class="overview-grid"><h2 id="overview-title">${lines(c.introTitle)}</h2><div><p class="large-copy">${c.introText}</p><p class="muted">${c.introNote}</p></div></div><div class="quick-flow">${c.quick.map((step, i) => `<div><span class="quick-num">0${i + 1}</span>${icon(["copy", "grid", "search", "arrow"][i])}<h3>${step}</h3><kbd>${["Ctrl + C", "Ctrl + Shift + V", locale === "zh" ? "關鍵字 / ↑ ↓" : "Keyword / ↑ ↓", "Enter"][i]}</kbd></div>`).join("")}</div></section>
   <section id="features" class="features-heading wrap section-space" aria-labelledby="features-title"><div class="section-label"><span>02 / ${c.nav[1]}</span><span>7 FEATURES. ONE WORKFLOW.</span></div><div class="section-heading"><h2 id="features-title">${lines(c.featuresTitle)}</h2><p>${c.featureLead}<br><span class="muted">${c.scrollHelp} ↓</span></p></div></section>
   <div class="feature-chapters">${c.features.map((f, i) => featureSection(f, i, locale)).join("")}</div>

@@ -165,24 +165,6 @@ test("mobile demos require play, pause offscreen, and workflow controls reach th
   await expect(page.locator(".workflow-controls > span")).toHaveText("04 — 04");
 });
 
-test("reduced motion collapses scroll tracks and keeps final states readable", async ({
-  page,
-}) => {
-  await page.emulateMedia({ reducedMotion: "reduce" });
-  await page.goto("./");
-  await expect(page.locator("html")).toHaveAttribute("data-motion", "reduced");
-  await expect(page.locator(".demo-controls").first()).not.toBeVisible();
-  await expect(page.locator("#feature-search")).toHaveAttribute(
-    "data-step",
-    "3",
-  );
-  expect(await page.locator(".pin-spacer").count()).toBe(0);
-  await page.locator(".motion-toggle").click();
-  await expect(page.locator("html")).toHaveAttribute("data-motion", "full");
-  await page.reload();
-  await expect(page.locator("html")).toHaveAttribute("data-motion", "full");
-});
-
 test("without JavaScript both locales remain readable and downloadable", async ({
   browser,
 }) => {

@@ -544,19 +544,6 @@ small {
   letter-spacing: 0.2em;
   margin-top: 8px;
 }
-.motion-toggle {
-  display: flex;
-  justify-self: end;
-  align-items: center;
-  gap: 9px;
-  color: var(--muted);
-  font-size: 10px;
-  padding: 12px 0;
-}
-.motion-toggle .icon {
-  width: 13px;
-  height: 13px;
-}
 .overview-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1605,9 +1592,12 @@ summary > span {
   color: var(--ink);
 }
 /* Progressive enhancement: all chapters and text exist before animation initializes. */
-@media (min-width: 1100px) and (min-height: 700px) {
+@media (min-width: 1100px) and (min-height: 600px) {
   html[data-motion="full"] .feature-chapter {
     height: 220svh;
+  }
+  html[data-motion="full"] .feature-chapter + .feature-chapter {
+    margin-top: -14svh;
   }
   html[data-motion="full"] .feature-stage {
     position: sticky;
@@ -1615,6 +1605,13 @@ summary > span {
     height: calc(100svh - var(--header));
     min-height: 0;
     max-height: 1000px;
+    background: var(--bg);
+    box-shadow: 0 -1px var(--line), 0 -30px 50px #11131255;
+  }
+  html[data-motion="full"] .demo-wrap {
+    max-width: calc((100svh - 230px) * 1.23);
+    width: 100%;
+    justify-self: end;
   }
   html[data-motion="full"] .scrub-hint {
     display: flex;
@@ -1899,9 +1896,6 @@ summary > span {
   }
   .scroll-link small {
     font-size: 8px;
-  }
-  .motion-toggle {
-    font-size: 9px;
   }
   .cloud {
     opacity: 0.5;
@@ -2224,9 +2218,6 @@ summary > span {
     will-change: auto;
   }
 }
-html[data-motion="reduced"] .cloud-track {
-  will-change: auto;
-}
 .feature-chapter {
   scroll-margin-top: 0;
 }
@@ -2356,7 +2347,6 @@ html[data-motion="reduced"] .cloud-track {
   max-height: 37cqw;
   overflow: hidden;
 }
-html:not([data-motion]) .motion-toggle,
 html:not([data-motion]) .menu-toggle,
 html:not([data-motion]) .workflow-controls {
   display: none;

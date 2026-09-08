@@ -53,4 +53,6 @@ uv run --with fonttools --with brotli python website/scripts/subset-fonts.py
 
 ## 設計規格
 
-見 [分鏡](docs/storyboard.md) 與 [Effect Library](docs/effects/README.md)。修改動態行為後，驗證正向／反向捲動、快速跳章、語言切換、手機及 reduced motion；不要將依進度變化的操作改成不可逆事件累加。
+見 [分鏡](docs/storyboard.md)、[Effect Library](docs/effects/README.md) 與 [動畫錄影](docs/previews/motion.mp4)。修改動態行為後，驗證正向／反向捲動、快速跳章、語言切換、手機及一般筆電視窗；不要將依進度變化的操作改成不可逆事件累加。
+
+背景依最新設計要求預設播放，不提供動態開關，舊的 `mnemark-site-motion` 儲存值不再使用。網站不以系統動態偏好停用整段示範；離開首屏或切到背景頁籤時仍暫停背景循環。可用 `node website/scripts/capture-motion.mjs`（需本機 ffmpeg）重新錄製動畫證據。
