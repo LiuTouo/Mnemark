@@ -40,7 +40,7 @@
   justify-content: center;
   gap: 1.6cqw;
   padding: 1.5cqw;
-  font-size: 1.9cqw;
+  font-size: max(9px, 2.13cqw);
 }
 .demo-notification .icon {
   width: 3cqw;
@@ -76,12 +76,12 @@
   margin-bottom: 1cqw;
 }
 .copy-source > span {
-  font-size: 1.4cqw;
+  font-size: max(9px, 1.57cqw);
   display: block;
   white-space: nowrap;
 }
 .copy-source p {
-  font-size: 2cqw;
+  font-size: max(9px, 2.24cqw);
   line-height: 1.6;
   margin-top: 1.5cqw;
 }
@@ -146,7 +146,7 @@
   position: absolute;
   bottom: 8%;
   left: 8%;
-  font-size: 1.2cqw;
+  font-size: max(9px, 1.34cqw);
   letter-spacing: 0.12em;
   color: #e4e9d8;
   z-index: 1;
@@ -160,7 +160,7 @@
 }
 .capture-preview > span {
   display: block;
-  font-size: 1.6cqw;
+  font-size: max(9px, 1.79cqw);
   margin: 1.5cqw 0;
   color: #b2b8b0;
 }
@@ -177,7 +177,7 @@
   display: flex;
   align-items: center;
   gap: 1.5cqw;
-  font-size: 2cqw;
+  font-size: max(9px, 2.24cqw);
   border-bottom: 1px solid #4f5d4a66;
   padding-bottom: 3cqw;
 }
@@ -189,7 +189,7 @@
   margin-left: auto;
 }
 .editor-greeting {
-  font-size: 4.1cqw;
+  font-size: max(9px, 4.59cqw);
   color: #e7ecdf;
   text-align: center;
   margin-top: 13cqw;
@@ -208,7 +208,7 @@
   display: flex;
   gap: 2cqw;
   align-items: center;
-  font-size: 2.3cqw;
+  font-size: max(9px, 2.58cqw);
 }
 .editor-compose b {
   margin-left: auto;
@@ -242,23 +242,23 @@
   background: #2b3328;
   border-radius: 5px;
   color: #edf3e4;
-  font-size: 3cqw;
+  font-size: max(9px, 3.36cqw);
 }
 .hotkey-callout > span {
-  font-size: 2cqw;
+  font-size: max(9px, 2.24cqw);
   color: #b5bea8;
 }
 .search-result-note {
   padding: 3cqw;
   color: #a8b296;
-  font-size: 1.8cqw;
+  font-size: max(9px, 2.02cqw);
   text-align: center;
 }
 .scenario-search .demo-notification {
   bottom: 1%;
   left: 20%;
   right: 20%;
-  font-size: 1.8cqw;
+  font-size: max(9px, 2.02cqw);
   min-height: 6cqw;
 }
 .scenario-drawers .panel-position {
@@ -266,7 +266,7 @@
 }
 .scenario-drawers .app-drawers {
   width: 34%;
-  font-size: 1.7cqw;
+  font-size: max(9px, 1.90cqw);
 }
 .scenario-drawers .app-workspace {
   min-height: 31cqw;
@@ -278,7 +278,7 @@
   left: 9%;
   top: 51%;
   max-width: 52%;
-  font-size: 1.85cqw;
+  font-size: max(9px, 2.07cqw);
   padding: 2cqw;
   transform: rotate(-5deg);
 }
@@ -301,14 +301,14 @@
   color: #e3e3ed;
 }
 .demo-dialog > small {
-  font-size: 2.2cqw;
+  font-size: max(9px, 2.46cqw);
 }
 .dialog-input {
   border: 1px solid #9290ef;
   border-radius: 4px;
   margin: 3cqw 0;
   padding: 2.5cqw;
-  font-size: 2.4cqw;
+  font-size: max(9px, 2.69cqw);
   line-height: 1.7;
   background: #25252b;
 }
@@ -328,7 +328,7 @@
   background: #818cf8;
   color: #202132;
   padding: 1.3cqw 3cqw;
-  font-size: 2cqw;
+  font-size: max(9px, 2.24cqw);
 }
 .scenario-pin .panel-position {
   top: 22%;
@@ -343,7 +343,7 @@
   align-items: center;
   gap: 2cqw;
   color: #c1cdb0;
-  font-size: 2.3cqw;
+  font-size: max(9px, 2.58cqw);
 }
 .pin-guide .icon,
 .settings-guide .icon {
@@ -377,18 +377,18 @@
   padding: 2.5cqw;
 }
 .scenario-preview .app-preview h4 {
-  font-size: 2.3cqw;
+  font-size: max(9px, 2.58cqw);
   line-height: 1.6;
   margin: 2cqw 0;
 }
 .scenario-preview .app-preview .preview-body {
-  font-size: 1.8cqw;
+  font-size: max(9px, 2.02cqw);
 }
 .scenario-preview .app-preview > small {
-  font-size: 1.6cqw;
+  font-size: max(9px, 1.79cqw);
 }
 .scenario-preview .preview-note {
-  font-size: 1.8cqw;
+  font-size: max(9px, 2.02cqw);
   padding: 2cqw;
   line-height: 1.6;
   margin: 2.2cqw 0;
@@ -402,7 +402,7 @@
   justify-content: center;
   background: #292930;
   color: #a4a6b3;
-  font-size: 1.9cqw;
+  font-size: max(9px, 2.13cqw);
 }
 .preview-placeholder .icon {
   height: 9cqw;
@@ -438,7 +438,7 @@
   display: flex;
   justify-content: space-between;
   padding: 2.5cqw;
-  font-size: 2cqw;
+  font-size: max(9px, 2.24cqw);
   color: #c6c7fa;
   border-block: 1px solid #818cf82a;
   background: #818cf817;
@@ -466,11 +466,11 @@
   background: #353147;
   color: #dfdcff;
   border-radius: 5px;
-  font-size: 2.5cqw;
+  font-size: max(9px, 2.80cqw);
 }
 .batch-destination > b {
   margin-left: auto;
-  font-size: 4cqw;
+  font-size: max(9px, 4.48cqw);
 }
 .batch-destination .icon {
   height: 7cqw;
@@ -500,10 +500,10 @@
   border-radius: 4px;
 }
 .scenario-settings .settings-body {
-  padding: 3.5cqw;
+  padding: 3cqw;
 }
 .scenario-settings .setting-line {
-  padding: 2.2cqw 0;
+  padding: 1.7cqw 0;
 }
 .hero-bottom {
   grid-template-columns: 1fr 1fr;
@@ -530,24 +530,24 @@
     padding: 20px 30px;
   }
   .workflow-card h3 {
-    font-size: 23px;
+    font-size: 25px;
     margin: 12px 0 10px;
   }
   .workflow-card > p,
   .workflow-card li {
-    font-size: 10px;
+    font-size: 15px;
   }
   .workflow-card ol {
     margin: 12px 0;
   }
   .workflow-result {
-    font-size: 10px;
+    font-size: 15px;
     padding-top: 12px;
   }
 }
 @media (max-width: 699px) {
   .scenario-preview .app-preview .preview-body {
-    font-size: 1.8cqw;
+    font-size: max(9px, 2.02cqw);
   }
   .feature-stage {
     background: var(--bg);
