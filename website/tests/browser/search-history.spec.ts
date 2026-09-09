@@ -1,5 +1,47 @@
 import { test, expect } from "@playwright/test";
 
+test("search result highlights only when the selection key is pressed", async ({
+  page,
+}) => {
+  await page.goto("./#feature-search");
+  const states = await page
+    .locator("#feature-search")
+    .evaluate(async (chapter) => {
+      const seen = new Set<string>();
+      const frame = chapter.querySelector('[data-frame="1"]')!;
+      const row = frame.querySelector(".search-matches .app-row")!;
+      (chapter.querySelector("[data-replay]") as HTMLElement).click();
+      const start = performance.now();
+      await new Promise<void>((resolve) => {
+        const sample = () => {
+          if (
+            +getComputedStyle(frame).opacity > 0.9 &&
+            !frame.querySelector(".search-pending")
+          ) {
+            if (
+              !row.classList.contains("row-selected") &&
+              !row.classList.contains("cue-target")
+            )
+              seen.add("unselected");
+            if (
+              row.classList.contains("row-selected") &&
+              chapter.querySelector(
+                '.demo-cue-pointer[data-action="select-result"]',
+              ) &&
+              chapter.querySelector(".demo-cue-hud.is-pressed")
+            )
+              seen.add("selected-on-keypress");
+          }
+          if (performance.now() - start < 3600) requestAnimationFrame(sample);
+          else resolve();
+        };
+        requestAnimationFrame(sample);
+      });
+      return [...seen];
+    });
+  expect(states).toEqual(["unselected", "selected-on-keypress"]);
+});
+
 test("search shows mixed history before narrowing to the matching record", async ({
   page,
 }) => {

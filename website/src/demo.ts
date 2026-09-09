@@ -134,7 +134,7 @@ export function renderDemoFrame(
       body = panel(
         searchBar(zh ? "摘要" : "summary", icon, true) +
           tabs(zh) +
-          `<div class="app-list search-list"><div class="search-matches">${rows([promptRow], icon)}</div>${step === 1 ? `<div class="search-history">${rows(history, icon)}</div>` : ""}</div>` +
+          `<div class="app-list search-list"><div class="search-matches">${rows([{ ...promptRow, selected: step === 2 }], icon)}</div>${step === 1 ? `<div class="search-history">${rows(history, icon)}</div>` : ""}</div>` +
           `<div class="search-result-note"><span class="search-match-count">${zh ? "1 個相符項目" : "1 matching item"}</span>${step === 1 ? `<span class="search-history-count">${zh ? "6 則歷史項目" : "6 history items"}</span>` : ""}</div>` +
           footer(
             zh,

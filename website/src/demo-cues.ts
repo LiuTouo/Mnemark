@@ -469,6 +469,14 @@ export function createDemoCues(chapter: HTMLElement, english: boolean) {
       canvas
         .querySelector('[data-frame="1"].scenario-search .app-panel')
         ?.classList.toggle("search-pending", time < 0.43);
+      canvas
+        .querySelector(
+          '[data-frame="1"].scenario-search .search-matches .app-row',
+        )
+        ?.classList.toggle(
+          "row-selected",
+          time >= cues.search.find((cue) => cue.id === "select-result")!.press,
+        );
       for (const { element, cue } of copyCards) {
         element.classList.toggle(
           "is-copying",
@@ -630,6 +638,11 @@ export function createDemoCues(chapter: HTMLElement, english: boolean) {
       }
     },
     dispose() {
+      canvas
+        .querySelector(
+          '[data-frame="1"].scenario-search .search-matches .app-row',
+        )
+        ?.classList.remove("row-selected");
       canvas
         .querySelector('[data-frame="1"].scenario-search .app-panel')
         ?.classList.add("search-pending");
