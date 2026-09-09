@@ -131,9 +131,10 @@ function configureAnimations() {
                 0.16,
               );
               rise(
-                '[data-frame="3"] .capture-preview',
-                { scale: 0.8, autoAlpha: 0 },
+                '[data-frame="3"] .capture-filtered',
+                { y: 8, autoAlpha: 0 },
                 0.8,
+                0.1,
               );
               break;
             case "search":

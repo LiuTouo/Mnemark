@@ -84,30 +84,31 @@ export function renderDemoFrame(
   let notification = "";
 
   if (id === "capture") {
-    scene = `<div class="copy-sources"><div class="copy-source source-text">${icon("text")}<span>${zh ? "會議紀錄" : "Meeting notes"}</span><p>${zh ? "把好的想法留下來。" : "Keep the good ideas."}</p></div><div class="copy-source source-image">${previewImage()}</div><div class="copy-source source-file">${icon("file")}<span>proposal.pdf</span></div></div>`;
-    const captures =
-      step === 0
-        ? [
-            {
-              kind: "text",
-              text: zh ? "把好的想法留下來。" : "Keep the good ideas.",
-              source: "Notepad · 10:41",
-            },
-          ]
-        : step === 1
-          ? [fileRow, imageRow, promptRow]
-          : [fileRow, imageRow, promptRow, queryRow];
+    const copiedText = zh ? "把好的想法留下來。" : "Keep the good ideas.";
+    const overlay = `<div class="copy-shortcut" aria-hidden="true"><kbd>Ctrl</kbd><span>+</span><kbd>C</kbd></div><span class="copy-complete">${icon("check")}${zh ? "已複製" : "Copied"}</span>`;
+    scene = `<div class="copy-sources">
+      <div class="copy-source source-text" data-copy-kind="text"><div class="copy-original"><div class="copy-type">${icon("text")}<span>${zh ? "文字" : "Text"}</span></div><p>${copiedText}</p></div>${overlay}</div>
+      <div class="copy-source source-image" data-copy-kind="image"><div class="copy-original">${previewImage()}<div class="copy-type">${zh ? "圖片" : "Image"}</div></div>${overlay}</div>
+      <div class="copy-source source-file" data-copy-kind="file"><div class="copy-original">${icon("file")}<div class="copy-type">${zh ? "檔案" : "File"}</div><span class="copy-filename">${fileRow.text}</span></div>${overlay}</div>
+    </div>`;
+    const captures = [
+      { ...fileRow, selected: true },
+      imageRow,
+      { kind: "text", text: copiedText, source: "Notepad · 10:42" },
+    ];
     body = panel(
       searchBar(placeholder, icon) +
         tabs(zh, step === 3 ? 2 : 0) +
-        (step === 3
-          ? `<div class="capture-preview">${previewImage()}<span>${zh ? "專案靈感.png · 圖片" : "Project inspiration.png · Image"}</span></div>`
-          : `<div class="app-list">${rows(captures, icon)}</div>`) +
+        `<div class="app-list ${step === 3 ? "capture-filtered" : "capture-history"}">${rows(step === 3 ? [{ ...imageRow, selected: true }] : captures, icon)}</div>` +
         footer(
           zh,
-          zh
-            ? "複製內容，自動收進歷史"
-            : "Copied content, collected automatically",
+          step === 3
+            ? zh
+              ? "1 則圖片項目"
+              : "1 image item"
+            : zh
+              ? "最近複製 · 新到舊"
+              : "Recent copies · Newest first",
         ),
       icon,
     );

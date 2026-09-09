@@ -50,17 +50,19 @@
   top: 32%;
 }
 .scenario-capture .app-list {
-  max-height: 28cqw;
+  min-height: 27cqw;
+  max-height: none;
 }
 .copy-sources {
   position: absolute;
   inset: 5% 6% auto;
   height: 25%;
   display: grid;
-  grid-template-columns: 1.2fr 1fr 0.85fr;
+  grid-template-columns: repeat(3, 1fr);
   gap: 2cqw;
 }
 .copy-source {
+  position: relative;
   border: 1px solid #79887545;
   border-radius: 5px;
   background: #41463b;
@@ -68,6 +70,97 @@
   padding: 2cqw;
   overflow: hidden;
   box-shadow: 0 5px 15px #0002;
+}
+.copy-original {
+  width: 100%;
+  height: 100%;
+  transition: opacity 120ms ease;
+}
+.copy-source.is-copying .copy-original {
+  opacity: 0.22;
+}
+.copy-type {
+  display: flex;
+  align-items: center;
+  gap: 1cqw;
+  font-size: clamp(10px, 2cqw, 13px);
+  font-weight: 600;
+}
+.copy-type .icon {
+  width: 3cqw;
+  height: 3cqw;
+}
+.source-image .copy-type {
+  position: absolute;
+  left: 8%;
+  top: 8%;
+  color: #17281d;
+}
+.source-file .copy-original {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5cqw;
+}
+.source-file .copy-original > .icon {
+  width: 5.5cqw;
+  height: 5.5cqw;
+}
+.copy-filename {
+  font-size: clamp(9px, 1.5cqw, 11px);
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.copy-shortcut {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  color: #fff;
+  background: #0b100e80;
+  opacity: 0;
+  visibility: hidden;
+  font-size: clamp(12px, 2.4cqw, 16px);
+}
+.copy-shortcut kbd {
+  font: inherit;
+  padding: 2px 4px;
+  border: 1px solid #f4eadd;
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: #212820;
+}
+.is-copying .copy-shortcut {
+  opacity: 1;
+  visibility: visible;
+}
+.copy-source > .copy-complete {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 4px;
+  color: #e1f8dc;
+  background: #244d33;
+  border-radius: 3px;
+  font-size: clamp(8px, 1.4cqw, 10px);
+  opacity: 0;
+}
+.copy-complete .icon {
+  width: 10px;
+  height: 10px;
+}
+.is-copied > .copy-complete {
+  opacity: 1;
 }
 .copy-source > .icon {
   width: 3.3cqw;
@@ -266,7 +359,7 @@
 }
 .scenario-drawers .app-drawers {
   width: 34%;
-  font-size: max(9px, 1.90cqw);
+  font-size: max(9px, 1.9cqw);
 }
 .scenario-drawers .app-workspace {
   min-height: 31cqw;
@@ -466,7 +559,7 @@
   background: #353147;
   color: #dfdcff;
   border-radius: 5px;
-  font-size: max(9px, 2.80cqw);
+  font-size: max(9px, 2.8cqw);
 }
 .batch-destination > b {
   margin-left: auto;
@@ -546,6 +639,9 @@
   }
 }
 @media (max-width: 699px) {
+  #feature-capture .demo-canvas {
+    aspect-ratio: 0.85;
+  }
   .scenario-preview .app-preview .preview-body {
     font-size: max(9px, 2.02cqw);
   }

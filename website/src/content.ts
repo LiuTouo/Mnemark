@@ -19,9 +19,9 @@ const zhFeatures: Feature[] = [
       "一句靈感、一張截圖，或一份要交付的檔案。照常複製，讓 Mnemark 在背景接住這些工作片段。",
     steps: [
       "照常複製一段文字",
-      "再複製一張圖片",
-      "呼叫歷史面板",
-      "按類型找到需要的項目",
+      "再依序複製圖片與檔案",
+      "叫出歷史，依新到舊顯示三筆",
+      "點選圖片分類，只留下圖片",
     ],
     detail:
       "支援文字、圖片、檔案與連結分類；相同內容再次複製會更新時間，不重複堆積。檔案保存路徑參照，並非備份。",
@@ -126,9 +126,9 @@ const enFeatures: Feature[] = [
       "A good thought, a screenshot, a file ready to share. Copy as you normally would. Mnemark keeps those working pieces close.",
     steps: [
       "Copy a piece of text",
-      "Copy an image",
-      "Open clipboard history",
-      "Filter by content type",
+      "Copy the image, then the file",
+      "Open all three copies, newest first",
+      "Click Images to show only the image",
     ],
     detail:
       "Text, images, files and links. Copying the same content updates its timestamp instead of adding a duplicate. Files are path references, not backups.",
@@ -403,12 +403,9 @@ export const copy = {
       "Good prompts shouldn't need finding twice. Familiar replies shouldn't need writing again. Mnemark keeps the pieces you copy ready for the next thing you do.",
     introNote:
       "Press the shortcut to see your recent copies in the history panel. Select what you need and paste it straight back into your app.",
-    quick: [
-      "Copy as usual",
-      "Open recent copies",
-      "Select and paste",
-    ],
-    optionalSearch: "An extra when you need it: use search to find older content.",
+    quick: ["Copy as usual", "Open recent copies", "Select and paste"],
+    optionalSearch:
+      "An extra when you need it: use search to find older content.",
     optionalSearchLink: "See search in action",
     featuresTitle: "A small tool.\nA smoother working day.",
     featureLead: "Everyday essentials, with extras when you need them.",

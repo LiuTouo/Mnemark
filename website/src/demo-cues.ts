@@ -20,7 +20,7 @@ const cues: Record<FeatureId, Cue[]> = {
       kind: "keys",
       frame: 0,
       start: 0.01,
-      press: 0.09,
+      press: 0.05,
       end: 0.15,
       target: ".source-text",
       keys: ["Ctrl", "C"],
@@ -30,20 +30,31 @@ const cues: Record<FeatureId, Cue[]> = {
       id: "copy-image",
       kind: "keys",
       frame: 1,
-      start: 0.22,
-      press: 0.32,
-      end: 0.4,
+      start: 0.17,
+      press: 0.2,
+      end: 0.29,
       target: ".source-image",
       keys: ["Ctrl", "C"],
       label: ["複製圖片", "Copy image"],
     },
     {
+      id: "copy-file",
+      kind: "keys",
+      frame: 1,
+      start: 0.3,
+      press: 0.325,
+      end: 0.415,
+      target: ".source-file",
+      keys: ["Ctrl", "C"],
+      label: ["複製檔案", "Copy file"],
+    },
+    {
       id: "open-history",
       kind: "keys",
       frame: 1,
-      start: 0.41,
-      press: 0.445,
-      end: 0.51,
+      start: 0.425,
+      press: 0.45,
+      end: 0.52,
       keys: ["Ctrl", "Shift", "V"],
       label: ["叫出最近紀錄", "Open recent copies"],
     },
@@ -56,6 +67,16 @@ const cues: Record<FeatureId, Cue[]> = {
       end: 0.83,
       target: ".app-tabs > span:nth-child(3)",
       label: ["點擊「圖片」分類", "Click Images"],
+    },
+    {
+      id: "select-image",
+      kind: "hover",
+      frame: 3,
+      start: 0.835,
+      press: 0.9,
+      end: 0.94,
+      target: ".app-row .row-main",
+      label: ["只剩剛複製的圖片可選", "Only the copied image remains"],
     },
   ],
   search: [
@@ -399,6 +420,13 @@ export function createDemoCues(chapter: HTMLElement, english: boolean) {
   }
   let activeTarget: HTMLElement | undefined;
   let previousLabel = "";
+  // Cache only the real frames: the loop bridge must stay in the initial state.
+  const copyCards = [
+    ...canvas.querySelectorAll<HTMLElement>(".copy-source[data-copy-kind]"),
+  ].map((element) => ({
+    element,
+    cue: script.find((cue) => cue.id === `copy-${element.dataset.copyKind}`)!,
+  }));
 
   const point = (element: HTMLElement) => {
     const box = element.getBoundingClientRect();
@@ -438,6 +466,13 @@ export function createDemoCues(chapter: HTMLElement, english: boolean) {
 
   return {
     update(time: number) {
+      for (const { element, cue } of copyCards) {
+        element.classList.toggle(
+          "is-copying",
+          time >= cue.press && time < cue.end,
+        );
+        element.classList.toggle("is-copied", time >= cue.end);
+      }
       menu(
         '[data-frame="1"] .note-menu',
         1,
@@ -592,6 +627,9 @@ export function createDemoCues(chapter: HTMLElement, english: boolean) {
       }
     },
     dispose() {
+      copyCards.forEach(({ element }) =>
+        element.classList.remove("is-copying", "is-copied"),
+      );
       canvas
         .querySelectorAll(".cue-target")
         .forEach((element) => element.classList.remove("cue-target"));
