@@ -134,16 +134,9 @@ export function renderDemoFrame(
       body = panel(
         searchBar(zh ? "摘要" : "summary", icon, true) +
           tabs(zh) +
-          `<div class="app-list search-list"><div class="search-matches">${rows([{ ...promptRow, selected: step === 2 }], icon)}</div>${step === 1 ? `<div class="search-history">${rows(history, icon)}</div>` : ""}</div>` +
+          `<div class="app-list search-list"><div class="search-matches">${rows([{ ...promptRow, selected: false }], icon)}</div>${step === 1 ? `<div class="search-history">${rows(history, icon)}</div>` : ""}</div>` +
           `<div class="search-result-note"><span class="search-match-count">${zh ? "1 個相符項目" : "1 matching item"}</span>${step === 1 ? `<span class="search-history-count">${zh ? "6 則歷史項目" : "6 history items"}</span>` : ""}</div>` +
-          footer(
-            zh,
-            step === 2
-              ? zh
-                ? "已選取 · 按 Enter 貼上"
-                : "Selected · Enter to paste"
-              : "",
-          ),
+          `<div class="app-footer"><span>${zh ? "點擊項目即可貼上" : "Click an item to paste"}</span></div>`,
         icon,
         "Mnemark",
         step === 1 ? "search-pending" : "",

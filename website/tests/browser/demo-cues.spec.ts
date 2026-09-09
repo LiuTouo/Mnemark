@@ -2,6 +2,7 @@ import { test, expect } from "@playwright/test";
 
 for (const [feature, minimum] of [
   ["capture", 1],
+  ["search", 1],
   ["drawers", 2],
   ["pin", 2],
   ["preview", 3],
@@ -83,9 +84,9 @@ test("search displays every shortcut in the sequence", async ({ page }) => {
       });
       return [...keys];
     });
-  expect(seen).toEqual(
-    expect.arrayContaining(["Ctrl+Shift+V", "/", "↓", "Enter"]),
-  );
+  expect(seen).toEqual(expect.arrayContaining(["Ctrl+Shift+V", "/"]));
+  expect(seen).not.toContain("↓");
+  expect(seen).not.toContain("Enter");
 });
 
 test("dragging shows a held pointer and the dragged card follows it", async ({

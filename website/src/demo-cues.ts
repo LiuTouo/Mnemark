@@ -113,26 +113,14 @@ const cues: Record<FeatureId, Cue[]> = {
       label: ["輸入「摘要」", "Type “summary”"],
     },
     {
-      id: "select-result",
-      kind: "keys",
-      frame: 1,
-      start: 0.435,
-      press: 0.46,
-      end: 0.53,
-      target: ".app-row:first-child",
-      keys: ["↓"],
-      label: ["選取搜尋結果", "Select the result"],
-    },
-    {
       id: "paste",
-      kind: "keys",
+      kind: "click",
       frame: 2,
-      start: 0.7,
+      start: 0.6,
       press: 0.775,
-      end: 0.85,
+      end: 0.8,
       target: ".app-row:first-child",
-      keys: ["Enter"],
-      label: ["貼回原本程式", "Paste back into your app"],
+      label: ["點擊項目，立即貼上", "Click the item to paste immediately"],
     },
   ],
   drawers: [
@@ -471,11 +459,11 @@ export function createDemoCues(chapter: HTMLElement, english: boolean) {
         ?.classList.toggle("search-pending", time < 0.43);
       canvas
         .querySelector(
-          '[data-frame="1"].scenario-search .search-matches .app-row',
+          '[data-frame="2"].scenario-search .search-matches .app-row',
         )
         ?.classList.toggle(
           "row-selected",
-          time >= cues.search.find((cue) => cue.id === "select-result")!.press,
+          time >= cues.search.find((cue) => cue.id === "paste")!.press,
         );
       for (const { element, cue } of copyCards) {
         element.classList.toggle(
@@ -640,7 +628,7 @@ export function createDemoCues(chapter: HTMLElement, english: boolean) {
     dispose() {
       canvas
         .querySelector(
-          '[data-frame="1"].scenario-search .search-matches .app-row',
+          '[data-frame="2"].scenario-search .search-matches .app-row',
         )
         ?.classList.remove("row-selected");
       canvas

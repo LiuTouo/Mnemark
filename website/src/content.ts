@@ -35,8 +35,8 @@ const zhFeatures: Feature[] = [
     steps: [
       "按 Ctrl + Shift + V",
       "搜尋「摘要」",
-      "方向鍵選取提示詞",
-      "按 Enter，貼回原本的程式",
+      "滑鼠點擊搜尋結果",
+      "立即貼回原本的程式",
     ],
     detail:
       "搜尋項目預覽、來源程式與視窗標題。按 / 聚焦搜尋，Enter 貼上，Esc 關閉；也可啟用 j／k 導覽。",
@@ -142,8 +142,8 @@ const enFeatures: Feature[] = [
     steps: [
       "Press Ctrl + Shift + V",
       "Search for “summary”",
-      "Select your prompt with the arrow keys",
-      "Press Enter to paste into your app",
+      "Click the search result",
+      "Paste immediately into your app",
     ],
     detail:
       "Search item previews, source apps and window titles. Press / to focus search, Enter to paste, Esc to dismiss. Optional j/k navigation is available.",

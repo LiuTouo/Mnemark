@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 
-test("search result highlights only when the selection key is pressed", async ({
+test("search result highlights on click and immediately pastes", async ({
   page,
 }) => {
   await page.goto("./#feature-search");
@@ -8,7 +8,7 @@ test("search result highlights only when the selection key is pressed", async ({
     .locator("#feature-search")
     .evaluate(async (chapter) => {
       const seen = new Set<string>();
-      const frame = chapter.querySelector('[data-frame="1"]')!;
+      const frame = chapter.querySelector('[data-frame="2"]')!;
       const row = frame.querySelector(".search-matches .app-row")!;
       (chapter.querySelector("[data-replay]") as HTMLElement).click();
       const start = performance.now();
@@ -26,20 +26,29 @@ test("search result highlights only when the selection key is pressed", async ({
             if (
               row.classList.contains("row-selected") &&
               chapter.querySelector(
-                '.demo-cue-pointer[data-action="select-result"]',
+                '.demo-cue-pointer[data-action="paste"][data-kind="click"][data-pressing="true"]',
               ) &&
               chapter.querySelector(".demo-cue-hud.is-pressed")
             )
-              seen.add("selected-on-keypress");
+              seen.add("selected-on-click");
           }
-          if (performance.now() - start < 3600) requestAnimationFrame(sample);
+          const pasted = chapter.querySelector(
+            '[data-frame="3"] .pasted-text',
+          )!;
+          if (
+            +getComputedStyle(chapter.querySelector('[data-frame="3"]')!)
+              .opacity > 0.9 &&
+            +getComputedStyle(pasted).opacity > 0.8
+          )
+            seen.add("pasted");
+          if (performance.now() - start < 6500) requestAnimationFrame(sample);
           else resolve();
         };
         requestAnimationFrame(sample);
       });
       return [...seen];
     });
-  expect(states).toEqual(["unselected", "selected-on-keypress"]);
+  expect(states).toEqual(["unselected", "selected-on-click", "pasted"]);
 });
 
 test("search shows mixed history before narrowing to the matching record", async ({
