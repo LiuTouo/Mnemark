@@ -36,7 +36,7 @@ test("previous lesson stays still while the next lesson slides up over it", asyn
   ).toBeCloseTo(88, 0);
 });
 
-test("demo operation playback lasts eleven seconds before looping", async ({
+test("demo operation playback lasts nine and a half seconds before looping", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
@@ -46,7 +46,7 @@ test("demo operation playback lasts eleven seconds before looping", async ({
   await chapter.locator("[data-replay]").click();
   await page.waitForTimeout(2500);
   const progress = Number(await chapter.getAttribute("data-progress"));
-  expect(progress).toBeGreaterThan(0.18);
+  expect(progress).toBeGreaterThan(0.24);
   expect(progress).toBeLessThan(0.29);
 });
 

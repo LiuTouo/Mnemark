@@ -1,5 +1,8 @@
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 
+const DEMO_SECONDS = 9.5;
+const LOOP_FADE_SECONDS = 0.44;
+
 // Scroll controls the lesson surfaces only. Each visible demo has its own clock.
 export function createAutoplayGroup(labels: { play: string; pause: string }) {
   const updates: (() => void)[] = [];
@@ -42,17 +45,17 @@ export function createAutoplayGroup(labels: { play: string; pause: string }) {
       timeline.fromTo(
         bridge,
         { autoAlpha: 0 },
-        { autoAlpha: 1, duration: 0.04, ease: "none" },
+        { autoAlpha: 1, duration: LOOP_FADE_SECONDS / DEMO_SECONDS, ease: "none" },
         1,
       );
       timeline.to(
         canvas.querySelector('[data-frame="3"]'),
-        { autoAlpha: 0, duration: 0.04, ease: "none" },
+        { autoAlpha: 0, duration: LOOP_FADE_SECONDS / DEMO_SECONDS, ease: "none" },
         1,
       );
       timeline
         .repeat(-1)
-        .timeScale(1 / 11)
+        .timeScale(1 / DEMO_SECONDS)
         .pause(0);
 
       const update = () => {
