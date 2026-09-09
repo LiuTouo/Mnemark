@@ -210,7 +210,7 @@ export function renderDemoFrame(
     const preview = `<aside class="app-preview"><small>${zh ? "內容預覽" : "CONTENT PREVIEW"}</small><h4>${prompt}</h4><p class="preview-body">${zh ? "請依照以下結構整理：<br>1. 核心問題<br>2. 重要發現<br>3. 下一步行動<br><br>使用清楚、簡潔的語言。" : "Please use this structure:<br>1. The core problem<br>2. Key findings<br>3. Next steps<br><br>Keep the language clear and concise."}</p>${step === 3 ? `<div class="preview-note">${icon("note")}${zh ? "每週整理會議紀錄時使用" : "Use for the weekly meeting recap"}</div>` : ""}<small>ChatGPT · 10:42 · 1.2 KB</small></aside>`;
     body = panel(
       searchBar(placeholder, icon) +
-        `<div class="app-workspace"><div class="app-list">${rows([promptRow, { kind: "text", text: zh ? "檢查這段文案的語氣" : "Review the tone of this copy", source: "ChatGPT · 09:30" }], icon)}</div>${step >= 1 ? preview : `<div class="preview-placeholder">${icon("note")}<span>${zh ? "選取內容，展開預覽" : "Select an item to preview"}</span></div>`}</div>` +
+        `<div class="app-workspace"><div class="app-list">${rows([{ ...promptRow, selected: false }, imageRow], icon)}</div><div class="preview-slot"><div class="preview-placeholder">${icon("note")}<span>${zh ? "移到項目，展開預覽" : "Hover over an item to preview"}</span></div><aside class="app-preview preview-image"><small>${zh ? "圖片預覽" : "IMAGE PREVIEW"}</small><h4>${imageRow.text}</h4>${previewImage()}<small>Snipping Tool · 10:43 · PNG</small></aside>${preview}</div></div>` +
         footer(zh),
       icon,
       "Mnemark",

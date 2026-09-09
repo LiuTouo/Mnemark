@@ -204,20 +204,30 @@ const cues: Record<FeatureId, Cue[]> = {
   ],
   preview: [
     {
-      id: "hover-preview",
+      id: "hover-image",
       kind: "hover",
       frame: 0,
       start: 0.01,
-      press: 0.12,
-      end: 0.18,
+      press: 0.07,
+      end: 0.16,
+      target: ".app-row:nth-child(2) .row-main",
+      label: ["移到圖片，預覽縮圖", "Hover over the image to preview it"],
+    },
+    {
+      id: "hover-text",
+      kind: "hover",
+      frame: 1,
+      start: 0.165,
+      press: 0.21,
+      end: 0.24,
       target: ".app-row:first-child .row-main",
-      label: ["移到項目上預覽，不需點擊", "Hover to preview; no click needed"],
+      label: ["再移到文字，預覽內容", "Hover over text to preview its content"],
     },
     {
       id: "open-more",
       kind: "click",
       frame: 1,
-      start: 0.22,
+      start: 0.245,
       press: 0.285,
       end: 0.325,
       target: ".app-row:first-child .row-more",
@@ -455,6 +465,14 @@ export function createDemoCues(chapter: HTMLElement, english: boolean) {
   return {
     update(time: number) {
       canvas
+        .querySelectorAll<HTMLElement>(
+          "[data-frame].scenario-preview .preview-slot",
+        )
+        .forEach((slot) => {
+          slot.classList.toggle("show-image", time >= 0.07 && time < 0.21);
+          slot.classList.toggle("show-text", time >= 0.21);
+        });
+      canvas
         .querySelector('[data-frame="1"].scenario-search .app-panel')
         ?.classList.toggle("search-pending", time < 0.43);
       canvas
@@ -626,6 +644,9 @@ export function createDemoCues(chapter: HTMLElement, english: boolean) {
       }
     },
     dispose() {
+      canvas
+        .querySelectorAll("[data-frame].scenario-preview .preview-slot")
+        .forEach((slot) => slot.classList.remove("show-image", "show-text"));
       canvas
         .querySelector(
           '[data-frame="2"].scenario-search .search-matches .app-row',

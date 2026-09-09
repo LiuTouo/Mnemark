@@ -78,7 +78,7 @@ const zhFeatures: Feature[] = [
     description:
       "長提示詞不必憑第一行猜。展開預覽、查看來源，再留一句給下次自己的使用提醒。",
     steps: [
-      "移到項目上展開預覽",
+      "先預覽圖片縮圖，再預覽文字",
       "點開「更多」並選擇備註",
       "輸入備註並儲存",
       "內容與使用提醒一起查看",
@@ -185,7 +185,7 @@ const enFeatures: Feature[] = [
     description:
       "A long prompt deserves more than a first-line guess. Preview its contents, check the source, and leave a useful note for your future self.",
     steps: [
-      "Hover over an item to preview it",
+      "Preview the image thumbnail, then the text",
       "Open More and choose Note",
       "Type a note and save it",
       "Read the content and its reminder together",

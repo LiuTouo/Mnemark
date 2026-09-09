@@ -514,6 +514,36 @@
   background: #2b2b32;
   padding: 2.5cqw;
 }
+.preview-slot {
+  width: 57%;
+  display: grid;
+  min-width: 0;
+}
+.scenario-preview .preview-slot > * {
+  grid-area: 1 / 1;
+  width: 100%;
+  min-width: 0;
+  transition: opacity 120ms ease;
+}
+.preview-slot > .app-preview {
+  visibility: hidden;
+  opacity: 0;
+}
+.preview-slot.show-image > .preview-image,
+.preview-slot.show-text > .app-preview:not(.preview-image) {
+  visibility: visible;
+  opacity: 1;
+}
+.preview-slot.show-image > .preview-placeholder,
+.preview-slot.show-text > .preview-placeholder {
+  visibility: hidden;
+  opacity: 0;
+}
+.preview-image .mini-landscape {
+  height: 18cqw;
+  margin-bottom: 2cqw;
+  border-radius: 4px;
+}
 .scenario-preview .app-preview h4 {
   font-size: max(9px, 2.58cqw);
   line-height: 1.6;

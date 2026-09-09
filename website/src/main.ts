@@ -174,12 +174,6 @@ function configureAnimations() {
               break;
             case "preview":
               rise(
-                '[data-frame="1"] .app-preview',
-                { x: 80, autoAlpha: 0 },
-                0.15,
-                0.28,
-              );
-              rise(
                 '[data-frame="2"] .note-dialog',
                 { y: 22, scale: 0.92, autoAlpha: 0 },
                 0.48,
