@@ -315,7 +315,7 @@
   height: 5cqw;
 }
 .scenario-search .panel-position {
-  top: 29%;
+  top: 25%;
   z-index: 2;
 }
 .hotkey-callout {
@@ -346,6 +346,51 @@
   color: #a8b296;
   font-size: max(9px, 2.02cqw);
   text-align: center;
+}
+.scenario-search .search-list {
+  height: 25cqw;
+  min-height: 25cqw;
+  display: grid;
+  overflow: hidden;
+}
+.search-list > div {
+  grid-area: 1 / 1;
+  min-width: 0;
+  transition: opacity 160ms ease;
+}
+.search-history,
+.search-history-count {
+  visibility: hidden;
+  opacity: 0;
+}
+.search-history .app-row {
+  min-height: 5cqw;
+  padding-block: 0.3cqw;
+}
+.search-history .row-main small,
+.search-history .row-actions {
+  display: none;
+}
+.search-history .row-kind {
+  width: 3.5cqw;
+  height: 3.5cqw;
+}
+.search-pending .search-history,
+.search-pending .search-history-count {
+  visibility: visible;
+  opacity: 1;
+}
+.search-pending .search-matches,
+.search-pending .search-match-count {
+  visibility: hidden;
+  opacity: 0;
+}
+.scenario-search .search-result-note {
+  display: grid;
+  padding: 1.5cqw;
+}
+.scenario-search .search-result-note > span {
+  grid-area: 1 / 1;
 }
 .scenario-search .demo-notification {
   bottom: 1%;
@@ -656,7 +701,7 @@
     top: 26%;
   }
   .scenario-search .panel-position {
-    top: 25%;
+    top: 20%;
   }
   .scenario-pin .panel-position {
     top: 17%;

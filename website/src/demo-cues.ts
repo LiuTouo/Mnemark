@@ -466,6 +466,9 @@ export function createDemoCues(chapter: HTMLElement, english: boolean) {
 
   return {
     update(time: number) {
+      canvas
+        .querySelector('[data-frame="1"].scenario-search .app-panel')
+        ?.classList.toggle("search-pending", time < 0.43);
       for (const { element, cue } of copyCards) {
         element.classList.toggle(
           "is-copying",
@@ -627,6 +630,9 @@ export function createDemoCues(chapter: HTMLElement, english: boolean) {
       }
     },
     dispose() {
+      canvas
+        .querySelector('[data-frame="1"].scenario-search .app-panel')
+        ?.classList.add("search-pending");
       copyCards.forEach(({ element }) =>
         element.classList.remove("is-copying", "is-copied"),
       );

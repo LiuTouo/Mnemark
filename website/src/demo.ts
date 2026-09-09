@@ -117,13 +117,25 @@ export function renderDemoFrame(
       scene += `<div class="capture-waiting">${icon("copy")}<span>${zh ? "照常複製，Mnemark 在背景記錄" : "Copy as usual. Mnemark records in the background."}</span></div>`;
     }
   } else if (id === "search") {
+    const history = [
+      fileRow,
+      imageRow,
+      queryRow,
+      { ...promptRow, selected: false },
+      replyRow,
+      {
+        kind: "text",
+        text: zh ? "週四 14:00 專案討論" : "Thursday 14:00 · Project meeting",
+        source: "Teams · 09:00",
+      },
+    ];
     scene = `<div class="source-editor"><div class="editor-heading">${icon("spark")} ${zh ? "新的 AI 對話" : "A new AI conversation"}<span>+</span></div><p class="editor-greeting">${zh ? "今天，想完成什麼？" : "What will you work on today?"}</p><div class="editor-compose">${step === 3 ? `<span class="pasted-text">${prompt}</span><b>↑</b>` : `<span>${zh ? "輸入訊息…" : "Message…"}</span>`}</div></div>`;
     if (step > 0 && step < 3)
       body = panel(
         searchBar(zh ? "摘要" : "summary", icon, true) +
           tabs(zh) +
-          `<div class="app-list">${rows([promptRow], icon)}</div>` +
-          `<div class="search-result-note">${zh ? "1 個相符項目" : "1 matching item"}</div>` +
+          `<div class="app-list search-list"><div class="search-matches">${rows([promptRow], icon)}</div>${step === 1 ? `<div class="search-history">${rows(history, icon)}</div>` : ""}</div>` +
+          `<div class="search-result-note"><span class="search-match-count">${zh ? "1 個相符項目" : "1 matching item"}</span>${step === 1 ? `<span class="search-history-count">${zh ? "6 則歷史項目" : "6 history items"}</span>` : ""}</div>` +
           footer(
             zh,
             step === 2
@@ -133,6 +145,8 @@ export function renderDemoFrame(
               : "",
           ),
         icon,
+        "Mnemark",
+        step === 1 ? "search-pending" : "",
       );
     if (step === 0)
       scene += `<div class="hotkey-callout"><kbd>Ctrl</kbd><span>+</span><kbd>Shift</kbd><span>+</span><kbd>V</kbd></div>`;
