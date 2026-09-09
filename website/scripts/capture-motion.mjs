@@ -33,7 +33,7 @@ await page.evaluate(async () => {
   const start = performance.now();
   await new Promise((resolve) => {
     function frame(now) {
-      const progress = Math.min(1, (now - start) / 12000);
+      const progress = Math.min(1, (now - start) / 15000);
       scrollTo(0, from + (to - from) * progress);
       if (progress < 1) requestAnimationFrame(frame);
       else resolve();

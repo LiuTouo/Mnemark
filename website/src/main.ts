@@ -279,6 +279,17 @@ function configureAnimations() {
           timeline.eventCallback("onComplete", resetPlayLabel);
           controls.hidden = Boolean(desktop);
           if (desktop) {
+            // A lesson stays fixed until the entire feature stack ends. The next
+            // opaque lesson rises over it instead of pushing the previous one away.
+            ScrollTrigger.create({
+              trigger: chapter,
+              start: "top 88px",
+              endTrigger: ".feature-chapters",
+              end: "bottom bottom",
+              pin: chapter.querySelector<HTMLElement>(".feature-stage")!,
+              pinSpacing: false,
+              invalidateOnRefresh: true,
+            });
             ScrollTrigger.create({
               trigger: chapter,
               start: "top 88px",
@@ -288,8 +299,8 @@ function configureAnimations() {
               invalidateOnRefresh: true,
             });
           } else {
-            // Same reversible timeline; mobile explicitly plays it over eight seconds.
-            timeline.timeScale(1 / 8);
+            // Same reversible timeline; allow three extra seconds to read each lesson.
+            timeline.timeScale(1 / 11);
             const onPlay = () => {
               if (timeline.paused() || timeline.progress() === 1) {
                 if (timeline.progress() === 1) timeline.progress(0);
