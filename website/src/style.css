@@ -1622,7 +1622,7 @@ summary > span {
     box-shadow: 0 -1px var(--line), 0 -30px 50px #11131255;
   }
   html[data-motion="full"] .demo-wrap {
-    max-width: calc((100svh - 230px) * 1.1);
+    max-width: calc((100svh - 255px) * 1.1);
     width: 100%;
     justify-self: end;
   }

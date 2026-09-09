@@ -6,5 +6,6 @@
 | [scroll-product-chapter](scroll-product-chapter.md) | 捲動推進的四步產品操作 | 七個完整功能章節 |
 | [workflow-horizontal](workflow-horizontal.md) | 垂直捲動映射橫向卡片 | 四個工作流情境 |
 | [smooth-wheel](smooth-wheel.md) | 帶減速收尾的平滑滾輪 | 頁面移動與場景動畫共用時鐘 |
+| [demo-input-cues](demo-input-cues.md) | 游標、點擊、拖曳及快捷鍵提示 | 解釋每次畫面變化的操作原因 |
 
 每份 Spec 區分「來源確認」與「本站設計」。參考網站動畫參數是研究證據，不是必須照搬的品牌／版面規格。CSS 和 GSAP 是目前實作，進度及狀態契約可移植到其他技術。

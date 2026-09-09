@@ -19,7 +19,7 @@ const zhFeatures: Feature[] = [
       "一句靈感、一張截圖，或一份要交付的檔案。照常複製，讓 Mnemark 在背景接住這些工作片段。",
     steps: [
       "照常複製一段文字",
-      "再複製圖片與檔案",
+      "再複製一張圖片",
       "呼叫歷史面板",
       "按類型找到需要的項目",
     ],
@@ -48,8 +48,8 @@ const zhFeatures: Feature[] = [
     description:
       "為提示詞、工作回覆與專案素材各留一個抽屜。整理一次，下次需要時就從熟悉的位置取用。",
     steps: [
-      "打開抽屜工作區",
-      "建立「AI 提示詞」抽屜",
+      "點擊「新增抽屜」",
+      "輸入名稱並建立抽屜",
       "把提示詞拖進抽屜",
       "選取抽屜，再次使用",
     ],
@@ -63,7 +63,7 @@ const zhFeatures: Feature[] = [
     description:
       "每天會用到的那幾段內容，留在清單最上方。需要連續操作時，也能只複製，讓面板保持開啟。",
     steps: [
-      "找到常用回覆",
+      "點擊常用回覆旁的釘選",
       "將項目釘選",
       "新的紀錄進來，釘選仍在頂部",
       "只複製，繼續留在面板",
@@ -78,9 +78,9 @@ const zhFeatures: Feature[] = [
     description:
       "長提示詞不必憑第一行猜。展開預覽、查看來源，再留一句給下次自己的使用提醒。",
     steps: [
-      "選取一段長提示詞",
-      "展開同工作區預覽",
-      "從更多選單加入備註",
+      "移到項目上展開預覽",
+      "點開「更多」並選擇備註",
+      "輸入備註並儲存",
       "內容與使用提醒一起查看",
     ],
     detail:
@@ -94,9 +94,9 @@ const zhFeatures: Feature[] = [
       "專案結束後，把值得留下的片段一起收好。多選、分類、清理，讓工作區保持剛剛好的秩序。",
     steps: [
       "開啟多選模式",
-      "選取需要保存的項目",
-      "批次加入專案抽屜",
-      "刪除多餘紀錄，必要時復原",
+      "勾選需要保存的三筆項目",
+      "選擇要加入的專案抽屜",
+      "確認內容已批次保存",
     ],
     detail:
       "可全選目前可見項目、批次加入抽屜、刪除歷史或移除抽屜項目。歷史刪除提供 3 秒復原時間。",
@@ -108,10 +108,10 @@ const zhFeatures: Feature[] = [
     description:
       "從熟悉的快捷鍵到舒服的主題，從歷史容量到哪些程式不記錄。讓工具配合你的工作方式。",
     steps: [
-      "從系統匣開啟設定",
-      "選擇快捷鍵與外觀",
-      "決定是否保存歷史",
-      "設定排除程式與暫停記錄",
+      "點開外觀主題選單",
+      "選擇深色主題",
+      "開啟歷史保存",
+      "向下查看排除程式清單",
     ],
     detail:
       "剪貼簿資料在本機管理。更新檢查與下載會連線；程式排除依複製當下的前景應用程式判斷。",
@@ -126,7 +126,7 @@ const enFeatures: Feature[] = [
       "A good thought, a screenshot, a file ready to share. Copy as you normally would. Mnemark keeps those working pieces close.",
     steps: [
       "Copy a piece of text",
-      "Copy an image and a file",
+      "Copy an image",
       "Open clipboard history",
       "Filter by content type",
     ],
@@ -155,8 +155,8 @@ const enFeatures: Feature[] = [
     description:
       "Give prompts, work replies and project material a drawer of their own. Organize once. Find them somewhere familiar next time.",
     steps: [
-      "Open the drawer workspace",
-      "Create an “AI prompts” drawer",
+      "Click New drawer",
+      "Enter a name and create the drawer",
       "Drag your prompt into it",
       "Open the drawer and use it again",
     ],
@@ -170,7 +170,7 @@ const enFeatures: Feature[] = [
     description:
       "Keep your everyday snippets at the top of the list. Copy without closing the panel when your next action is already waiting.",
     steps: [
-      "Find a frequently used reply",
+      "Click the pin beside a frequent reply",
       "Pin the item",
       "New entries arrive; your pin stays on top",
       "Copy and keep the panel open",
@@ -185,9 +185,9 @@ const enFeatures: Feature[] = [
     description:
       "A long prompt deserves more than a first-line guess. Preview its contents, check the source, and leave a useful note for your future self.",
     steps: [
-      "Select a longer prompt",
-      "Open the in-workspace preview",
-      "Add a note from the More menu",
+      "Hover over an item to preview it",
+      "Open More and choose Note",
+      "Type a note and save it",
       "Read the content and its reminder together",
     ],
     detail:
@@ -201,9 +201,9 @@ const enFeatures: Feature[] = [
       "When a project wraps up, save the pieces worth keeping. Select, organize and clear out, without repeating every single click.",
     steps: [
       "Turn on multi-select",
-      "Select the pieces to keep",
-      "Add them to a project drawer",
-      "Delete old entries; undo if needed",
+      "Select three items to keep",
+      "Choose a project drawer",
+      "Confirm the items have been saved",
     ],
     detail:
       "Select visible items, add them to drawers, delete history or remove drawer items in batches. History deletions have a 3-second undo window.",
@@ -215,10 +215,10 @@ const enFeatures: Feature[] = [
     description:
       "Familiar shortcuts. A comfortable theme. Control over history limits and excluded apps. A small tool that fits the way you work.",
     steps: [
-      "Open settings from the system tray",
-      "Choose shortcuts and appearance",
-      "Decide whether to save history",
-      "Set app exclusions or pause recording",
+      "Open the appearance menu",
+      "Choose the dark theme",
+      "Enable history persistence",
+      "Scroll down to review excluded apps",
     ],
     detail:
       "Clipboard data is managed locally. Update checks and downloads use the network. App exclusions use the foreground app at the time of copying.",

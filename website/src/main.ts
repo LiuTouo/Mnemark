@@ -1,7 +1,9 @@
+import { createDemoCues } from "./demo-cues";
 import { createAutoplayGroup } from "./autoplay";
 import { startSmoothScroll } from "./smooth-scroll";
 import "./style.css";
 import "./demo.css";
+import "./demo-cues.css";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 
@@ -98,22 +100,6 @@ function configureAnimations() {
               at,
             );
           }
-          if (chapter.dataset.chapter === "search") {
-            timeline.fromTo(
-              frames[1].querySelector(".app-search > span"),
-              { clipPath: "inset(0 100% 0 0)" },
-              { clipPath: "inset(0 0% 0 0)", duration: 0.22, ease: "none" },
-              0.17,
-            );
-          }
-          const dragChip = chapter.querySelector(".drag-chip");
-          if (dragChip)
-            timeline.fromTo(
-              dragChip,
-              { x: 140, y: -45 },
-              { x: 0, y: 0, duration: 0.28, ease: "none" },
-              0.48,
-            );
           // Each operation has a visible motion of its own, rather than only swapping a list.
           const rise = (
             selector: string,
@@ -155,6 +141,7 @@ function configureAnimations() {
                 '[data-frame="1"] .panel-position',
                 { y: desktop ? 70 : 30, scale: 0.92, autoAlpha: 0 },
                 0.15,
+                0.1,
               );
               rise(
                 '[data-frame="3"] .pasted-text',
@@ -167,6 +154,7 @@ function configureAnimations() {
                 '[data-frame="1"] .demo-dialog',
                 { y: 26, scale: 0.9, autoAlpha: 0 },
                 0.15,
+                0.08,
               );
               rise('[data-frame="3"] .app-row', { x: -36, autoAlpha: 0 }, 0.8);
               break;
@@ -194,6 +182,7 @@ function configureAnimations() {
                 '[data-frame="2"] .note-dialog',
                 { y: 22, scale: 0.92, autoAlpha: 0 },
                 0.48,
+                0.08,
               );
               rise(
                 '[data-frame="3"] .preview-note',
@@ -268,7 +257,10 @@ function configureAnimations() {
               },
             },
           );
+          const inputCues = createDemoCues(chapter, english);
+          localCleanup.push(() => inputCues.dispose());
           timeline.eventCallback("onUpdate", () => {
+            inputCues.update(timeline.time());
             paintStep(Math.min(timeline.time(), 1));
             chapter.dataset.cycle = String(timeline.iteration());
           });
@@ -286,6 +278,7 @@ function configureAnimations() {
           autoplay.attach(chapter, timeline);
           paintStep(0);
           chapter.dataset.cycle = "1";
+          inputCues.update(0);
         });
 
       const workflow =

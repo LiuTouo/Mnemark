@@ -45,12 +45,20 @@ export function createAutoplayGroup(labels: { play: string; pause: string }) {
       timeline.fromTo(
         bridge,
         { autoAlpha: 0 },
-        { autoAlpha: 1, duration: LOOP_FADE_SECONDS / DEMO_SECONDS, ease: "none" },
+        {
+          autoAlpha: 1,
+          duration: LOOP_FADE_SECONDS / DEMO_SECONDS,
+          ease: "none",
+        },
         1,
       );
       timeline.to(
         canvas.querySelector('[data-frame="3"]'),
-        { autoAlpha: 0, duration: LOOP_FADE_SECONDS / DEMO_SECONDS, ease: "none" },
+        {
+          autoAlpha: 0,
+          duration: LOOP_FADE_SECONDS / DEMO_SECONDS,
+          ease: "none",
+        },
         1,
       );
       timeline
@@ -69,14 +77,16 @@ export function createAutoplayGroup(labels: { play: string; pause: string }) {
           innerWidth - 2,
           Math.max(2, rect.left + rect.width / 2),
         );
-        // Pinned lessons can intersect the viewport while covered by the next lesson.
+        // Wait until the actions are actually visible, not just a sliver of the card.
+        // Pinned lessons may also be covered by the following opaque lesson.
         const visible =
-          bottom > top &&
-          [top + 1, (top + bottom) / 2, bottom - 1].some(
-            (y) =>
-              document.elementFromPoint(x, y)?.closest(".feature-chapter") ===
-              chapter,
-          );
+          bottom - top >= rect.height * 0.85 &&
+          [0.1, 0.3, 0.5, 0.7, 0.9].filter(
+            (fraction) =>
+              document
+                .elementFromPoint(x, top + (bottom - top) * fraction)
+                ?.closest(".feature-chapter") === chapter,
+          ).length >= 4;
         const paused = document.hidden || !visible || manuallyPaused;
         timeline.paused(paused);
         play.querySelector("span")!.textContent = paused

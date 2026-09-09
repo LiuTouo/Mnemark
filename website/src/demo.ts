@@ -13,8 +13,8 @@ type Row = {
 function rows(items: Row[], icon: Icon) {
   return items
     .map(
-      (item) =>
-        `<div class="app-row ${item.selected ? "row-selected" : ""} ${item.pinned ? "pinned-row" : ""} ${item.checked ? "row-checked" : ""}">${item.checked ? `<span class="fake-check">${icon("check")}</span>` : `<div class="row-kind kind-${item.kind}">${icon(item.kind)}</div>`}<div class="row-main"><p>${item.text}</p><small>${item.source}</small></div><span class="row-action">${item.pinned ? icon("pin") : "···"}</span></div>`,
+      (item, index) =>
+        `<div data-demo-row="${index}" class="app-row ${item.selected ? "row-selected" : ""} ${item.pinned ? "pinned-row" : ""} ${item.checked ? "row-checked" : ""}"><span class="row-handle"><svg viewBox="0 0 12 18" aria-hidden="true"><path d="M3 3h1m4 0h1M3 8h1m4 0h1M3 13h1m4 0h1" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></span>${item.checked ? `<span class="fake-check">${icon("check")}</span>` : `<div class="row-kind kind-${item.kind}">${icon(item.kind)}</div>`}<div class="row-main"><p>${item.text}</p><small>${item.source}</small></div><span class="row-actions"><span class="row-action row-pin">${icon("pin")}</span><span class="row-action row-copy">${icon("copy")}</span><span class="row-action row-more">···</span></span></div>`,
     )
     .join("");
 }
@@ -111,6 +111,10 @@ export function renderDemoFrame(
         ),
       icon,
     );
+    if (step < 2) {
+      body = "";
+      scene += `<div class="capture-waiting">${icon("copy")}<span>${zh ? "照常複製，Mnemark 在背景記錄" : "Copy as usual. Mnemark records in the background."}</span></div>`;
+    }
   } else if (id === "search") {
     scene = `<div class="source-editor"><div class="editor-heading">${icon("spark")} ${zh ? "新的 AI 對話" : "A new AI conversation"}<span>+</span></div><p class="editor-greeting">${zh ? "今天，想完成什麼？" : "What will you work on today?"}</p><div class="editor-compose">${step === 3 ? `<span class="pasted-text">${prompt}</span><b>↑</b>` : `<span>${zh ? "輸入訊息…" : "Message…"}</span>`}</div></div>`;
     if (step > 0 && step < 3)
@@ -150,7 +154,7 @@ export function renderDemoFrame(
       icon,
     );
     if (step === 1)
-      scene += `<div class="demo-dialog"><small>${zh ? "新增抽屜" : "New drawer"}</small><div class="dialog-input">${name}<i></i></div><span class="dialog-save">${zh ? "建立" : "Create"}</span></div>`;
+      scene += `<div class="demo-dialog"><small>${zh ? "新增抽屜" : "New drawer"}</small><div class="dialog-input"><span class="cue-typed">${name}</span><i></i></div><span class="dialog-save">${zh ? "建立" : "Create"}</span></div>`;
     if (step === 2)
       scene += `<div class="drag-chip">${icon("text")}<span>${prompt}</span></div>`;
     if (step === 3)
@@ -204,8 +208,10 @@ export function renderDemoFrame(
       "Mnemark",
       "has-preview",
     );
+    if (step === 1)
+      scene = `<div class="demo-cue-menu note-menu"><span class="menu-note">${icon("note")}${zh ? "備註" : "Note"}</span></div>`;
     if (step === 2)
-      scene = `<div class="demo-dialog note-dialog"><small>${zh ? "編輯備註" : "Edit note"}</small><div class="dialog-input">${zh ? "每週整理會議紀錄時使用" : "Use for the weekly meeting recap"}<i></i></div><span class="dialog-save">${zh ? "儲存" : "Save"}</span></div>`;
+      scene = `<div class="demo-dialog note-dialog"><small>${zh ? "編輯備註" : "Edit note"}</small><div class="dialog-input"><span class="cue-typed">${zh ? "每週整理會議紀錄時使用" : "Use for the weekly meeting recap"}</span><i></i></div><span class="dialog-save">${zh ? "儲存" : "Save"}</span></div>`;
   } else if (id === "batch") {
     const items: Row[] = [
       imageRow,
@@ -217,20 +223,20 @@ export function renderDemoFrame(
       },
       queryRow,
     ];
-    const toolbar = `<div class="batch-toolbar"><span>${icon("check")} ${step === 0 ? (zh ? "多選模式" : "Multi-select") : step === 3 ? (zh ? "已刪除 2 筆 · 復原" : "Deleted 2 items · Undo") : zh ? "已選取 3 筆" : "3 items selected"}</span><b>${icon("drawer")}${icon("file")}</b></div>`;
+    const toolbar = `<div class="batch-toolbar"><span>${icon("check")} ${step === 0 ? (zh ? "多選模式" : "Multi-select") : step === 3 ? (zh ? "已保存 3 筆" : "3 items saved") : zh ? "已選取 3 筆" : "3 items selected"}</span><b>${icon("drawer")}${icon("file")}</b></div>`;
     body = panel(
       searchBar(placeholder, icon) +
         toolbar +
         `<div class="app-list">${rows(
-          (step === 3 ? items.slice(0, 2) : items).map((item, index) => ({
+          items.map((item, index) => ({
             ...item,
-            checked: step >= 1 && step < 3 && index < 3,
+            checked: step >= 1 && index < 3,
           })),
           icon,
         )}</div>` +
         footer(
           zh,
-          step === 2
+          step === 3
             ? zh
               ? "已加入「專案素材」"
               : "Added to Project material"
@@ -239,11 +245,10 @@ export function renderDemoFrame(
       icon,
     );
     if (step === 2)
-      scene = `<div class="batch-destination">${icon("drawer")}<span>${zh ? "專案素材" : "Project material"}</span><b>+3</b></div>`;
+      scene = `<div class="demo-cue-menu batch-menu"><small>${zh ? "加入抽屜" : "Add to drawer"}</small><span class="menu-project">${icon("drawer")}${zh ? "專案素材" : "Project material"}</span></div>`;
     if (step === 3)
-      notification = zh
-        ? "清理完成 · 3 秒內可復原"
-        : "Cleared · 3 seconds to undo";
+      scene = `<div class="batch-destination">${icon("drawer")}<span>${zh ? "專案素材" : "Project material"}</span><b>+3</b></div>`;
+    if (step === 3) notification = "";
   } else {
     const item = (label: string, value: string) =>
       `<div class="setting-line"><span>${label}</span><b>${value}</b></div>`;
@@ -256,6 +261,8 @@ export function renderDemoFrame(
       `settings-panel ${step === 0 ? "light-demo" : ""}`,
     );
     scene = `<div class="settings-guide">${icon("settings")}<span>${zh ? "讓工具配合你的習慣。" : "Make the tool fit your habits."}</span></div>`;
+    if (step === 0)
+      scene += `<div class="demo-cue-menu theme-menu"><span>${zh ? "跟隨系統" : "System"}</span><span>${zh ? "淺色" : "Light"}</span><span class="menu-dark">${zh ? "深色" : "Dark"}</span></div>`;
   }
-  return `<div class="demo-frame scenario-${id}" data-frame="${step}" ${step > 0 ? 'style="opacity:0;visibility:hidden"' : ""}><div class="demo-surface">${body ? `<div class="panel-position">${body}</div>` : ""}${scene}${notification ? `<div class="demo-notification">${icon("check")}<span>${notification}</span></div>` : ""}<svg class="demo-cursor cursor-${step}" viewBox="0 0 24 30" aria-hidden="true"><path d="M2 2v24l7-7 5 9 4-2-5-9h10z" fill="#fff" stroke="#24252a" stroke-width="1.5"/></svg></div></div>`;
+  return `<div class="demo-frame scenario-${id}" data-frame="${step}" ${step > 0 ? 'style="opacity:0;visibility:hidden"' : ""}><div class="demo-surface">${body ? `<div class="panel-position">${body}</div>` : ""}${scene}${notification ? `<div class="demo-notification">${icon("check")}<span>${notification}</span></div>` : ""}</div></div>`;
 }

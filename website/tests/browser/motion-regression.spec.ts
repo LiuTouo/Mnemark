@@ -24,7 +24,7 @@ test("a normal laptop browser viewport plays the demo inside the pinned lesson",
   await page.goto("./");
   const chapter = page.locator("#feature-search");
   await chapter.evaluate((el) =>
-    scrollTo(0, el.getBoundingClientRect().top + scrollY + 400),
+    scrollTo(0, el.getBoundingClientRect().top + scrollY + 150),
   );
   await expect(chapter).toHaveAttribute("data-progress", /0\.[1-9]/);
   await expect(chapter).toHaveAttribute("data-playing", "true");
