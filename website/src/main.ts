@@ -1,10 +1,13 @@
 import { createAutoplayGroup } from "./autoplay";
+import { startSmoothScroll } from "./smooth-scroll";
 import "./style.css";
 import "./demo.css";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 
 gsap.registerPlugin(ScrollTrigger);
+const disposeSmoothScroll = startSmoothScroll();
+import.meta.hot?.dispose(disposeSmoothScroll);
 const english = document.documentElement.lang === "en";
 const labels = {
   play: english ? "Play demo" : "播放示範",

@@ -12,8 +12,12 @@ export function createAutoplayGroup(labels: { play: string; pause: string }) {
   const requestSync = () => {
     if (!scheduled) scheduled = requestAnimationFrame(sync);
   };
+  const onVisibility = () => {
+    cancelAnimationFrame(scheduled);
+    sync();
+  };
   window.addEventListener("scroll", requestSync, { passive: true });
-  document.addEventListener("visibilitychange", requestSync);
+  document.addEventListener("visibilitychange", onVisibility);
   ScrollTrigger.addEventListener("refresh", requestSync);
 
   return {
@@ -103,7 +107,7 @@ export function createAutoplayGroup(labels: { play: string; pause: string }) {
     dispose() {
       cancelAnimationFrame(scheduled);
       window.removeEventListener("scroll", requestSync);
-      document.removeEventListener("visibilitychange", requestSync);
+      document.removeEventListener("visibilitychange", onVisibility);
       ScrollTrigger.removeEventListener("refresh", requestSync);
       disposers.forEach((dispose) => dispose());
     },
