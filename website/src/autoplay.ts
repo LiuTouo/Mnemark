@@ -1,6 +1,6 @@
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 
-const DEMO_SECONDS = 9.5;
+const DEMO_SECONDS = 7;
 const LOOP_FADE_SECONDS = 0.44;
 
 // Scroll controls the lesson surfaces only. Each visible demo has its own clock.

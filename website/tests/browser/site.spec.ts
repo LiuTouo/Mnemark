@@ -34,6 +34,9 @@ test("both static locales expose all seven chapters and real download destinatio
     await expect(page.locator("h1")).toHaveText("Mnemark.");
     await expect(page.locator(".feature-chapter")).toHaveCount(7);
     await expect(page.locator(".workflow-card")).toHaveCount(4);
+    await expect(page.locator(".quick-flow > div")).toHaveCount(3);
+    await expect(page.locator(".quick-flow")).not.toContainText(/搜尋|search/i);
+    await expect(page.locator(".quick-extra")).toContainText(/額外功能|An extra/);
     expect(
       await page
         .locator(".brand img")

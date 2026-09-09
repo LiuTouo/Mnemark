@@ -6,7 +6,7 @@
 
 實作使用 Lenis 1.3，`smoothWheel:true`、`duration:1.05`、`easing:1-(1-t)^4`，`syncTouch:false` 保留手機原生觸控慣性。依既有設計要求保持動態預設開啟，不新增調整按鈕。
 
-Lenis 由 GSAP ticker 驅動（autoRaf:false），scroll 事件同步 ScrollTrigger.update；章節的進場、固定及覆蓋因此跟隨平滑後的位置。產品 demo 仍使用自己的 9.5 秒播放時鐘，沒有連接到捲動進度。
+Lenis 由 GSAP ticker 驅動（autoRaf:false），scroll 事件同步 ScrollTrigger.update；章節的進場、固定及覆蓋因此跟隨平滑後的位置。產品 demo 仍使用自己的 7 秒播放時鐘，沒有連接到捲動進度。
 
 點擊、鍵盤導覽與章節連結會取消尚未結束的滾輪慣性，保留既有原生 hash、焦點及 scroll-padding 行為。離開頁籤時取消慣性；demo 立即暫停，避免背景時鐘間隔造成跳播。ScrollTrigger refresh 後同步量測頁面尺寸。開發熱更新會移除 ticker 與事件處理並銷毀 Lenis。
 

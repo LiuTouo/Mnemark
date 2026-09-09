@@ -28,10 +28,10 @@ const zhFeatures: Feature[] = [
   },
   {
     id: "search",
-    name: "搜尋與貼上",
+    name: "額外功能：搜尋",
     title: "少一次尋找。\n多一點專注。",
     description:
-      "不用再翻找上一個視窗。叫出面板、輸入關鍵字，讓需要的內容回到你正在工作的地方。",
+      "最近複製的內容可以直接選取貼上。需要找較早的項目時，再用關鍵字搜尋。",
     steps: [
       "按 Ctrl + Shift + V",
       "搜尋「摘要」",
@@ -135,10 +135,10 @@ const enFeatures: Feature[] = [
   },
   {
     id: "search",
-    name: "Search & paste",
+    name: "Extra: search",
     title: "Less looking.\nMore doing.",
     description:
-      "No need to retrace your steps through open windows. Bring up the panel, search a keyword, and put the right content back into your work.",
+      "Recent copies are ready to select right away. When you need an older item, search a keyword to find it.",
     steps: [
       "Press Ctrl + Shift + V",
       "Search for “summary”",
@@ -251,10 +251,12 @@ export const copy = {
     introText:
       "好的提示詞，不該每次重找。常用的回覆，不必一再重打。Mnemark 接住你複製過的片段，讓它們在下一次工作裡繼續派上用場。",
     introNote:
-      "一個安靜待在系統匣的 Windows 工具。需要時，按下快捷鍵，它就在。",
-    quick: ["照常複製", "叫出面板", "搜尋選取", "貼回工作"],
+      "按下快捷鍵，歷史面板就會顯示最近複製的項目。選取需要的內容，直接貼回原本的程式。",
+    quick: ["照常複製", "叫出最近紀錄", "選取並貼回"],
+    optionalSearch: "額外功能：需要找較早的內容時，可以使用搜尋。",
+    optionalSearchLink: "查看搜尋示範",
     featuresTitle: "小工具。\n讓工作順手的大本事。",
-    featureLead: "七個日常動作，一段更順的工作流。",
+    featureLead: "常用功能與進階工具，讓工作更順手。",
     demo: "功能操作示意",
     playback: "播放示範",
     pause: "暫停",
@@ -339,9 +341,9 @@ export const copy = {
       "需要 Microsoft Edge WebView2 Runtime。Windows 11 與多數已更新的 Windows 10 已具備。",
     webview: "WebView2 下載說明",
     startSteps: [
-      "下載並啟動 Mnemark",
-      "照常複製需要的內容",
-      "Ctrl + Shift + V，找到並貼上",
+      "照常複製文字、圖片或檔案",
+      "Ctrl + Shift + V 叫出最近紀錄",
+      "選取項目，按 Enter 或點擊貼上",
     ],
     footer: "讓工作片段，繼續派上用場。",
     license: "GPL-3.0 開源授權",
@@ -400,15 +402,16 @@ export const copy = {
     introText:
       "Good prompts shouldn't need finding twice. Familiar replies shouldn't need writing again. Mnemark keeps the pieces you copy ready for the next thing you do.",
     introNote:
-      "A small Windows tool, quietly in your system tray. One shortcut away when you need it.",
+      "Press the shortcut to see your recent copies in the history panel. Select what you need and paste it straight back into your app.",
     quick: [
       "Copy as usual",
-      "Open the panel",
-      "Find your item",
-      "Paste it back",
+      "Open recent copies",
+      "Select and paste",
     ],
+    optionalSearch: "An extra when you need it: use search to find older content.",
+    optionalSearchLink: "See search in action",
     featuresTitle: "A small tool.\nA smoother working day.",
-    featureLead: "Seven everyday actions. One more natural workflow.",
+    featureLead: "Everyday essentials, with extras when you need them.",
     demo: "Product walkthrough",
     playback: "Play demo",
     pause: "Pause",
@@ -508,9 +511,9 @@ export const copy = {
       "Requires Microsoft Edge WebView2 Runtime. Included with Windows 11 and most updated Windows 10 systems.",
     webview: "Get WebView2",
     startSteps: [
-      "Download and start Mnemark",
-      "Copy the content you need",
-      "Ctrl + Shift + V. Find it. Paste it.",
+      "Copy text, images or files",
+      "Ctrl + Shift + V opens recent copies",
+      "Select an item, then press Enter or click",
     ],
     footer: "Give your working pieces a second life.",
     license: "GPL-3.0 open source",
