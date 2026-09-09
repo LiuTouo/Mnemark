@@ -22,18 +22,19 @@ await page.evaluate(() => document.fonts.ready);
 await page
   .locator("#feature-search")
   .evaluate((el) =>
-    scrollTo(0, el.getBoundingClientRect().top + scrollY - 700),
+    scrollTo(0, el.getBoundingClientRect().top + scrollY - 88),
   );
-await page.waitForTimeout(300);
+// Stay still through one complete auto-playing cycle, then demonstrate the handoff.
+await page.waitForTimeout(12500);
 await page.evaluate(async () => {
   const first = document.getElementById("feature-search");
   const last = document.getElementById("feature-drawers");
-  const from = first.getBoundingClientRect().top + scrollY - 700;
-  const to = last.getBoundingClientRect().bottom + scrollY - innerHeight;
+  const from = first.getBoundingClientRect().top + scrollY - 88;
+  const to = last.getBoundingClientRect().top + scrollY - 88;
   const start = performance.now();
   await new Promise((resolve) => {
     function frame(now) {
-      const progress = Math.min(1, (now - start) / 15000);
+      const progress = Math.min(1, (now - start) / 2500);
       scrollTo(0, from + (to - from) * progress);
       if (progress < 1) requestAnimationFrame(frame);
       else resolve();
@@ -41,7 +42,7 @@ await page.evaluate(async () => {
     requestAnimationFrame(frame);
   });
 });
-await page.waitForTimeout(500);
+await page.waitForTimeout(12500);
 const video = page.video();
 await context.close();
 const input = await video.path();

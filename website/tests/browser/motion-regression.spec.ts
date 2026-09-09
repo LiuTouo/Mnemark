@@ -17,7 +17,7 @@ test("background runs by default even with the previous saved preference", async
   );
 });
 
-test("a normal laptop browser viewport drives the product animation by scrolling", async ({
+test("a normal laptop browser viewport plays the demo inside the pinned lesson", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1366, height: 657 });
@@ -27,7 +27,7 @@ test("a normal laptop browser viewport drives the product animation by scrolling
     scrollTo(0, el.getBoundingClientRect().top + scrollY + 400),
   );
   await expect(chapter).toHaveAttribute("data-progress", /0\.[1-9]/);
-  await expect(chapter.locator("[data-play]")).not.toBeVisible();
+  await expect(chapter).toHaveAttribute("data-playing", "true");
   expect(
     await chapter
       .locator(".demo-bottom")

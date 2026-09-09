@@ -1,3 +1,4 @@
+import { createAutoplayGroup } from "./autoplay";
 import "./style.css";
 import "./demo.css";
 import gsap from "gsap";
@@ -23,6 +24,8 @@ function configureAnimations() {
     (context) => {
       const desktop = context.conditions!.desktop;
       const localCleanup: (() => void)[] = [];
+      const autoplay = createAutoplayGroup(labels);
+      localCleanup.push(() => autoplay.dispose());
       {
         const cloud = gsap.to(".cloud-track", {
           yPercent: -50,
@@ -55,11 +58,6 @@ function configureAnimations() {
             ...chapter.querySelectorAll<HTMLElement>(".demo-steps li"),
           ];
           const count = chapter.querySelector(".demo-count")!;
-          const play = chapter.querySelector<HTMLButtonElement>("[data-play]")!;
-          const replay =
-            chapter.querySelector<HTMLButtonElement>("[data-replay]")!;
-          const controls =
-            chapter.querySelector<HTMLElement>(".demo-controls")!;
           const progressBar = chapter.querySelector<HTMLElement>(
             ".demo-progress > span",
           )!;
@@ -138,7 +136,6 @@ function configureAnimations() {
           };
           switch (chapter.dataset.chapter) {
             case "capture":
-              rise('[data-frame="0"] .source-text', { y: 70, autoAlpha: 0 }, 0);
               rise(
                 '[data-frame="1"] .app-row',
                 { y: -36, autoAlpha: 0, stagger: 0.02 },
@@ -268,19 +265,11 @@ function configureAnimations() {
               },
             },
           );
-          timeline.eventCallback("onUpdate", () =>
-            paintStep(timeline.progress()),
-          );
-          const resetPlayLabel = () => {
-            play.querySelector("span")!.textContent = labels.play;
-            play.setAttribute("aria-pressed", "false");
-          };
-          resetPlayLabel();
-          timeline.eventCallback("onComplete", resetPlayLabel);
-          controls.hidden = Boolean(desktop);
+          timeline.eventCallback("onUpdate", () => {
+            paintStep(Math.min(timeline.time(), 1));
+            chapter.dataset.cycle = String(timeline.iteration());
+          });
           if (desktop) {
-            // A lesson stays fixed until the entire feature stack ends. The next
-            // opaque lesson rises over it instead of pushing the previous one away.
             ScrollTrigger.create({
               trigger: chapter,
               start: "top 88px",
@@ -290,57 +279,10 @@ function configureAnimations() {
               pinSpacing: false,
               invalidateOnRefresh: true,
             });
-            ScrollTrigger.create({
-              trigger: chapter,
-              start: "top 88px",
-              end: "bottom bottom",
-              animation: timeline,
-              scrub: true,
-              invalidateOnRefresh: true,
-            });
-          } else {
-            // Same reversible timeline; allow three extra seconds to read each lesson.
-            timeline.timeScale(1 / 11);
-            const onPlay = () => {
-              if (timeline.paused() || timeline.progress() === 1) {
-                if (timeline.progress() === 1) timeline.progress(0);
-                timeline.play();
-                play.querySelector("span")!.textContent = labels.pause;
-                play.setAttribute("aria-pressed", "true");
-              } else {
-                timeline.pause();
-                resetPlayLabel();
-              }
-            };
-            const onReplay = () => {
-              timeline.restart();
-              play.querySelector("span")!.textContent = labels.pause;
-              play.setAttribute("aria-pressed", "true");
-            };
-            play.addEventListener("click", onPlay);
-            replay.addEventListener("click", onReplay);
-            const observer = new IntersectionObserver((entries) => {
-              if (!entries[0].isIntersecting) {
-                timeline.pause();
-                resetPlayLabel();
-              }
-            });
-            observer.observe(chapter);
-            const onHidden = () => {
-              if (document.hidden) {
-                timeline.pause();
-                resetPlayLabel();
-              }
-            };
-            document.addEventListener("visibilitychange", onHidden);
-            localCleanup.push(() => {
-              play.removeEventListener("click", onPlay);
-              replay.removeEventListener("click", onReplay);
-              observer.disconnect();
-              document.removeEventListener("visibilitychange", onHidden);
-            });
           }
-          timeline.progress(0).pause();
+          autoplay.attach(chapter, timeline);
+          paintStep(0);
+          chapter.dataset.cycle = "1";
         });
 
       const workflow =

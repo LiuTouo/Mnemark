@@ -245,7 +245,7 @@ export const copy = {
     heroLine: "讓每次複製，\n都成為下次的捷徑。",
     heroDesc: "文字、圖片、檔案與靈感。\n找回你複製過的內容，接著把工作做好。",
     scroll: "往下探索",
-    scrollHelp: "捲動，親眼看它如何運作",
+    scrollHelp: "停下來，看它如何運作",
     label: "為日常工作而做",
     introTitle: "你的剪貼簿，\n值得多一點記憶。",
     introText:
@@ -259,7 +259,7 @@ export const copy = {
     playback: "播放示範",
     pause: "暫停",
     replay: "重播",
-    demoHint: "向下捲動，逐步操作",
+    demoHint: "自動循環播放",
     allFeatures: "完整功能、快捷鍵與使用須知",
     audienceTitle: "用電腦工作的人。\n也是常常重複的人。",
     audienceLead:
@@ -394,7 +394,7 @@ export const copy = {
     heroDesc:
       "Text, images, files and good ideas.\nFind what you copied. Get on with your work.",
     scroll: "Scroll to explore",
-    scrollHelp: "Scroll to see it in action",
+    scrollHelp: "Watch each feature in action",
     label: "Made for everyday work",
     introTitle: "Your clipboard.\nWith a little more memory.",
     introText:
@@ -413,7 +413,7 @@ export const copy = {
     playback: "Play demo",
     pause: "Pause",
     replay: "Replay",
-    demoHint: "Scroll down to walk through",
+    demoHint: "Autoplay · continuous loop",
     allFeatures: "All features, shortcuts & things to know",
     audienceTitle: "For people who work.\nAnd do things twice.",
     audienceLead:

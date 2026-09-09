@@ -36,14 +36,14 @@ test("previous lesson stays still while the next lesson slides up over it", asyn
   ).toBeCloseTo(88, 0);
 });
 
-test("manual demo playback lasts eleven seconds instead of eight", async ({
+test("demo operation playback lasts eleven seconds before looping", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("./#feature-search");
   const chapter = page.locator("#feature-search");
   await chapter.locator("[data-play]").scrollIntoViewIfNeeded();
-  await chapter.locator("[data-play]").click();
+  await chapter.locator("[data-replay]").click();
   await page.waitForTimeout(2500);
   const progress = Number(await chapter.getAttribute("data-progress"));
   expect(progress).toBeGreaterThan(0.18);

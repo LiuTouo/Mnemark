@@ -1,15 +1,26 @@
 import { test, expect } from "@playwright/test";
 
-test("hero duplicate tracks meet without a jump at the loop seam", async ({ page }) => {
-  for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+test("hero duplicate tracks meet without a jump at the loop seam", async ({
+  page,
+}) => {
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 390, height: 844 },
+  ]) {
     await page.setViewportSize(viewport);
     await page.goto("./");
     await page.evaluate(() => document.fonts.ready);
-    const seams = await page.locator(".cloud-track").evaluateAll(tracks => tracks.map(track => {
-      const items = track.children;
-      return Math.abs((track as HTMLElement).offsetHeight / 2 - ((items[3] as HTMLElement).offsetTop - (items[0] as HTMLElement).offsetTop));
-    }));
-    seams.forEach(seam => expect(seam).toBeLessThanOrEqual(1));
+    const seams = await page.locator(".cloud-track").evaluateAll((tracks) =>
+      tracks.map((track) => {
+        const items = track.children;
+        return Math.abs(
+          (track as HTMLElement).offsetHeight / 2 -
+            ((items[3] as HTMLElement).offsetTop -
+              (items[0] as HTMLElement).offsetTop),
+        );
+      }),
+    );
+    seams.forEach((seam) => expect(seam).toBeLessThanOrEqual(1));
   }
 });
 
@@ -44,31 +55,27 @@ test("both static locales expose all seven chapters and real download destinatio
   expect(errors).toEqual([]);
 });
 
-test("every desktop demo is deterministic under forward and reverse scrolling", async ({
+test("each visible lesson autoplays without a scroll-controlled playhead", async ({
   page,
 }) => {
   await page.goto("./");
   await page.evaluate(() => document.fonts.ready);
   for (const chapter of await page.locator(".feature-chapter").all()) {
-    const geometry = await chapter.evaluate((el) => ({
-      top: el.getBoundingClientRect().top + scrollY,
-      height: el.getBoundingClientRect().height,
-    }));
-    for (const progress of [0, 0.25, 0.5, 0.75, 1, 0.5, 0]) {
-      const y = geometry.top - 88 + progress * (geometry.height - 900 + 88);
-      await page.evaluate((y) => scrollTo(0, y), y);
-      await page.waitForTimeout(100);
-      const rendered = Number(await chapter.getAttribute("data-progress"));
-      expect(Math.abs(rendered - progress)).toBeLessThan(0.025);
-      const opacity = await chapter
-        .locator(".demo-frame")
-        .evaluateAll((elements) =>
-          elements.map((el) => Number(getComputedStyle(el).opacity)),
-        );
-      // At a crossfade both frames can be partially visible, but there must never be a blank scene.
-      expect(opacity.reduce((sum, value) => sum + value, 0)).toBeCloseTo(1, 1);
-      expect(Math.max(...opacity)).toBeGreaterThanOrEqual(0.45);
-    }
+    await chapter.evaluate((el) => el.scrollIntoView({ block: "start" }));
+    await expect(chapter).toHaveAttribute("data-playing", "true");
+    await page.waitForTimeout(250);
+    expect(Number(await chapter.getAttribute("data-progress"))).toBeGreaterThan(
+      0,
+    );
+    const opacity = await chapter
+      .locator(".demo-frame")
+      .evaluateAll((frames) =>
+        frames.reduce(
+          (sum, el) => sum + Number(getComputedStyle(el).opacity),
+          0,
+        ),
+      );
+    expect(opacity).toBeCloseTo(1, 1);
   }
 });
 
@@ -140,14 +147,13 @@ for (const viewport of [
   });
 }
 
-test("mobile demos require play, pause offscreen, and workflow controls reach the end", async ({
+test("mobile demos can pause their autoplay and workflow controls reach the end", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("./#feature-search");
   const chapter = page.locator("#feature-search");
   await chapter.locator("[data-play]").scrollIntoViewIfNeeded();
-  await chapter.locator("[data-play]").click();
   await page.waitForTimeout(1900);
   expect(Number(await chapter.getAttribute("data-progress"))).toBeGreaterThan(
     0.15,
