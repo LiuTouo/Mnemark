@@ -468,7 +468,9 @@ impl Default for AppConfig {
             // Off by default: autostart is opt-in via Settings, which creates
             // the shell:startup shortcut at toggle time.
             startup: false,
-            persist: false,
+            // On by default: history survives restart. Users who want
+            // wipe-on-exit behavior uncheck this in Settings.
+            persist: true,
             exclusion_list: vec![
                 "1Password.exe".to_string(),
                 "Bitwarden.exe".to_string(),
@@ -1004,11 +1006,11 @@ mod atomic_config_tests {
         cleanup(&path);
         save_to(&path, &AppConfig::default()).unwrap();
         let next = AppConfig {
-            persist: true,
+            persist: false,
             ..AppConfig::default()
         };
         save_to(&path, &next).unwrap();
-        assert!(load_from(&path).persist);
+        assert!(!load_from(&path).persist);
         cleanup(&path);
     }
 
@@ -1018,7 +1020,7 @@ mod atomic_config_tests {
         cleanup(&path);
         std::fs::write(&path, "{ not valid json").unwrap();
         let loaded = load_from(&path);
-        assert!(!loaded.persist);
+        assert!(loaded.persist);
         assert_eq!(loaded.hotkey, AppConfig::default().hotkey);
         // The corrupt bytes are preserved for recovery...
         let mut bak = path.as_os_str().to_owned();

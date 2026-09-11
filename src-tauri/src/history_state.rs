@@ -1017,7 +1017,10 @@ mod tests {
 
     #[test]
     fn bootstrap_no_db_is_clean_memory_only_state() {
-        let config = AppConfig::default();
+        let config = AppConfig {
+            persist: false,
+            ..Default::default()
+        };
         let (mut s, diagnostics) = HistoryState::bootstrap(&config, 0, false, || unreachable!());
         assert!(diagnostics.is_empty());
         assert_eq!(s.durable_ids(), None);
@@ -1082,7 +1085,10 @@ mod tests {
         p.dump(&[clip("leftover", 1)]).unwrap();
         let holder = Mutex::new(Some(p));
         let (opened_tx, opened_rx) = std::sync::mpsc::channel();
-        let config = AppConfig::default(); // persist = false
+        let config = AppConfig {
+            persist: false,
+            ..Default::default()
+        };
         let (s, diagnostics) = HistoryState::bootstrap(&config, 99_000_000, true, move || {
             let opened = holder
                 .lock()

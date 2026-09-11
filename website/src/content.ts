@@ -356,7 +356,7 @@ export const copy = {
       ],
       [
         "保存與容量",
-        "歷史預設只在記憶體，結束程式後消失；釘選也遵循此設定。啟用歷史持久化後保存在本機，停用會刪除已存歷史。抽屜項目獨立保存，不受這個開關影響。可調整文字與圖片容量；超過限制先淘汰未釘選舊項目，釘選最多 10 則。",
+        "歷史預設保存在本機；想要程式關閉就清除歷史，可在設定取消勾選持久化。停用會刪除已存歷史，釘選也遵循此設定。抽屜項目獨立保存，不受這個開關影響。可調整文字與圖片容量；超過限制先淘汰未釘選舊項目，釘選最多 10 則。",
       ],
       [
         "搜尋、預覽與檔案",
@@ -523,7 +523,7 @@ export const copy = {
       ],
       [
         "Storage & capacity",
-        "History is in memory by default and disappears on exit, including pins. Enable local history persistence to keep it. Disabling persistence removes saved history. Drawer items are saved independently. Text and image limits are configurable; oldest unpinned items are evicted first. Up to 10 pins.",
+        "History is saved locally by default; to clear history when the app closes, uncheck persistence in Settings. Disabling persistence removes saved history. Pins follow this setting. Drawer items are saved independently. Text and image limits are configurable; oldest unpinned items are evicted first. Up to 10 pins.",
       ],
       [
         "Search, preview & files",
