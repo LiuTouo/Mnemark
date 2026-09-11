@@ -120,6 +120,77 @@ fn tray_labels(lang: &str) -> TrayLabels {
     }
 }
 
+/// Fixed tray id, so the monitoring-state icon can be re-applied later via
+/// `AppHandle::tray_by_id` without stashing a handle in AppState.
+const TRAY_ID: &str = "mnemark-tray";
+
+/// Overlay a pause badge (white-rimmed dark disc with two light bars) on the
+/// bottom-left corner of the tray icon while clipboard monitoring is paused.
+/// Pure pixel work over the default icon's RGBA — no extra asset to maintain.
+fn with_pause_badge(base: &tauri::image::Image) -> tauri::image::Image<'static> {
+    let (w, h) = (base.width() as i32, base.height() as i32);
+    let mut rgba = base.rgba().to_vec();
+    let s = w.min(h).max(1);
+    let r = (s / 4).max(4);
+    let cx = r + 1;
+    let cy = h - 1 - r;
+    let bar_w = (s / 16).max(1);
+    let bar_h = r;
+    let bar_left = cx - 3 * bar_w / 2;
+    let bar_top = cy - bar_h / 2;
+
+    let set = |x: i32, y: i32, px: [u8; 4], rgba: &mut [u8]| {
+        if x < 0 || y < 0 || x >= w || y >= h {
+            return;
+        }
+        let i = ((y * w + x) * 4) as usize;
+        rgba[i..i + 4].copy_from_slice(&px);
+    };
+
+    // White rim ring (contrast on dark taskbars), then opaque dark disc.
+    for y in (cy - r - 1)..=(cy + r + 1) {
+        for x in (cx - r - 1)..=(cx + r + 1) {
+            let d2 = (x - cx) * (x - cx) + (y - cy) * (y - cy);
+            if d2 <= (r + 1) * (r + 1) {
+                let px = if d2 <= r * r {
+                    [26, 26, 26, 255]
+                } else {
+                    [255, 255, 255, 255]
+                };
+                set(x, y, px, &mut rgba);
+            }
+        }
+    }
+    // Two vertical bars; middle third of the strip stays as the gap.
+    for y in bar_top..bar_top + bar_h {
+        for x in bar_left..bar_left + 3 * bar_w {
+            if (x - bar_left) / bar_w == 1 {
+                continue;
+            }
+            set(x, y, [255, 255, 255, 255], &mut rgba);
+        }
+    }
+    tauri::image::Image::new_owned(rgba, w as u32, h as u32)
+}
+
+/// Swap the tray icon to reflect the monitoring state: normal icon while
+/// running, pause-badged icon while paused. Best-effort: a missing tray or
+/// icon never blocks the toggle.
+fn apply_tray_monitor_icon(app: &tauri::AppHandle, running: bool) {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
+    let Some(base) = app.default_window_icon() else {
+        return;
+    };
+    let icon = if running {
+        base.clone()
+    } else {
+        with_pause_badge(base)
+    };
+    let _ = tray.set_icon(Some(icon));
+}
+
 /// Every History command is one aggregate call plus a wire mapping: the
 /// consistency policy lives in the History module, not in transport code.
 
@@ -1503,7 +1574,7 @@ pub fn run(_hidden: bool) {
             let icon = app.default_window_icon().cloned().unwrap();
             let pause_item_handle = pause_item.clone();
 
-            let _tray = TrayIconBuilder::new()
+            let _tray = TrayIconBuilder::with_id(TRAY_ID)
                 .icon(icon)
                 .tooltip(format!("Mnemark v{}", env!("CARGO_PKG_VERSION")))
                 .menu(&menu)
@@ -1520,6 +1591,7 @@ pub fn run(_hidden: bool) {
                         } else {
                             labels.resume
                         });
+                        apply_tray_monitor_icon(app, *running);
                     }
                     "settings" => {
                         let _ = open_settings_window(app);
@@ -1857,6 +1929,40 @@ mod monitor_clock_tests {
         // kill the monitor thread. On any real test machine this is ~2026.
         let now = super::now_ms();
         assert!(now > 1_000_000_000_000, "now_ms should be post-2001 ms");
+    }
+}
+
+#[cfg(test)]
+mod pause_badge_tests {
+    #[test]
+    fn badge_covers_bottom_left_and_leaves_rest_untouched() {
+        // 32x32 solid red; every pixel [255,0,0,255].
+        let red: Vec<u8> = std::iter::repeat([255, 0, 0, 255])
+            .take(32 * 32)
+            .flatten()
+            .collect();
+        let base = tauri::image::Image::new_owned(red, 32, 32);
+        let out = super::with_pause_badge(&base);
+        let px = |x: i32, y: i32| {
+            let i = ((y * 32 + x) * 4) as usize;
+            let d = out.rgba();
+            (d[i], d[i + 1], d[i + 2], d[i + 3])
+        };
+        // Badge center (bottom-left): dark disc, white bars.
+        let (w, h) = (32, 32);
+        let r = w / 4; // 8
+        let cx = r + 1;
+        let cy = h - 1 - r;
+        let (r0, g0, b0, a0) = px(cx, cy);
+        assert_eq!((r0, g0, b0, a0), (26, 26, 26, 255), "disc center dark");
+        // Bar pixel: two bars of width 2 around the disc center column.
+        let (r1, g1, b1, a1) = px(cx - 2, cy);
+        assert_eq!((r1, g1, b1, a1), (255, 255, 255, 255), "left bar white");
+        let (r2, g2, b2, a2) = px(cx + 1, cy);
+        assert_eq!((r2, g2, b2, a2), (255, 255, 255, 255), "right bar white");
+        // Top-right corner keeps the original art.
+        let (r3, g3, b3, a3) = px(31, 0);
+        assert_eq!((r3, g3, b3, a3), (255, 0, 0, 255), "top-right untouched");
     }
 }
 
