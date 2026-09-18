@@ -200,6 +200,42 @@ describe("Panel located Clip callers", () => {
     await vi.waitFor(() => expect(commandCalls("get_active_clip_preview").length).toBeGreaterThan(0));
   });
 
+  it("preserves scroll when toggling older rows and still scrolls for keyboard navigation", async () => {
+    await import("./main");
+    window.dispatchEvent(new Event("DOMContentLoaded"));
+    await vi.waitFor(() => expect(document.querySelectorAll("#clip-list .clip-item")).toHaveLength(2));
+
+    const list = document.getElementById("clip-list")!;
+    const scrollIntoView = vi.fn(function (this: HTMLElement) {
+      list.scrollTop = Number(this.dataset.index) * 100;
+    });
+    HTMLElement.prototype.scrollIntoView = scrollIntoView;
+    list.scrollTop = 100;
+    document.getElementById("selection-toggle")!.click();
+    expect(list.scrollTop).toBe(100);
+
+    for (const selector of [".selection-checkbox", ""]) {
+      for (const checked of [true, false]) {
+        scrollIntoView.mockClear();
+        document.querySelector<HTMLElement>(`[data-clip-id="clip-b"] ${selector}`.trim())!.click();
+        expect(document.querySelector('[data-clip-id="clip-b"] .selection-checkbox')?.getAttribute("aria-checked"))
+          .toBe(String(checked));
+        expect(list.scrollTop).toBe(100);
+        expect(scrollIntoView).not.toHaveBeenCalled();
+      }
+    }
+
+    document.getElementById("selection-all")!.click();
+    expect(list.scrollTop).toBe(100);
+    document.getElementById("selection-all")!.click();
+    expect(list.scrollTop).toBe(100);
+    expect(commandCalls("paste_located_clip")).toHaveLength(0);
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest" });
+    expect(document.querySelector(".clip-item.selected")?.getAttribute("data-clip-id")).toBe("clip-b");
+  });
+
   it("routes one Escape classification through the Drawer overlay controller", async () => {
     await import("./main");
     window.dispatchEvent(new Event("DOMContentLoaded"));

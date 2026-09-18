@@ -478,7 +478,7 @@ function updateSelectionToolbar(): void {
 }
 
 // === Render ===
-function render() {
+function render(scrollToSelection = !multiSelect.active) {
   const query = searchInput.value.toLowerCase();
   const source = activeDataset();
   const filtered = filterItems(source, query, activeFilter);
@@ -683,7 +683,8 @@ function render() {
   });
 
   clipList.scrollTop = scrollTop;
-  if (selectedIndex >= 0) {
+  // Checking items must not jump back to the keyboard selection.
+  if (scrollToSelection && selectedIndex >= 0) {
     const selected = clipList.querySelector(".clip-item.selected");
     selected?.scrollIntoView({ block: "nearest" });
   }
@@ -1221,7 +1222,7 @@ function moveSelection(delta: number) {
   } else {
     selectedIndex = Math.min(Math.max(selectedIndex + delta, 0), visibleClips.length - 1);
   }
-  render();
+  render(true);
 }
 
 function pasteSelected() {
