@@ -39,7 +39,8 @@ GitHub Pages 發佈來源需為 GitHub Actions。預設網址：<https://liutouo
 
 ## 素材
 
-- icon 衍生自倉庫的 `mnemark_icon.svg`，僅調整 viewBox 以適合網站顯示。
+- favicon 使用主程式的 `src-tauri/icons/icon.png` 與 `icon.ico`，分別複製至 `public/favicon.png` 與 `public/favicon.ico`；主程式圖示更新時需同步這兩個檔案。
+- 頁首 icon 衍生自倉庫的 `mnemark_icon.svg`，僅調整 viewBox 以適合網站顯示。
 - 插圖、卡片、產品示意皆由 HTML／CSS／SVG 製作，沒有複用 Appy Camper 的照片、商標或字型。
 - 字型為專案既有 IBM Plex Sans TC，子集版本及 SIL OFL 授權位於 `public/fonts/`。
 - 文案新增中文字後，在倉庫根目錄執行：
