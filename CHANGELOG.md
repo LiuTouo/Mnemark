@@ -4,6 +4,17 @@
 
 格式參考 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)，版本號遵循[語意化版本](https://semver.org/lang/zh-TW/)。
 
+## [0.8.4] - 2026-09-20
+
+### Changed
+
+- 歷史主視窗強制停用 Windows 原生開關轉場，顯示與隱藏不再滑動或淡入淡出；設定、關於與教學視窗維持原有行為
+
+### Fixed
+
+- 修正開關抽屜時短暫疊在歷史項目上的版面時序：等待原生視窗尺寸與 WebView 畫面同步後才顯示抽屜，視窗位置與尺寸改為一次更新
+- 修正快速開關抽屜時舊回應覆蓋新狀態，以及立即重開後抽屜仍隱藏的問題
+
 ## [0.8.3] - 2026-09-18
 
 ### Fixed
@@ -517,6 +528,7 @@
 
 - 初始版本：剪貼簿監聽（文字／圖片／檔案路徑）、SHA-256 內容去重、容量限制與淘汰、釘選（上限 10 則、永不淘汰）、即時搜尋、Raycast 風格浮動面板（`Ctrl+Shift+V`）、貼上模擬、刪除復原、系統匣常駐、排除清單、深淺色主題跟隨系統、免安裝可攜（設定存於 exe 旁）
 
+[0.8.4]: https://github.com/LiuTouo/Mnemark/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/LiuTouo/Mnemark/compare/v0.8.2...v0.8.3
 [0.8.1]: https://github.com/LiuTouo/Mnemark/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/LiuTouo/Mnemark/compare/v0.7.9...v0.8.0

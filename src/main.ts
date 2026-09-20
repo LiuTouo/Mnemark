@@ -17,7 +17,9 @@ import { classifyClip, filterItems } from "./dataset";
 import type { FilterKind } from "./dataset";
 import { MultiSelectState } from "./multi-select";
 import { decideWorkspaceLayout, escapeLayer, tabAfterPreviewIntent } from "./workspace-state";
-import type { WorkspaceTab } from "./workspace-state";
+import type { WorkspaceLayout, WorkspaceTab } from "./workspace-state";
+import { WorkspaceLayoutCoordinator, waitForWorkspaceViewport } from "./workspace-layout";
+import type { WorkspaceViewport } from "./workspace-layout";
 import { mountDrawerRenderer } from "./favorites";
 import type { PanelDrawerRenderer } from "./favorites";
 import { drawerViewProjection } from "./drawer-view-tauri";
@@ -113,6 +115,16 @@ const previewPane = document.getElementById("workspace-preview")!;
 const workspaceTabs = document.getElementById("workspace-tabs")!;
 const drawerTab = document.getElementById("workspace-tab-drawer") as HTMLButtonElement;
 const previewTab = document.getElementById("workspace-tab-preview") as HTMLButtonElement;
+const workspaceLayout = new WorkspaceLayoutCoordinator({
+  stage: stageWorkspaceLayout,
+  resize: (layout) => invoke<WorkspaceViewport>("set_main_workspace_layout", {
+    leftExtent: layout.leftExtent,
+    rightExtent: layout.rightExtent,
+  }),
+  waitForViewport: waitForWorkspaceViewport,
+  commit: commitWorkspaceLayout,
+  report: (error) => console.error("Failed to resize workspace:", error),
+});
 
 // Bind the primary drawer action synchronously while the deferred script is
 // evaluated. The panel can become clickable before async init finishes, so
@@ -172,6 +184,9 @@ function updateFavoritesToggleA11y() {
 
 async function applyWorkspaceLayout(): Promise<void> {
   const revision = ++workspaceLayoutRevision;
+  workspaceLayout.invalidate();
+  if (!drawerIsOpen()) drawerPane.classList.add("hidden");
+  if (!previewState.isOpen) previewPane.classList.add("hidden");
   const monitor = await currentMonitor().catch(() => null);
   const availableCssWidth = monitor
     ? monitor.workArea.size.width / (window.devicePixelRatio || 1)
@@ -184,6 +199,28 @@ async function applyWorkspaceLayout(): Promise<void> {
   );
   if (revision !== workspaceLayoutRevision) return;
 
+  const environment = JSON.stringify([monitor?.workArea ?? null, availableCssWidth, window.devicePixelRatio]);
+  await workspaceLayout.request(layout, environment);
+}
+
+function stageWorkspaceLayout(layout: WorkspaceLayout): void {
+  // WebView2 and the native window do not commit at the same time. Keep new
+  // panes out of the old viewport, while the History anchor follows viewport
+  // growth/shrinkage in CSS (without waiting for the IPC reply).
+  const modeChanged = workspace.dataset.mode !== layout.mode;
+  if (modeChanged || !layout.drawerVisible) drawerPane.classList.add("hidden");
+  if (modeChanged || !layout.previewVisible) previewPane.classList.add("hidden");
+  if (modeChanged) workspaceTabs.classList.add("hidden");
+  const historyLeft = document.getElementById("panel")!.offsetLeft;
+  const widthDelta = 480 + layout.leftExtent + layout.rightExtent - window.innerWidth;
+  if (widthDelta !== 0) {
+    const ratio = (layout.leftExtent - historyLeft) / widthDelta;
+    workspace.style.setProperty("--history-left",
+      `clamp(${Math.min(historyLeft, layout.leftExtent)}px, calc(${historyLeft}px + (100vw - ${window.innerWidth}px) * ${ratio}), ${Math.max(historyLeft, layout.leftExtent)}px)`);
+  }
+}
+
+function commitWorkspaceLayout(layout: WorkspaceLayout): void {
   workspace.dataset.mode = layout.mode;
   workspace.style.setProperty("--history-left", `${layout.leftExtent}px`);
   workspace.style.setProperty("--side-left", `${layout.leftExtent + 428}px`);
@@ -194,11 +231,6 @@ async function applyWorkspaceLayout(): Promise<void> {
   previewTab.setAttribute("aria-selected", String(layout.activeTab === "preview"));
   drawerTab.disabled = !drawerIsOpen();
   previewTab.disabled = !previewState.isOpen;
-
-  await invoke("set_main_workspace_layout", {
-    leftExtent: layout.leftExtent,
-    rightExtent: layout.rightExtent,
-  }).catch((err) => console.error("Failed to resize workspace:", err));
 }
 
 function renderPanelDrawerView(next: DrawerView, previous: DrawerView | null): void {

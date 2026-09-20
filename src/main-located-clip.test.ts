@@ -124,6 +124,8 @@ describe("Panel located Clip callers", () => {
           return String(args?.note ?? "") || null;
         case "get_active_clip_preview":
           return null;
+        case "set_main_workspace_layout":
+          return { cssWidth: window.innerWidth, cssHeight: window.innerHeight };
         default:
           return undefined;
       }

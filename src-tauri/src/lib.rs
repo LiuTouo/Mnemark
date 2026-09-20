@@ -972,6 +972,98 @@ struct WorkspaceGeometry {
     physical_height: u32,
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceViewport {
+    css_width: f64,
+    css_height: f64,
+}
+
+/// Per-window policy: never change the user's system animation preference.
+fn disable_panel_transitions(window: &tauri::WebviewWindow) {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::{BOOL, HWND};
+        use windows::Win32::Graphics::Dwm::{
+            DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED,
+        };
+        let result = window.hwnd().map_err(|e| e.to_string()).and_then(|hwnd| {
+            let disabled = BOOL(1);
+            // SAFETY: hwnd belongs to the live panel; the attribute expects a
+            // BOOL and the pointer remains valid for this synchronous call.
+            unsafe {
+                DwmSetWindowAttribute(
+                    HWND(hwnd.0),
+                    DWMWA_TRANSITIONS_FORCEDISABLED,
+                    &disabled as *const BOOL as *const _,
+                    std::mem::size_of::<BOOL>() as u32,
+                )
+            }
+            .map_err(|e| e.to_string())
+        });
+        if let Err(error) = result {
+            eprintln!("[Mnemark] failed to disable panel transitions: {error}");
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = window;
+}
+
+/// Called on the UI thread. The undecorated panel has no non-client inset, so
+/// its physical outer bounds are also its client bounds.
+fn set_workspace_bounds(
+    window: &tauri::WebviewWindow,
+    geometry: WorkspaceGeometry,
+) -> Result<(), String> {
+    let position = window.outer_position().map_err(|e| e.to_string())?;
+    let size = window.inner_size().map_err(|e| e.to_string())?;
+    if (position.x, position.y, size.width, size.height)
+        == (
+            geometry.x,
+            geometry.y,
+            geometry.physical_width,
+            geometry.physical_height,
+        )
+    {
+        return Ok(());
+    }
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SetWindowPos, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOZORDER,
+        };
+        let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+        // SAFETY: live HWND, checked physical dimensions, no pointer arguments.
+        // One operation avoids presenting a resized window at its old origin.
+        unsafe {
+            SetWindowPos(
+                HWND(hwnd.0),
+                None,
+                geometry.x,
+                geometry.y,
+                i32::try_from(geometry.physical_width).map_err(|e| e.to_string())?,
+                i32::try_from(geometry.physical_height).map_err(|e| e.to_string())?,
+                SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER,
+            )
+        }
+        .map_err(|e| format!("main workspace SetWindowPos failed: {e}"))?;
+    }
+    #[cfg(not(windows))]
+    {
+        window
+            .set_size(tauri::PhysicalSize::new(
+                geometry.physical_width,
+                geometry.physical_height,
+            ))
+            .map_err(|e| e.to_string())?;
+        window
+            .set_position(tauri::PhysicalPosition::new(geometry.x, geometry.y))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 fn place_workspace_window(
     current_pos: (i32, i32),
     current_left_extent: u32,
@@ -1006,7 +1098,7 @@ fn apply_main_workspace_layout(
     right_extent: u32,
     app: &tauri::AppHandle,
     state: &AppState,
-) -> Result<(), String> {
+) -> Result<WorkspaceViewport, String> {
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "main window not found".to_string())?;
@@ -1030,28 +1122,36 @@ fn apply_main_workspace_layout(
         zoom,
         (wa.position.x, wa.position.y, wa.size.width, wa.size.height),
     );
-    window
-        .set_size(tauri::LogicalSize::new(
-            geometry.physical_width as f64 / scale,
-            geometry.physical_height as f64 / scale,
-        ))
-        .map_err(|e| format!("main workspace set_size failed: {:?}", e))?;
-    window
-        .set_position(tauri::PhysicalPosition::new(geometry.x, geometry.y))
-        .map_err(|e| format!("main workspace set_position failed: {:?}", e))?;
+    set_workspace_bounds(&window, geometry)?;
     *lock(&state.workspace_left_extent) = left_extent;
     *lock(&state.workspace_right_extent) = right_extent;
-    Ok(())
+    let size = window.inner_size().map_err(|e| e.to_string())?;
+    Ok(WorkspaceViewport {
+        css_width: size.width as f64 / (scale * zoom),
+        css_height: size.height as f64 / (scale * zoom),
+    })
 }
 
 #[tauri::command]
-fn set_main_workspace_layout(
+async fn set_main_workspace_layout(
     left_extent: u32,
     right_extent: u32,
     app: tauri::AppHandle,
-    state: tauri::State<AppState>,
-) -> Result<(), String> {
-    apply_main_workspace_layout(left_extent, right_extent, &app, &state)
+) -> Result<WorkspaceViewport, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        let state = handle.state::<AppState>();
+        let _ = tx.send(apply_main_workspace_layout(
+            left_extent,
+            right_extent,
+            &handle,
+            &state,
+        ));
+    })
+    .map_err(|e| e.to_string())?;
+    rx.await
+        .map_err(|_| "workspace layout channel closed".to_string())?
 }
 
 /// Pure coordinate math: compute the i32 (x, y) that centers window of
@@ -1144,6 +1244,7 @@ fn show_panel(app: &tauri::AppHandle) {
     MAIN_MODAL_OPEN.store(false, Ordering::SeqCst);
     if let Some(window) = app.get_webview_window("main") {
         log("[Mnemark] panel exists, showing");
+        disable_panel_transitions(&window);
         let _ = window.emit("main-panel-reset", ());
         center_on_cursor_monitor(app, &window);
         let _ = window.show();
@@ -1178,6 +1279,7 @@ fn show_panel(app: &tauri::AppHandle) {
                     && first_page_load_for_callback.swap(false, std::sync::atomic::Ordering::SeqCst)
                 {
                     let app = window.app_handle();
+                    disable_panel_transitions(&window);
                     center_on_cursor_monitor(app, &window);
                     let _ = window.show();
                     let _ = window.set_focus();
@@ -2084,6 +2186,41 @@ mod workspace_placement_tests {
         let p = place_workspace_window((500, 100), 0, 0, 368, 1.5, 1.25, (0, 0, 2560, 1440));
         assert_eq!(p.physical_width, (848.0_f64 * 1.5 * 1.25).round() as u32);
         assert_eq!(p.physical_height, (620.0_f64 * 1.5 * 1.25).round() as u32);
+    }
+
+    #[test]
+    fn closing_left_pane_restores_history_origin_without_moving_right_preview() {
+        let opened = place_workspace_window((700, 100), 0, 368, 368, 1.0, 1.0, (0, 0, 1920, 1080));
+        let closed = place_workspace_window(
+            (opened.x, opened.y),
+            368,
+            0,
+            368,
+            1.0,
+            1.0,
+            (0, 0, 1920, 1080),
+        );
+        assert_eq!(closed.x, 700);
+        assert_eq!(closed.physical_width, 848);
+        assert_eq!(opened.x + 368 + 428, closed.x + 428);
+    }
+
+    #[test]
+    fn repeating_the_same_layout_does_not_drift_at_fractional_scale() {
+        let area = (-2560, -200, 2560, 1440);
+        let first = place_workspace_window((-1600, 100), 0, 368, 368, 1.5, 1.25, area);
+        let again = place_workspace_window((first.x, first.y), 368, 368, 368, 1.5, 1.25, area);
+        assert_eq!(first, again);
+    }
+
+    #[test]
+    fn workspace_cannot_extend_past_a_smaller_work_area() {
+        let geometry = place_workspace_window((100, 100), 0, 368, 368, 1.5, 1.5, (0, 0, 800, 600));
+        assert_eq!((geometry.x, geometry.y), (0, 0));
+        assert_eq!(
+            (geometry.physical_width, geometry.physical_height),
+            (800, 600)
+        );
     }
 }
 
