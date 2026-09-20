@@ -44,24 +44,25 @@ beforeEach(() => {
   vi.resetModules();
   native.invoke.mockReset();
   document.documentElement.innerHTML = panelHtml;
-  Object.defineProperty(window, "innerWidth", { configurable: true, value: 480 });
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: 1216 });
   Object.defineProperty(window, "innerHeight", { configurable: true, value: 620 });
   Object.defineProperty(window, "devicePixelRatio", { configurable: true, value: 1 });
   HTMLElement.prototype.scrollIntoView = vi.fn();
   native.invoke.mockImplementation(async (command: string) => {
     if (command === "get_config") return { language: "zh-TW", preview_enabled: false };
     if (command === "get_clips") return [];
-    if (command === "set_main_workspace_layout") return { cssWidth: 480, cssHeight: 620 };
+    if (command === "set_main_workspace_layout") return { cssWidth: 1216, cssHeight: 620 };
     return null;
   });
 });
 
-it("does not expose the drawer in the old native viewport while expansion is pending", async () => {
+it("reveals the drawer only after region preparation and releases unused space after closing", async () => {
   await import("./main");
   window.dispatchEvent(new Event("DOMContentLoaded"));
   await vi.waitFor(() => expect(document.querySelector<HTMLButtonElement>("#favorites-toggle")!.disabled).toBe(false));
-  // Let initial layout work settle before replacing the native adapter.
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith("set_main_workspace_layout", {
+    leftExtent: 0, rightExtent: 0, commit: true,
+  }));
   let finish!: (geometry: { cssWidth: number; cssHeight: number }) => void;
   const pending = new Promise((resolve) => { finish = resolve; });
   native.invoke.mockImplementation(async (command: string) => {
@@ -76,11 +77,17 @@ it("does not expose the drawer in the old native viewport while expansion is pen
   const drawer = document.getElementById("workspace-drawer")!;
   expect(drawer.classList.contains("hidden")).toBe(true);
 
-  finish({ cssWidth: 848, cssHeight: 620 });
-  await new Promise((resolve) => setTimeout(resolve, 25));
-  expect(drawer.classList.contains("hidden")).toBe(true);
-  Object.defineProperty(window, "innerWidth", { configurable: true, value: 848 });
-  window.dispatchEvent(new Event("resize"));
+  finish({ cssWidth: 1216, cssHeight: 620 });
   await vi.waitFor(() => expect(drawer.classList.contains("hidden")).toBe(false));
-  expect(document.getElementById("workspace")!.style.getPropertyValue("--history-left")).toBe("368px");
+  expect(document.getElementById("workspace")!.style.getPropertyValue("--left-extent")).toBe("368px");
+  await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith("set_main_workspace_layout", {
+    leftExtent: 368, rightExtent: 0, commit: true,
+  }));
+  native.invoke.mockClear();
+  native.publish(false);
+  expect(drawer.classList.contains("hidden")).toBe(true);
+  await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith("set_main_workspace_layout", {
+    leftExtent: 0, rightExtent: 0, commit: true,
+  }));
+  expect(window.innerWidth).toBe(1216);
 });

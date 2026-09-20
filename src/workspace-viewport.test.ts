@@ -1,8 +1,25 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from "vitest";
-import { waitForWorkspaceViewport } from "./workspace-layout";
+import { waitForWorkspacePaint, waitForWorkspaceViewport } from "./workspace-layout";
 
-afterEach(() => vi.useRealTimers());
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+
+it("finishes region cleanup while hidden without waiting for throttled animation frames", async () => {
+  vi.useFakeTimers();
+  vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+  await waitForWorkspacePaint();
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it("cannot strand queued layout intents when WebView stops delivering animation frames", async () => {
+  vi.useFakeTimers();
+  vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+  vi.spyOn(window, "requestAnimationFrame").mockReturnValue(1);
+  const waiting = waitForWorkspacePaint();
+  await vi.advanceTimersByTimeAsync(250);
+  await waiting;
+  expect(vi.getTimerCount()).toBe(0);
+});
 
 it("accepts rounded CSS dimensions after a real viewport resize event", async () => {
   vi.useFakeTimers();

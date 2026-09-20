@@ -18,7 +18,7 @@ import type { FilterKind } from "./dataset";
 import { MultiSelectState } from "./multi-select";
 import { decideWorkspaceLayout, escapeLayer, tabAfterPreviewIntent } from "./workspace-state";
 import type { WorkspaceLayout, WorkspaceTab } from "./workspace-state";
-import { WorkspaceLayoutCoordinator, waitForWorkspaceViewport } from "./workspace-layout";
+import { WorkspaceLayoutCoordinator, waitForWorkspacePaint, waitForWorkspaceViewport } from "./workspace-layout";
 import type { WorkspaceViewport } from "./workspace-layout";
 import { mountDrawerRenderer } from "./favorites";
 import type { PanelDrawerRenderer } from "./favorites";
@@ -123,6 +123,14 @@ const workspaceLayout = new WorkspaceLayoutCoordinator({
   }),
   waitForViewport: waitForWorkspaceViewport,
   commit: commitWorkspaceLayout,
+  finish: async (layout) => {
+    await waitForWorkspacePaint();
+    await invoke("set_main_workspace_layout", {
+      leftExtent: layout.leftExtent,
+      rightExtent: layout.rightExtent,
+      commit: true,
+    });
+  },
   report: (error) => console.error("Failed to resize workspace:", error),
 });
 
@@ -204,26 +212,18 @@ async function applyWorkspaceLayout(): Promise<void> {
 }
 
 function stageWorkspaceLayout(layout: WorkspaceLayout): void {
-  // WebView2 and the native window do not commit at the same time. Keep new
-  // panes out of the old viewport, while the History anchor follows viewport
-  // growth/shrinkage in CSS (without waiting for the IPC reply).
+  // Keep new panes hidden until their native drawing/input region is ready.
+  // The host stays fixed: do not move History ahead of the DOM commit.
   const modeChanged = workspace.dataset.mode !== layout.mode;
   if (modeChanged || !layout.drawerVisible) drawerPane.classList.add("hidden");
   if (modeChanged || !layout.previewVisible) previewPane.classList.add("hidden");
   if (modeChanged) workspaceTabs.classList.add("hidden");
-  const historyLeft = document.getElementById("panel")!.offsetLeft;
-  const widthDelta = 480 + layout.leftExtent + layout.rightExtent - window.innerWidth;
-  if (widthDelta !== 0) {
-    const ratio = (layout.leftExtent - historyLeft) / widthDelta;
-    workspace.style.setProperty("--history-left",
-      `clamp(${Math.min(historyLeft, layout.leftExtent)}px, calc(${historyLeft}px + (100vw - ${window.innerWidth}px) * ${ratio}), ${Math.max(historyLeft, layout.leftExtent)}px)`);
-  }
 }
 
 function commitWorkspaceLayout(layout: WorkspaceLayout): void {
   workspace.dataset.mode = layout.mode;
-  workspace.style.setProperty("--history-left", `${layout.leftExtent}px`);
-  workspace.style.setProperty("--side-left", `${layout.leftExtent + 428}px`);
+  workspace.style.setProperty("--left-extent", `${layout.leftExtent}px`);
+  workspace.style.setProperty("--right-extent", `${layout.rightExtent}px`);
   drawerPane.classList.toggle("hidden", !layout.drawerVisible);
   previewPane.classList.toggle("hidden", !layout.previewVisible);
   workspaceTabs.classList.toggle("hidden", layout.mode !== "compact" && layout.mode !== "overlay");

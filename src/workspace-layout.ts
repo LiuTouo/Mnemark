@@ -10,6 +10,7 @@ export interface WorkspaceLayoutHost {
   resize(layout: WorkspaceLayout): Promise<WorkspaceViewport>;
   waitForViewport(viewport: WorkspaceViewport): Promise<void>;
   commit(layout: WorkspaceLayout): void;
+  finish(layout: WorkspaceLayout): Promise<void>;
   report(error: unknown): void;
 }
 
@@ -28,7 +29,7 @@ function sameRequest(a: LayoutRequest | null, b: LayoutRequest): boolean {
     && a.layout.activeTab === b.layout.activeTab;
 }
 
-/** One native resize at a time; only the latest intent may reveal side panes. */
+/** Serialize native region updates; only the latest intent may reveal panes. */
 export class WorkspaceLayoutCoordinator {
   private requested: LayoutRequest | null = null;
   private committed: LayoutRequest | null = null;
@@ -81,6 +82,11 @@ export class WorkspaceLayoutCoordinator {
         }
         if (request !== this.requested) continue;
         this.host.commit(layout);
+        // Only shrink the native region after the DOM has painted. Expanding
+        // it before commit and shrinking after avoids clipping the old frame
+        // when History must move inside a narrow fixed host.
+        await this.host.finish(layout);
+        if (request !== this.requested) continue;
         this.committed = request;
         return;
       } catch (error) {
@@ -93,6 +99,22 @@ export class WorkspaceLayoutCoordinator {
       }
     }
   }
+}
+
+/** Let the DOM commit paint before removing the old input/drawing region. */
+export function waitForWorkspacePaint(): Promise<void> {
+  if (document.visibilityState === "hidden") return Promise.resolve();
+  return new Promise((resolve) => {
+    let frame = 0;
+    const done = () => {
+      cancelAnimationFrame(frame);
+      clearTimeout(backstop);
+      resolve();
+    };
+    // Hidden WebViews may stop rAF without updating document.visibilityState.
+    const backstop = setTimeout(done, 250);
+    frame = requestAnimationFrame(() => { frame = requestAnimationFrame(done); });
+  });
 }
 
 /** A native IPC reply does not imply that WebView2 has resized its viewport. */

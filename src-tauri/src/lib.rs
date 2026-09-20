@@ -74,8 +74,8 @@ struct AppState {
     /// Authoritative Drawer aggregate: durable store, session UI state, and
     /// process-local mutation generation share one lock.
     drawer: Arc<Mutex<DrawerState>>,
-    /// Logical width inserted to the left of the history panel in the single
-    /// main workspace. Used to keep the history panel anchored while resizing.
+    /// Requested side extents inside the fixed host. Used to restore its
+    /// drawing/input region when reopening or changing display scale.
     workspace_left_extent: Arc<Mutex<u32>>,
     workspace_right_extent: Arc<Mutex<u32>>,
 }
@@ -959,10 +959,10 @@ fn log(msg: &str) {
     let _ = msg;
 }
 
-/// Preview window sizing/positioning constants, in logical pixels. The main
-/// window is a 480x620 transparent host whose visual panel sits at logical
-/// offset (30, 30) with width 420; the preview attaches beside that panel.
+/// Logical workspace dimensions: a 480x620 History frame (including 30px
+/// gutters) and up to two 368px side extents in a fixed transparent host.
 const PANEL_OFFSET: i32 = 30;
+const WORKSPACE_HOST_WIDTH: u32 = 1216;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WorkspaceGeometry {
@@ -1066,31 +1066,109 @@ fn set_workspace_bounds(
 
 fn place_workspace_window(
     current_pos: (i32, i32),
-    current_left_extent: u32,
-    next_left_extent: u32,
-    next_right_extent: u32,
     scale: f64,
     zoom: f64,
     work_area: (i32, i32, u32, u32),
 ) -> WorkspaceGeometry {
     let (wx, wy, ww, wh) = work_area;
     let factor = scale * zoom;
-    let history_x = current_pos.0
-        + (((PANEL_OFFSET as u32 + current_left_extent) as f64) * factor).round() as i32;
-    let physical_width = (((480 + next_left_extent + next_right_extent) as f64) * factor)
-        .round()
-        .max(1.0) as u32;
+    // Changing HWND bounds presents the old WebView2 surface at the new origin
+    // before Chromium paints. Reserve the whole workspace for this monitor;
+    // drawer/preview changes only alter DOM and the input/drawing region.
+    let physical_width = ((WORKSPACE_HOST_WIDTH as f64) * factor).round().max(1.0) as u32;
     let physical_height = (620.0 * factor).round().max(1.0) as u32;
-    let desired_x =
-        history_x - (((PANEL_OFFSET as u32 + next_left_extent) as f64) * factor).round() as i32;
     let max_x = wx + ww.saturating_sub(physical_width) as i32;
     let max_y = wy + wh.saturating_sub(physical_height) as i32;
     WorkspaceGeometry {
-        x: desired_x.clamp(wx, max_x.max(wx)),
+        x: current_pos.0.clamp(wx, max_x.max(wx)),
         y: current_pos.1.clamp(wy, max_y.max(wy)),
         physical_width: physical_width.min(ww.max(1)),
         physical_height: physical_height.min(wh.max(1)),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorkspaceRegion {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+fn workspace_region(
+    width: u32,
+    height: u32,
+    factor: f64,
+    left_extent: u32,
+    right_extent: u32,
+) -> WorkspaceRegion {
+    // Mirrors the CSS clamp: keep History centered when space allows, moving
+    // it within the fixed host only when a narrow monitor requires it.
+    let spare = (width as f64 / factor - 480.0).max(0.0);
+    let left = left_extent as f64;
+    let right = right_extent as f64;
+    let history_left = (spare / 2.0).min((spare - right).max(left)).max(left);
+    WorkspaceRegion {
+        left: ((history_left - left) * factor).floor().max(0.0) as i32,
+        top: 0,
+        right: ((history_left + 480.0 + right) * factor)
+            .ceil()
+            .min(width as f64) as i32,
+        bottom: height as i32,
+    }
+}
+
+fn apply_workspace_region(
+    window: &tauri::WebviewWindow,
+    region: WorkspaceRegion,
+    expand_only: bool,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::{HWND, RECT};
+        use windows::Win32::Graphics::Gdi::{
+            CreateRectRgn, DeleteObject, GetWindowRgnBox, SetWindowRgn, SIMPLEREGION,
+        };
+        let hwnd = HWND(window.hwnd().map_err(|e| e.to_string())?.0);
+        let mut current = RECT::default();
+        // SAFETY: live HWND and writable RECT. All regions installed here are
+        // rectangles; no region means the entire window is currently active.
+        let has_region = unsafe { GetWindowRgnBox(hwnd, &mut current) } == SIMPLEREGION;
+        if expand_only && !has_region {
+            return Ok(());
+        }
+        let target = if expand_only {
+            WorkspaceRegion {
+                left: region.left.min(current.left),
+                top: region.top.min(current.top),
+                right: region.right.max(current.right),
+                bottom: region.bottom.max(current.bottom),
+            }
+        } else {
+            region
+        };
+        if has_region
+            && (current.left, current.top, current.right, current.bottom)
+                == (target.left, target.top, target.right, target.bottom)
+        {
+            return Ok(());
+        }
+        // SAFETY: valid rectangle. Windows takes ownership only on success;
+        // on failure we must release the GDI object ourselves.
+        unsafe {
+            let handle = CreateRectRgn(target.left, target.top, target.right, target.bottom);
+            if handle.is_invalid() {
+                return Err("Failed to allocate workspace region".to_string());
+            }
+            if SetWindowRgn(hwnd, handle, true) == 0 {
+                let _ = DeleteObject(handle);
+                return Err("Failed to set workspace region".to_string());
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (window, region, expand_only);
+    Ok(())
 }
 
 fn apply_main_workspace_layout(
@@ -1111,18 +1189,25 @@ fn apply_main_workspace_layout(
         .map_err(|e| format!("main outer_position failed: {:?}", e))?;
     let scale = window.scale_factor().unwrap_or(1.0);
     let zoom = ui_zoom_of(&lock(&state.config));
-    let current_left = *lock(&state.workspace_left_extent);
     let wa = monitor.work_area();
     let geometry = place_workspace_window(
         (position.x, position.y),
-        current_left,
-        left_extent,
-        right_extent,
         scale,
         zoom,
         (wa.position.x, wa.position.y, wa.size.width, wa.size.height),
     );
     set_workspace_bounds(&window, geometry)?;
+    apply_workspace_region(
+        &window,
+        workspace_region(
+            geometry.physical_width,
+            geometry.physical_height,
+            scale * zoom,
+            left_extent,
+            right_extent,
+        ),
+        true,
+    )?;
     *lock(&state.workspace_left_extent) = left_extent;
     *lock(&state.workspace_right_extent) = right_extent;
     let size = window.inner_size().map_err(|e| e.to_string())?;
@@ -1136,12 +1221,34 @@ fn apply_main_workspace_layout(
 async fn set_main_workspace_layout(
     left_extent: u32,
     right_extent: u32,
+    commit: Option<bool>,
     app: tauri::AppHandle,
 ) -> Result<WorkspaceViewport, String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let handle = app.clone();
     app.run_on_main_thread(move || {
         let state = handle.state::<AppState>();
+        if commit == Some(true) {
+            let result = (|| {
+                let window = handle
+                    .get_webview_window("main")
+                    .ok_or("main window not found")?;
+                let size = window.inner_size().map_err(|e| e.to_string())?;
+                let factor = window.scale_factor().map_err(|e| e.to_string())?
+                    * ui_zoom_of(&lock(&state.config));
+                apply_workspace_region(
+                    &window,
+                    workspace_region(size.width, size.height, factor, left_extent, right_extent),
+                    false,
+                )?;
+                Ok(WorkspaceViewport {
+                    css_width: size.width as f64 / factor,
+                    css_height: size.height as f64 / factor,
+                })
+            })();
+            let _ = tx.send(result);
+            return;
+        }
         let _ = tx.send(apply_main_workspace_layout(
             left_extent,
             right_extent,
@@ -1210,27 +1317,46 @@ fn center_on_cursor_monitor(app: &tauri::AppHandle, window: &tauri::WebviewWindo
         }
     };
 
-    let window_size = window.outer_size().unwrap_or(tauri::PhysicalSize {
-        width: 480,
-        height: 620,
-    });
-
-    let mon_pos = monitor.position();
-    let mon_size = monitor.size();
-
     let state = app.state::<AppState>();
-    let left_extent = *lock(&state.workspace_left_extent);
     let factor = monitor.scale_factor() * ui_zoom_of(&lock(&state.config));
+    let area = monitor.work_area();
+    let mut geometry = place_workspace_window(
+        (area.position.x, area.position.y),
+        monitor.scale_factor(),
+        ui_zoom_of(&lock(&state.config)),
+        (
+            area.position.x,
+            area.position.y,
+            area.size.width,
+            area.size.height,
+        ),
+    );
+    let left_extent = ((geometry.physical_width as f64 / factor - 480.0).max(0.0) / 2.0) as u32;
     let (x, y) = center_history_coords(
-        (mon_pos.x, mon_pos.y),
-        (mon_size.width, mon_size.height),
-        (window_size.width, window_size.height),
+        (area.position.x, area.position.y),
+        (area.size.width, area.size.height),
+        (geometry.physical_width, geometry.physical_height),
         left_extent,
         factor,
     );
 
-    if let Err(e) = window.set_position(tauri::PhysicalPosition::new(x, y)) {
-        log(&format!("[Mnemark] set_position failed: {:?}", e));
+    geometry.x = x;
+    geometry.y = y;
+    let result = set_workspace_bounds(window, geometry).and_then(|()| {
+        apply_workspace_region(
+            window,
+            workspace_region(
+                geometry.physical_width,
+                geometry.physical_height,
+                factor,
+                *lock(&state.workspace_left_extent),
+                *lock(&state.workspace_right_extent),
+            ),
+            false,
+        )
+    });
+    if let Err(e) = result {
+        log(&format!("[Mnemark] workspace placement failed: {e}"));
     }
 }
 
@@ -1251,13 +1377,13 @@ fn show_panel(app: &tauri::AppHandle) {
         let _ = window.set_focus();
     } else {
         log("[Mnemark] creating new panel window");
-        let (panel_w, panel_h) = zoomed_builder_size(app, 480, 620);
+        let (panel_w, panel_h) = zoomed_builder_size(app, WORKSPACE_HOST_WIDTH, 620);
         let first_page_load = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let first_page_load_for_callback = first_page_load.clone();
         match WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
             .title("Mnemark")
-            // Window is larger than the panel (420x540) so the rounded
-            // corners and CSS drop shadow have room inside a transparent frame.
+            // Preallocate History + Drawer + Preview. Native regions keep the
+            // unused space out of drawing and desktop input hit testing.
             .inner_size(panel_w, panel_h)
             .decorations(false)
             .transparent(true)
@@ -1415,7 +1541,7 @@ fn ui_zoom_of(config: &AppConfig) -> f64 {
 /// Base logical window size at zoom = 100% for each scalable window.
 fn base_window_size(label: &str) -> Option<(u32, u32)> {
     match label {
-        "main" => Some((480, 620)),
+        "main" => Some((WORKSPACE_HOST_WIDTH, 620)),
         "settings" => Some((500, 700)),
         "about" => Some((440, 540)),
         "tutorial" => Some((500, 600)),
@@ -2156,70 +2282,87 @@ mod center_coords_tests {
 
 #[cfg(test)]
 mod workspace_placement_tests {
-    use super::place_workspace_window;
+    use super::{place_workspace_window, workspace_region};
 
     #[test]
     fn left_pane_keeps_history_anchor_when_space_allows() {
-        let p = place_workspace_window((500, 100), 0, 368, 0, 1.0, 1.0, (0, 0, 1920, 1080));
-        assert_eq!(p.x, 132);
-        assert_eq!(p.x + 30 + 368, 530);
-        assert_eq!(p.physical_width, 848);
+        let p = place_workspace_window((500, 100), 1.0, 1.0, (0, 0, 1920, 1080));
+        let closed = workspace_region(p.physical_width, p.physical_height, 1.0, 0, 0);
+        let opened = workspace_region(p.physical_width, p.physical_height, 1.0, 368, 0);
+        assert_eq!(p.x, 500);
+        assert_eq!(closed.left, opened.left + 368);
+        assert_eq!(p.physical_width, 1216);
     }
 
     #[test]
     fn full_workspace_uses_both_extents() {
-        let p = place_workspace_window((700, 100), 0, 368, 368, 1.0, 1.0, (0, 0, 1920, 1080));
+        let p = place_workspace_window((700, 100), 1.0, 1.0, (0, 0, 1920, 1080));
         assert_eq!(p.physical_width, 1216);
         assert_eq!(p.physical_height, 620);
     }
 
     #[test]
     fn workspace_clamps_into_negative_monitor_work_area() {
-        let p = place_workspace_window((-1900, 100), 0, 368, 368, 1.0, 1.0, (-1920, 0, 1920, 1080));
+        let p = place_workspace_window((-1900, 100), 1.0, 1.0, (-1920, 0, 1920, 1080));
         assert!(p.x >= -1920);
         assert!(p.x + p.physical_width as i32 <= 0);
     }
 
     #[test]
     fn dpi_and_ui_zoom_scale_workspace_once_each() {
-        let p = place_workspace_window((500, 100), 0, 0, 368, 1.5, 1.25, (0, 0, 2560, 1440));
-        assert_eq!(p.physical_width, (848.0_f64 * 1.5 * 1.25).round() as u32);
+        let p = place_workspace_window((500, 100), 1.5, 1.25, (0, 0, 2560, 1440));
+        assert_eq!(p.physical_width, (1216.0_f64 * 1.5 * 1.25).round() as u32);
         assert_eq!(p.physical_height, (620.0_f64 * 1.5 * 1.25).round() as u32);
     }
 
     #[test]
     fn closing_left_pane_restores_history_origin_without_moving_right_preview() {
-        let opened = place_workspace_window((700, 100), 0, 368, 368, 1.0, 1.0, (0, 0, 1920, 1080));
-        let closed = place_workspace_window(
-            (opened.x, opened.y),
-            368,
-            0,
-            368,
-            1.0,
-            1.0,
-            (0, 0, 1920, 1080),
-        );
+        let opened = place_workspace_window((700, 100), 1.0, 1.0, (0, 0, 1920, 1080));
+        let closed = place_workspace_window((opened.x, opened.y), 1.0, 1.0, (0, 0, 1920, 1080));
         assert_eq!(closed.x, 700);
-        assert_eq!(closed.physical_width, 848);
-        assert_eq!(opened.x + 368 + 428, closed.x + 428);
+        assert_eq!(closed, opened);
+        let with_drawer = workspace_region(1216, 620, 1.0, 368, 368);
+        let without_drawer = workspace_region(1216, 620, 1.0, 0, 368);
+        assert_eq!(with_drawer.left + 368, without_drawer.left);
+        assert_eq!(with_drawer.right, without_drawer.right);
     }
 
     #[test]
     fn repeating_the_same_layout_does_not_drift_at_fractional_scale() {
         let area = (-2560, -200, 2560, 1440);
-        let first = place_workspace_window((-1600, 100), 0, 368, 368, 1.5, 1.25, area);
-        let again = place_workspace_window((first.x, first.y), 368, 368, 368, 1.5, 1.25, area);
+        let first = place_workspace_window((-1600, 100), 1.5, 1.25, area);
+        let again = place_workspace_window((first.x, first.y), 1.5, 1.25, area);
         assert_eq!(first, again);
     }
 
     #[test]
     fn workspace_cannot_extend_past_a_smaller_work_area() {
-        let geometry = place_workspace_window((100, 100), 0, 368, 368, 1.5, 1.5, (0, 0, 800, 600));
+        let geometry = place_workspace_window((100, 100), 1.5, 1.5, (0, 0, 800, 600));
         assert_eq!((geometry.x, geometry.y), (0, 0));
         assert_eq!(
             (geometry.physical_width, geometry.physical_height),
             (800, 600)
         );
+    }
+
+    #[test]
+    fn unused_host_space_is_outside_the_native_region() {
+        let closed = workspace_region(1900, 969, 1.5625, 0, 0);
+        assert_eq!((closed.left, closed.right), (575, 1325));
+        let preview = workspace_region(1900, 969, 1.5625, 0, 368);
+        assert_eq!((preview.left, preview.right), (575, 1900));
+        let both = workspace_region(1900, 969, 1.5625, 368, 368);
+        assert_eq!((both.left, both.right), (0, 1900));
+    }
+
+    #[test]
+    fn narrow_host_regions_fit_without_resizing_the_surface() {
+        let closed = workspace_region(1000, 620, 1.0, 0, 0);
+        let left = workspace_region(1000, 620, 1.0, 368, 0);
+        let right = workspace_region(1000, 620, 1.0, 0, 368);
+        assert_eq!((closed.left, closed.right), (260, 740));
+        assert_eq!((left.left, left.right), (0, 848));
+        assert_eq!((right.left, right.right), (152, 1000));
     }
 }
 

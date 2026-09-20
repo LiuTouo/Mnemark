@@ -190,8 +190,10 @@ html, body {
    ============================================================ */
 
 #workspace {
-  --history-left: 0px;
-  --side-left: 428px;
+  --left-extent: 0px;
+  --right-extent: 0px;
+  --history-left: clamp(var(--left-extent), calc((100vw - 480px) / 2), calc(100vw - 480px - var(--right-extent)));
+  --side-left: calc(var(--history-left) + 428px);
   position: relative;
   width: calc(100% - 60px);
   height: 540px;
@@ -214,7 +216,7 @@ html, body {
 }
 
 .workspace-drawer {
-  left: 0;
+  left: calc(var(--history-left) - var(--left-extent));
 }
 
 .workspace-preview {
@@ -263,15 +265,15 @@ html, body {
 }
 
 #workspace[data-mode="overlay"] .workspace-pane {
-  left: 12px !important;
-  width: calc(100% - 24px);
+  left: calc(var(--history-left) + 12px) !important;
+  width: min(396px, calc(100vw - 84px));
   z-index: 8;
   box-shadow: var(--shadow-lg);
 }
 
 #workspace[data-mode="overlay"] .workspace-tabs {
-  left: 12px;
-  width: calc(100% - 24px);
+  left: calc(var(--history-left) + 12px);
+  width: min(396px, calc(100vw - 84px));
   z-index: 9;
 }
 

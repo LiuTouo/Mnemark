@@ -18,12 +18,27 @@ function setup() {
     stage: vi.fn(),
     resize: vi.fn(async (_layout: WorkspaceLayout) => ({ cssWidth: 480, cssHeight: 620 })),
     waitForViewport: vi.fn(async () => {}),
-    commit: vi.fn(), report: vi.fn(),
+    commit: vi.fn(), finish: vi.fn(async (_layout: WorkspaceLayout) => {}), report: vi.fn(),
   };
   return { host, coordinator: new WorkspaceLayoutCoordinator(host) };
 }
 
 describe("workspace presentation", () => {
+  it("expands the region before commit and finishes it after paint, serially", async () => {
+    const { host, coordinator } = setup();
+    const painted = deferred<void>();
+    host.finish.mockReturnValueOnce(painted.promise);
+    const done = coordinator.request(drawer, "screen");
+    await vi.waitFor(() => expect(host.finish).toHaveBeenCalledWith(drawer));
+    expect(host.stage.mock.invocationCallOrder[0]).toBeLessThan(host.resize.mock.invocationCallOrder[0]);
+    expect(host.commit.mock.invocationCallOrder[0]).toBeLessThan(host.finish.mock.invocationCallOrder[0]);
+    void coordinator.request(closed, "screen");
+    expect(host.resize).toHaveBeenCalledTimes(1);
+    painted.resolve();
+    await done;
+    expect(host.commit).toHaveBeenLastCalledWith(closed);
+    expect(host.finish).toHaveBeenLastCalledWith(closed);
+  });
   it("republishes a quick reopen after synchronous hiding without another resize", async () => {
     const { host, coordinator } = setup();
     await coordinator.request(drawer, "screen");
