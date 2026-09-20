@@ -2039,8 +2039,7 @@ mod pause_badge_tests {
     #[test]
     fn badge_covers_bottom_left_and_leaves_rest_untouched() {
         // 32x32 solid red; every pixel [255,0,0,255].
-        let red: Vec<u8> = std::iter::repeat([255, 0, 0, 255])
-            .take(32 * 32)
+        let red: Vec<u8> = std::iter::repeat_n([255, 0, 0, 255], 32 * 32)
             .flatten()
             .collect();
         let base = tauri::image::Image::new_owned(red, 32, 32);
