@@ -979,6 +979,41 @@ struct WorkspaceViewport {
     css_height: f64,
 }
 
+/// Per-window policy: strip the native caption styles tao leaves on the
+/// undecorated panel. tao hides the title bar only via WM_NCCALCSIZE while
+/// keeping WS_CAPTION & friends in GWL_STYLE, and it re-writes the style (with
+/// SWP_FRAMECHANGED) on every visibility toggle — so each `show()` lets DWM
+/// paint a momentary classic caption with minimize/maximize/close buttons
+/// before the borderless frame settles. Clearing the bits right after `show()`
+/// leaves DWM nothing to draw; no SWP_FRAMECHANGED is needed because the
+/// borderless geometry is unchanged and tao's WM_NCCALCSIZE handler stays in
+/// place for any later frame recalculation.
+fn strip_panel_caption(window: &tauri::WebviewWindow) {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowLongPtrW, SetWindowLongPtrW, GWL_STYLE, WS_CAPTION, WS_MAXIMIZEBOX,
+            WS_MINIMIZEBOX, WS_SIZEBOX, WS_SYSMENU,
+        };
+        if let Ok(hwnd) = window.hwnd() {
+            // SAFETY: hwnd belongs to the live panel; plain style-bit clear on
+            // the UI thread, synchronous, no pointer arguments.
+            unsafe {
+                let style = GetWindowLongPtrW(HWND(hwnd.0), GWL_STYLE);
+                let mask = (WS_CAPTION.0
+                    | WS_SYSMENU.0
+                    | WS_MINIMIZEBOX.0
+                    | WS_MAXIMIZEBOX.0
+                    | WS_SIZEBOX.0) as isize;
+                SetWindowLongPtrW(HWND(hwnd.0), GWL_STYLE, style & !mask);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = window;
+}
+
 /// Per-window policy: never change the user's system animation preference.
 fn disable_panel_transitions(window: &tauri::WebviewWindow) {
     #[cfg(windows)]
@@ -1374,6 +1409,7 @@ fn show_panel(app: &tauri::AppHandle) {
         let _ = window.emit("main-panel-reset", ());
         center_on_cursor_monitor(app, &window);
         let _ = window.show();
+        strip_panel_caption(&window);
         let _ = window.set_focus();
     } else {
         log("[Mnemark] creating new panel window");
@@ -1408,6 +1444,7 @@ fn show_panel(app: &tauri::AppHandle) {
                     disable_panel_transitions(&window);
                     center_on_cursor_monitor(app, &window);
                     let _ = window.show();
+                    strip_panel_caption(&window);
                     let _ = window.set_focus();
                 }
             })
