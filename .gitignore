@@ -44,3 +44,6 @@ clipflow.db
 CLAUDE.md
 .aider*
 src-tauri/target-verification/
+
+# flicker-probe capture output
+target/

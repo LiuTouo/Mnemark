@@ -979,6 +979,18 @@ struct WorkspaceViewport {
     css_height: f64,
 }
 
+/// Caption-family style bits that must never be visible in the undecorated
+/// panel's GWL_STYLE. tao keeps these set (it hides the frame only via
+/// WM_NCCALCSIZE) and re-writes the whole style on every visibility toggle —
+/// which is what flashes the native title bar at panel show/hide.
+#[cfg(windows)]
+const PANEL_CAPTION_STYLE_BITS: u32 = {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SIZEBOX, WS_SYSMENU,
+    };
+    WS_CAPTION.0 | WS_SYSMENU.0 | WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0 | WS_SIZEBOX.0
+};
+
 /// Per-window policy: strip the native caption styles tao leaves on the
 /// undecorated panel and make the change take effect. tao hides the title bar
 /// only via WM_NCCALCSIZE while keeping WS_CAPTION & friends in GWL_STYLE, and
@@ -988,25 +1000,23 @@ struct WorkspaceViewport {
 /// alone does nothing visible: style edits apply only after a frame change.
 /// So clear them and then send our own SWP_FRAMECHANGED (geometry-preserving)
 /// to force DWM to re-latch the frame with a clean, caption-free style.
+/// With install_panel_style_guard active the bits never land in the first
+/// place; this stays as a defense in depth and to clean any bits set before
+/// the guard was installed.
 fn strip_panel_caption(window: &tauri::WebviewWindow) {
     #[cfg(windows)]
     {
         use windows::Win32::Foundation::HWND;
         use windows::Win32::UI::WindowsAndMessaging::{
             GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_STYLE, SWP_FRAMECHANGED,
-            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_CAPTION, WS_MAXIMIZEBOX,
-            WS_MINIMIZEBOX, WS_SIZEBOX, WS_SYSMENU,
+            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
         };
         if let Ok(hwnd) = window.hwnd() {
             // SAFETY: hwnd belongs to the live panel; plain style-bit clear on
             // the UI thread, synchronous, no pointer arguments.
             unsafe {
                 let style = GetWindowLongPtrW(HWND(hwnd.0), GWL_STYLE);
-                let mask = (WS_CAPTION.0
-                    | WS_SYSMENU.0
-                    | WS_MINIMIZEBOX.0
-                    | WS_MAXIMIZEBOX.0
-                    | WS_SIZEBOX.0) as isize;
+                let mask = PANEL_CAPTION_STYLE_BITS as isize;
                 SetWindowLongPtrW(HWND(hwnd.0), GWL_STYLE, style & !mask);
                 // SAFETY: geometry-preserving frame re-latch; tao's
                 // WM_NCCALCSIZE handler keeps the client rect unchanged.
@@ -1024,6 +1034,94 @@ fn strip_panel_caption(window: &tauri::WebviewWindow) {
     }
     #[cfg(not(windows))]
     let _ = window;
+}
+
+/// Root-cause fix for the title-bar flash: veto the caption style bits at
+/// the source. tao's set_visible() rewrite happens while the window is
+/// already shown (ShowWindow first, style rewrite + SWP_FRAMECHANGED after),
+/// so any post-hoc strip races the compositor and loses for a frame. The
+/// v0.8.6/v0.8.8 symptom — a themed classic caption with minimize/maximize/
+/// close buttons — is exactly that lost race. WM_STYLECHANGING is delivered
+/// before SetWindowLong applies the new style and is the documented place to
+/// mask bits out, so the caption bits never exist in GWL_STYLE at any
+/// observed instant. Must be called on the window's own thread (main/UI).
+#[cfg(windows)]
+fn install_panel_style_guard(window: &tauri::WebviewWindow) {
+    use std::sync::atomic::{AtomicIsize, Ordering};
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CallWindowProcW, GetWindowLongPtrW, SetWindowLongPtrW, GWLP_WNDPROC, GWL_STYLE,
+        STYLESTRUCT, WM_ERASEBKGND, WM_STYLECHANGING, WNDPROC,
+    };
+
+    /// Original window proc chained to by the guard; swapped in on install.
+    static PREV_WNDPROC: AtomicIsize = AtomicIsize::new(0);
+
+    unsafe extern "system" fn guard_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        if msg == WM_ERASEBKGND {
+            // tao leaves the background unerased (null class brush; it only
+            // fills when a background_color is set), so the redirection
+            // surface holds stale bytes that DWM can compose behind the
+            // webview's alpha-0 pixels. GDI fills write alpha=0, so this
+            // paints defined, fully transparent pixels — invisible, but no
+            // garbage left to flash.
+            // SAFETY: wparam carries the HDC to erase; GetClientRect gives the
+            // full-client rect (the undecorated window has no NC inset).
+            unsafe {
+                let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut _);
+                let mut rc = windows::Win32::Foundation::RECT::default();
+                if windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rc).is_ok() {
+                    let brush = windows::Win32::Graphics::Gdi::HBRUSH(
+                        windows::Win32::Graphics::Gdi::GetStockObject(
+                            windows::Win32::Graphics::Gdi::BLACK_BRUSH,
+                        )
+                        .0,
+                    );
+                    let _ = windows::Win32::Graphics::Gdi::FillRect(hdc, &rc, brush);
+                }
+            }
+            return LRESULT(1);
+        }
+        if msg == WM_STYLECHANGING && wparam.0 == GWL_STYLE.0 as usize {
+            // SAFETY: WM_STYLECHANGING with GWL_STYLE delivers a pointer to a
+            // writable STYLESTRUCT owned by the caller for the call duration.
+            let styles = &mut *(lparam.0 as *mut STYLESTRUCT);
+            styles.styleNew &= !PANEL_CAPTION_STYLE_BITS;
+        }
+        let prev = PREV_WNDPROC.load(Ordering::SeqCst);
+        debug_assert!(prev != 0, "guard proc called before install");
+        // SAFETY: prev is the previously installed window proc of this hwnd,
+        // stored at install time; transmute restores the fn pointer type.
+        unsafe {
+            CallWindowProcW(
+                std::mem::transmute::<isize, WNDPROC>(prev),
+                hwnd,
+                msg,
+                wparam,
+                lparam,
+            )
+        }
+    }
+
+    if let Ok(hwnd) = window.hwnd() {
+        let hwnd = HWND(hwnd.0);
+        // SAFETY: hwnd belongs to the live panel and this runs on the window's
+        // own thread; plain pointer reads/swaps, no reentrancy (the current
+        // proc is only read here, never invoked through this path).
+        unsafe {
+            let current = GetWindowLongPtrW(hwnd, GWLP_WNDPROC);
+            if current == guard_proc as *const () as isize {
+                return; // already installed (idempotent across re-created windows)
+            }
+            PREV_WNDPROC.store(current, Ordering::SeqCst);
+            SetWindowLongPtrW(hwnd, GWLP_WNDPROC, guard_proc as *const () as isize);
+        }
+    }
 }
 
 /// Per-window DWM policy: never change the user's system animation
@@ -1170,13 +1268,19 @@ fn workspace_region(
 ) -> WorkspaceRegion {
     // Mirrors the CSS clamp: keep History centered when space allows, moving
     // it within the fixed host only when a narrow monitor requires it.
+    // The top gutter (PANEL_OFFSET CSS px) is always empty: the card, its
+    // shadow and all panes start at the workspace's 30px top margin (measured:
+    // the top 30 CSS px are indistinguishable from the desktop behind).
+    // Keeping it out of the region clips the transient native/compositor
+    // artifacts that land in exactly that strip on every show — the residual
+    // one-frame light band users report as a flickering title bar.
     let spare = (width as f64 / factor - 480.0).max(0.0);
     let left = left_extent as f64;
     let right = right_extent as f64;
     let history_left = (spare / 2.0).min((spare - right).max(left)).max(left);
     WorkspaceRegion {
         left: ((history_left - left) * factor).floor().max(0.0) as i32,
-        top: 0,
+        top: (PANEL_OFFSET as f64 * factor).round() as i32,
         right: ((history_left + 480.0 + right) * factor)
             .ceil()
             .min(width as f64) as i32,
@@ -1487,6 +1591,30 @@ fn show_panel(app: &tauri::AppHandle) {
                 log(&format!("[Mnemark] panel created: {:?}", w.label()));
                 let _ = w.set_zoom(ui_zoom_of(&lock(&app.state::<AppState>().config)));
                 center_on_cursor_monitor(app, &w);
+                #[cfg(windows)]
+                {
+                    let guard_window = w.clone();
+                    let guard_app = app.clone();
+                    let _ = app.run_on_main_thread(move || {
+                        install_panel_style_guard(&guard_window);
+                        // Define the fresh surface and clip to the default
+                        // History-only region before the first show composes:
+                        // the frontend re-applies its own region only after it
+                        // loads, and the top gutter must never be composited
+                        // (title-bar flash).
+                        clear_panel_surface(&guard_app, &guard_window);
+                        if let (Ok(size), Ok(scale)) =
+                            (guard_window.inner_size(), guard_window.scale_factor())
+                        {
+                            let zoom = ui_zoom_of(&lock(&guard_app.state::<AppState>().config));
+                            let _ = apply_workspace_region(
+                                &guard_window,
+                                workspace_region(size.width, size.height, scale * zoom, 0, 0),
+                                false,
+                            );
+                        }
+                    });
+                }
                 // Click outside (focus loss) dismisses the Panel. The handler
                 // is armed only after the window has gained focus once (with a
                 // grace-period backstop), so a transient focus bounce during
@@ -1542,6 +1670,39 @@ fn hide_panel(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.emit("main-panel-reset", ());
         let _ = window.hide();
+        clear_panel_surface(app, &window);
+    }
+}
+
+/// Repaint the hidden panel's redirection surface to a defined transparent
+/// black. tao never erases the background (null class brush), so the surface
+/// keeps stale bytes; DWM can compose them behind the webview's alpha-0
+/// pixels on the first frame of the next show — one source of the light band
+/// users see as a flickering title bar. Painting while hidden defines every
+/// pixel before the next show. Must run on the window's own thread.
+#[cfg(windows)]
+fn clear_panel_surface(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Graphics::Gdi::{
+        FillRect, GetDC, GetStockObject, ReleaseDC, BLACK_BRUSH, HBRUSH,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+    if let Ok(hwnd) = window.hwnd() {
+        let raw_hwnd = hwnd.0 as isize;
+        let _ = app.run_on_main_thread(move || {
+            let hwnd = windows::Win32::Foundation::HWND(raw_hwnd as *mut core::ffi::c_void);
+            // SAFETY: live hidden panel on its own thread; plain GDI calls on
+            // its DC with a client-sized rect, no pointers passed.
+            unsafe {
+                let hdc = GetDC(hwnd);
+                let mut rc = RECT::default();
+                if GetClientRect(hwnd, &mut rc).is_ok() {
+                    let brush = HBRUSH(GetStockObject(BLACK_BRUSH).0);
+                    let _ = FillRect(hdc, &rc, brush);
+                }
+                let _ = ReleaseDC(hwnd, hdc);
+            }
+        });
     }
 }
 
