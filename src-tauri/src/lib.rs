@@ -980,20 +980,21 @@ struct WorkspaceViewport {
 }
 
 /// Per-window policy: strip the native caption styles tao leaves on the
-/// undecorated panel. tao hides the title bar only via WM_NCCALCSIZE while
-/// keeping WS_CAPTION & friends in GWL_STYLE, and it re-writes the style (with
-/// SWP_FRAMECHANGED) on every visibility toggle — so each `show()` lets DWM
-/// paint a momentary classic caption with minimize/maximize/close buttons
-/// before the borderless frame settles. Clearing the bits right after `show()`
-/// leaves DWM nothing to draw; no SWP_FRAMECHANGED is needed because the
-/// borderless geometry is unchanged and tao's WM_NCCALCSIZE handler stays in
-/// place for any later frame recalculation.
+/// undecorated panel and make the change take effect. tao hides the title bar
+/// only via WM_NCCALCSIZE while keeping WS_CAPTION & friends in GWL_STYLE, and
+/// every visibility toggle re-writes the style followed by
+/// SetWindowPos(SWP_FRAMECHANGED) — so DWM latches a classic caption frame
+/// with minimize/maximize/close buttons at that moment. Clearing the bits
+/// alone does nothing visible: style edits apply only after a frame change.
+/// So clear them and then send our own SWP_FRAMECHANGED (geometry-preserving)
+/// to force DWM to re-latch the frame with a clean, caption-free style.
 fn strip_panel_caption(window: &tauri::WebviewWindow) {
     #[cfg(windows)]
     {
         use windows::Win32::Foundation::HWND;
         use windows::Win32::UI::WindowsAndMessaging::{
-            GetWindowLongPtrW, SetWindowLongPtrW, GWL_STYLE, WS_CAPTION, WS_MAXIMIZEBOX,
+            GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_STYLE, SWP_FRAMECHANGED,
+            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_CAPTION, WS_MAXIMIZEBOX,
             WS_MINIMIZEBOX, WS_SIZEBOX, WS_SYSMENU,
         };
         if let Ok(hwnd) = window.hwnd() {
@@ -1007,6 +1008,17 @@ fn strip_panel_caption(window: &tauri::WebviewWindow) {
                     | WS_MAXIMIZEBOX.0
                     | WS_SIZEBOX.0) as isize;
                 SetWindowLongPtrW(HWND(hwnd.0), GWL_STYLE, style & !mask);
+                // SAFETY: geometry-preserving frame re-latch; tao's
+                // WM_NCCALCSIZE handler keeps the client rect unchanged.
+                let _ = SetWindowPos(
+                    HWND(hwnd.0),
+                    None,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                );
             }
         }
     }
@@ -1014,13 +1026,20 @@ fn strip_panel_caption(window: &tauri::WebviewWindow) {
     let _ = window;
 }
 
-/// Per-window policy: never change the user's system animation preference.
+/// Per-window DWM policy: never change the user's system animation
+/// preference, and never let DWM render a non-client frame. tao's show()
+/// rewrites GWL_STYLE with WS_CAPTION set and follows it with
+/// SWP_FRAMECHANGED, so DWM composes a classic caption for a few frames even
+/// though the bits are cleared afterwards. DWMNCRP_DISABLED removes the
+/// painter itself: the panel has no DWM shadow (shadow(false)), and its shape
+/// comes from SetWindowRgn + transparency, so nothing is lost visually.
 fn disable_panel_transitions(window: &tauri::WebviewWindow) {
     #[cfg(windows)]
     {
         use windows::Win32::Foundation::{BOOL, HWND};
         use windows::Win32::Graphics::Dwm::{
-            DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED,
+            DwmSetWindowAttribute, DWMNCRENDERINGPOLICY, DWMNCRP_DISABLED,
+            DWMWA_NCRENDERING_POLICY, DWMWA_TRANSITIONS_FORCEDISABLED,
         };
         let result = window.hwnd().map_err(|e| e.to_string()).and_then(|hwnd| {
             let disabled = BOOL(1);
@@ -1034,10 +1053,22 @@ fn disable_panel_transitions(window: &tauri::WebviewWindow) {
                     std::mem::size_of::<BOOL>() as u32,
                 )
             }
+            .map_err(|e| e.to_string())?;
+            let policy = DWMNCRP_DISABLED;
+            // SAFETY: hwnd belongs to the live panel; the attribute expects a
+            // DWMNCRENDERINGPOLICY and the pointer stays valid for the call.
+            unsafe {
+                DwmSetWindowAttribute(
+                    HWND(hwnd.0),
+                    DWMWA_NCRENDERING_POLICY,
+                    &policy as *const DWMNCRENDERINGPOLICY as *const _,
+                    std::mem::size_of::<DWMNCRENDERINGPOLICY>() as u32,
+                )
+            }
             .map_err(|e| e.to_string())
         });
         if let Err(error) = result {
-            eprintln!("[Mnemark] failed to disable panel transitions: {error}");
+            eprintln!("[Mnemark] failed to apply panel DWM policy: {error}");
         }
     }
     #[cfg(not(windows))]
