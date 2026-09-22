@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { localizeBackendError, localizeLocatedClipError, setLanguage } from "./i18n";
+import { localizeBackendError, localizeLocatedClipError, setLanguage, t } from "./i18n";
 import { LocatedClipFacade, type LocatedClipDependencies } from "./located-clip";
 import type { ClipLocator } from "./types";
 
@@ -31,6 +31,12 @@ describe("located Clip error localization", () => {
 
   it("preserves the fallback for unknown backend errors", () => {
     expect(localizeBackendError("unmapped failure")).toBe("unmapped failure");
+  });
+
+  it("fills every placeholder occurrence and never re-substitutes values", () => {
+    expect(t("{a} and {a}", { a: 1 })).toBe("1 and 1");
+    expect(t("{a}{b}", { a: "{b}", b: "X" })).toBe("{b}X");
+    expect(t("{a} {missing}", { a: "ok" })).toBe("ok {missing}");
   });
 
   it("maps every structured action error category through one decoder", () => {

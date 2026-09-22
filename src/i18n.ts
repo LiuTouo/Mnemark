@@ -435,9 +435,11 @@ export function t(key: string, vars?: Record<string, string | number>): string {
   const dict = I18N[lang] || I18N["zh-TW"];
   let s = dict[key] ?? I18N["en"][key] ?? key;
   if (vars) {
-    for (const [k, v] of Object.entries(vars)) {
-      s = s.replace(`{${k}}`, String(v));
-    }
+    // One pass over the template: every occurrence is filled, and values
+    // are never re-scanned, so a value containing "{other}" stays literal.
+    s = s.replace(/\{([A-Za-z0-9_]+)\}/g, (whole, k) =>
+      Object.prototype.hasOwnProperty.call(vars, k) ? String(vars[k]) : whole
+    );
   }
   return s;
 }
