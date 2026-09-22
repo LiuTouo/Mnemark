@@ -88,7 +88,7 @@ function render(payload: PreviewPayload) {
     img.className = "preview-image";
     img.alt = t("previewTypeImage");
     const b64 = payload.image_preview_base64 || "";
-    img.src = b64.startsWith("data:") || b64.startsWith("http")
+    img.src = b64.startsWith("data:")
       ? b64
       : `data:image/png;base64,${b64}`;
     contentEl.appendChild(img);
