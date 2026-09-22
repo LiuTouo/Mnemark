@@ -91,10 +91,7 @@ pub fn capture_clipboard(
     config: &AppConfig,
     source: &ClipboardSource,
 ) -> Result<Clip, CaptureError> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
+    let now = crate::now_ms();
 
     for excluded in &config.exclusion_list {
         if source.exe.to_lowercase() == excluded.to_lowercase() {
