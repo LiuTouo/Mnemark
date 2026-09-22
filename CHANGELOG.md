@@ -4,6 +4,13 @@
 
 格式參考 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)，版本號遵循[語意化版本](https://semver.org/lang/zh-TW/)。
 
+## [0.8.9] - 2026-09-23
+
+### Fixed
+
+- 真正根除開啟歷史工作區時瞬間閃現的標題列：v0.8.7／v0.8.8 的「顯示後清除樣式位元」永遠在跟合成器賽跑——tao 在 ShowWindow 之後才把標題列位元寫回樣式，輸掉那一格就閃。現在改以視窗訊息防護在 WM_STYLECHANGING 直接否決標題列位元，位元自始至終不會出現在視窗樣式中，兩種閃現變體（主題化標題列、傳統標題列）一併消失
+- 消除另一層殘影：tao 從不擦除視窗背景，重新導向介面裡殘留未初始化的位元組，會在每次顯示後的第一格被合成到 WebView 透明像素後方（面板上方 30px 空白處的單格亮帶，即先前被誤認為標題列的殘影）。現在於建立時與每次隱藏後將介面定義為透明黑、擦除訊息同步填色，並將實測與背景無差異的頂部 30px 自視窗區域裁除（首次顯示前即套用預設區域，不再仰賴前端載入後才裁切）
+- 新增 kHz 螢幕取樣迴圈（scripts/probe-full.ps1 + verdict.mjs）作為此類閃爍問題的可重跑驗證工具
 ## [0.8.8] - 2026-09-22
 
 ### Fixed
@@ -560,6 +567,7 @@
 
 - 初始版本：剪貼簿監聽（文字／圖片／檔案路徑）、SHA-256 內容去重、容量限制與淘汰、釘選（上限 10 則、永不淘汰）、即時搜尋、Raycast 風格浮動面板（`Ctrl+Shift+V`）、貼上模擬、刪除復原、系統匣常駐、排除清單、深淺色主題跟隨系統、免安裝可攜（設定存於 exe 旁）
 
+[0.8.9]: https://github.com/LiuTouo/Mnemark/compare/v0.8.8...v0.8.9
 [0.8.6]: https://github.com/LiuTouo/Mnemark/compare/v0.8.5...v0.8.6
 [0.8.4]: https://github.com/LiuTouo/Mnemark/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/LiuTouo/Mnemark/compare/v0.8.2...v0.8.3
