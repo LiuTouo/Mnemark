@@ -1929,6 +1929,16 @@ pub fn run(_hidden: bool) {
     log("[Mnemark] run() called");
 
     tauri::Builder::default()
+        // Must be the FIRST plugin: a second instance exits inside this
+        // plugin's init, before any other plugin (especially global-shortcut
+        // re-registering the hotkey) or the tray/monitor start. The already-
+        // running instance reacts like the hotkey was pressed; --hidden
+        // (autostart) stays quiet.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if !argv.iter().any(|a| a == "--hidden") {
+                show_panel(app);
+            }
+        }))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
