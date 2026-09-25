@@ -4,6 +4,12 @@
 
 格式參考 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)，版本號遵循[語意化版本](https://semver.org/lang/zh-TW/)。
 
+## [0.8.10] - 2026-09-26
+
+### Added
+
+- 防止重複啟動：第二次啟動時新行程於外掛初始化階段（熱鍵、常駐圖示與剪貼簿監聽開始之前）即退出，改由已在執行的實例顯示面板，效果等同按下熱鍵；以 `--hidden` 啟動（自動啟動）時仍保持安靜不彈出。鎖定以應用程式識別碼為鍵，安裝版與攜帶版同時執行也視為同一實例
+
 ## [0.8.9] - 2026-09-23
 
 ### Fixed
@@ -567,6 +573,7 @@
 
 - 初始版本：剪貼簿監聽（文字／圖片／檔案路徑）、SHA-256 內容去重、容量限制與淘汰、釘選（上限 10 則、永不淘汰）、即時搜尋、Raycast 風格浮動面板（`Ctrl+Shift+V`）、貼上模擬、刪除復原、系統匣常駐、排除清單、深淺色主題跟隨系統、免安裝可攜（設定存於 exe 旁）
 
+[0.8.10]: https://github.com/LiuTouo/Mnemark/compare/v0.8.9...v0.8.10
 [0.8.9]: https://github.com/LiuTouo/Mnemark/compare/v0.8.8...v0.8.9
 [0.8.6]: https://github.com/LiuTouo/Mnemark/compare/v0.8.5...v0.8.6
 [0.8.4]: https://github.com/LiuTouo/Mnemark/compare/v0.8.3...v0.8.4
