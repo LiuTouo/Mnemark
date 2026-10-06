@@ -4,6 +4,12 @@
 
 格式參考 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)，版本號遵循[語意化版本](https://semver.org/lang/zh-TW/)。
 
+## [0.8.11] - 2026-10-06
+
+### Fixed
+
+- 修復部分使用者每次重新開機後全域熱鍵失效（需重裝程式才恢復）的問題：登入初期與其他啟動程式父用熱鍵的競爭，現在改以指數退避重試（5 次、3s→48s），耗盡後才在設定頁顯示衝突錯誤；登入初期 WebView2 尚未就緒或資料目錄被殘留行程鎖住導致的面板視窗建立失敗，也會以短間隔重試。兩條路徑的失敗原先在正式版完全靜默，現全部寫入診斷記錄檔（`mnemark.log`，達 256KB 於下次啟動輪替），並搭配啟動參數、熱鍵觸發與單實例事件等記錄點，供回報問題時定位真因
+
 ## [0.8.10] - 2026-09-26
 
 ### Added
@@ -573,6 +579,7 @@
 
 - 初始版本：剪貼簿監聽（文字／圖片／檔案路徑）、SHA-256 內容去重、容量限制與淘汰、釘選（上限 10 則、永不淘汰）、即時搜尋、Raycast 風格浮動面板（`Ctrl+Shift+V`）、貼上模擬、刪除復原、系統匣常駐、排除清單、深淺色主題跟隨系統、免安裝可攜（設定存於 exe 旁）
 
+[0.8.11]: https://github.com/LiuTouo/Mnemark/compare/v0.8.10...v0.8.11
 [0.8.10]: https://github.com/LiuTouo/Mnemark/compare/v0.8.9...v0.8.10
 [0.8.9]: https://github.com/LiuTouo/Mnemark/compare/v0.8.8...v0.8.9
 [0.8.6]: https://github.com/LiuTouo/Mnemark/compare/v0.8.5...v0.8.6
