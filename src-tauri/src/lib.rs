@@ -4,6 +4,7 @@ mod clipboard;
 #[cfg(test)]
 mod clipboard_busy_probe; // regression probes: delayed-render capture/paste interference
 mod config_transaction;
+mod diag_log;
 mod drawer;
 mod favorites;
 mod history;
@@ -950,13 +951,14 @@ fn start_monitor(
     });
 }
 
-/// Debug-only log. Release builds compile to a no-op (the app has no
-/// console under windows_subsystem = "windows" anyway).
+/// App log: stderr in debug builds only (release has no console under
+/// windows_subsystem = "windows"), plus the diag file in every build so
+/// field failures — a reboot-time hotkey conflict, a dead WebView2 init —
+/// leave a trace the user can send in.
 fn log(msg: &str) {
+    diag_log::write(msg);
     #[cfg(debug_assertions)]
-    eprintln!("{}", msg);
-    #[cfg(not(debug_assertions))]
-    let _ = msg;
+    eprintln!("{msg}");
 }
 
 /// Logical workspace dimensions: a 480x620 History frame (including 30px
@@ -1531,8 +1533,6 @@ fn center_on_cursor_monitor(app: &tauri::AppHandle, window: &tauri::WebviewWindo
 }
 
 fn show_panel(app: &tauri::AppHandle) {
-    use tauri::{webview::PageLoadEvent, WebviewUrl, WebviewWindowBuilder};
-
     log("[Mnemark] show_panel() called");
     app.state::<AppState>()
         .panel_session
@@ -1548,121 +1548,164 @@ fn show_panel(app: &tauri::AppHandle) {
         let _ = window.set_focus();
     } else {
         log("[Mnemark] creating new panel window");
-        let (panel_w, panel_h) = zoomed_builder_size(app, WORKSPACE_HOST_WIDTH, 620);
-        let first_page_load = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let first_page_load_for_callback = first_page_load.clone();
-        match WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-            .title("Mnemark")
-            // Preallocate History + Drawer + Preview. Native regions keep the
-            // unused space out of drawing and desktop input hit testing.
-            .inner_size(panel_w, panel_h)
-            .decorations(false)
-            .transparent(true)
-            // Disable the DWM undecorated shadow: tao defaults it on, which
-            // draws a 1px white border + shadow around the whole window rect
-            // instead of following the rounded panel. The panel has its own
-            // CSS drop shadow.
-            .shadow(false)
-            .resizable(false)
-            .skip_taskbar(true)
-            .always_on_top(true)
-            // Keep the first main window hidden until its document and deferred
-            // module script have loaded. Showing it immediately after build()
-            // exposes clickable UI before main.ts has registered its listeners,
-            // which drops a fast first click. The one-shot guard prevents a
-            // later navigation/HMR reload from resurfacing a hidden panel.
-            .on_page_load(move |window, payload| {
-                if matches!(payload.event(), PageLoadEvent::Finished)
-                    && first_page_load_for_callback.swap(false, std::sync::atomic::Ordering::SeqCst)
-                {
-                    let app = window.app_handle();
-                    disable_panel_transitions(&window);
-                    center_on_cursor_monitor(app, &window);
-                    let _ = window.show();
-                    strip_panel_caption(&window);
-                    let _ = window.set_focus();
-                }
-            })
-            .visible(false)
-            .focused(false)
-            .build()
-        {
-            Ok(w) => {
-                log(&format!("[Mnemark] panel created: {:?}", w.label()));
-                let _ = w.set_zoom(ui_zoom_of(&lock(&app.state::<AppState>().config)));
-                center_on_cursor_monitor(app, &w);
-                #[cfg(windows)]
-                {
-                    let guard_window = w.clone();
-                    let guard_app = app.clone();
-                    let _ = app.run_on_main_thread(move || {
-                        install_panel_style_guard(&guard_window);
-                        // Define the fresh surface and clip to the default
-                        // History-only region before the first show composes:
-                        // the frontend re-applies its own region only after it
-                        // loads, and the top gutter must never be composited
-                        // (title-bar flash).
-                        clear_panel_surface(&guard_app, &guard_window);
-                        if let (Ok(size), Ok(scale)) =
-                            (guard_window.inner_size(), guard_window.scale_factor())
-                        {
-                            let zoom = ui_zoom_of(&lock(&guard_app.state::<AppState>().config));
-                            let _ = apply_workspace_region(
-                                &guard_window,
-                                workspace_region(size.width, size.height, scale * zoom, 0, 0),
-                                false,
-                            );
-                        }
-                    });
-                }
-                // Click outside (focus loss) dismisses the Panel. The handler
-                // is armed only after the window has gained focus once (with a
-                // grace-period backstop), so a transient focus bounce during
-                // creation doesn't immediately dismiss the Panel.
-                let app_handle = app.clone();
-                w.on_window_event(move |event| {
-                    match event {
-                        tauri::WindowEvent::Focused(true) => {
-                            app_handle
-                                .state::<AppState>()
-                                .panel_session
-                                .focus_changed(true);
-                        }
-                        tauri::WindowEvent::Focused(false) => {
-                            if app_handle
-                                .state::<AppState>()
-                                .panel_session
-                                .focus_changed(false)
-                            {
-                                schedule_focus_group_check(&app_handle);
-                            }
-                        }
-                        tauri::WindowEvent::Destroyed => {
-                            // A destroyed main window must not strand a visible
-                            // preview.
-                            hide_preview_window(&app_handle);
-                        }
-                        _ => {}
-                    }
-                });
-                // Backstop: arm even if the initial focus event never arrives.
-                let app_handle = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    let should_recheck = app_handle
-                        .state::<AppState>()
-                        .panel_session
-                        .arm_after_backstop()
-                        .await;
-                    if should_recheck {
-                        schedule_focus_group_check(&app_handle);
-                    }
-                });
-            }
+        match build_panel_window(app) {
+            Ok(w) => finish_new_panel(app, w),
             Err(e) => {
-                log(&format!("[Mnemark] panel creation failed: {:?}", e));
+                log(&format!("[Mnemark] panel creation failed: {e:?}"));
+                schedule_panel_rebuild(app.clone(), 1);
             }
         }
     }
+}
+
+/// Build the hidden main panel window. Split from show_panel so the
+/// logon-time failure path can retry: WebView2 sometimes cannot initialize
+/// right after sign-in (user profile not yet ready, a stale msedgewebview2
+/// process holding the data folder), and the hotkey then appears dead all
+/// day because the error never surfaces.
+fn build_panel_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, tauri::Error> {
+    use tauri::{webview::PageLoadEvent, WebviewUrl, WebviewWindowBuilder};
+
+    let (panel_w, panel_h) = zoomed_builder_size(app, WORKSPACE_HOST_WIDTH, 620);
+    let first_page_load = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let first_page_load_for_callback = first_page_load.clone();
+    WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+        .title("Mnemark")
+        // Preallocate History + Drawer + Preview. Native regions keep the
+        // unused space out of drawing and desktop input hit testing.
+        .inner_size(panel_w, panel_h)
+        .decorations(false)
+        .transparent(true)
+        // Disable the DWM undecorated shadow: tao defaults it on, which
+        // draws a 1px white border + shadow around the whole window rect
+        // instead of following the rounded panel. The panel has its own
+        // CSS drop shadow.
+        .shadow(false)
+        .resizable(false)
+        .skip_taskbar(true)
+        .always_on_top(true)
+        // Keep the first main window hidden until its document and deferred
+        // module script have loaded. Showing it immediately after build()
+        // exposes clickable UI before main.ts has registered its listeners,
+        // which drops a fast first click. The one-shot guard prevents a
+        // later navigation/HMR reload from resurfacing a hidden panel.
+        .on_page_load(move |window, payload| {
+            if matches!(payload.event(), PageLoadEvent::Finished)
+                && first_page_load_for_callback.swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                let app = window.app_handle();
+                disable_panel_transitions(&window);
+                center_on_cursor_monitor(app, &window);
+                let _ = window.show();
+                strip_panel_caption(&window);
+                let _ = window.set_focus();
+            }
+        })
+        .visible(false)
+        .focused(false)
+        .build()
+}
+
+/// Post-creation wiring for a freshly built panel window (the former Ok
+/// branch of show_panel).
+fn finish_new_panel(app: &tauri::AppHandle, w: tauri::WebviewWindow) {
+    log(&format!("[Mnemark] panel created: {:?}", w.label()));
+    let _ = w.set_zoom(ui_zoom_of(&lock(&app.state::<AppState>().config)));
+    center_on_cursor_monitor(app, &w);
+    #[cfg(windows)]
+    {
+        let guard_window = w.clone();
+        let guard_app = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            install_panel_style_guard(&guard_window);
+            // Define the fresh surface and clip to the default
+            // History-only region before the first show composes:
+            // the frontend re-applies its own region only after it
+            // loads, and the top gutter must never be composited
+            // (title-bar flash).
+            clear_panel_surface(&guard_app, &guard_window);
+            if let (Ok(size), Ok(scale)) = (guard_window.inner_size(), guard_window.scale_factor())
+            {
+                let zoom = ui_zoom_of(&lock(&guard_app.state::<AppState>().config));
+                let _ = apply_workspace_region(
+                    &guard_window,
+                    workspace_region(size.width, size.height, scale * zoom, 0, 0),
+                    false,
+                );
+            }
+        });
+    }
+    // Click outside (focus loss) dismisses the Panel. The handler
+    // is armed only after the window has gained focus once (with a
+    // grace-period backstop), so a transient focus bounce during
+    // creation doesn't immediately dismiss the Panel.
+    let app_handle = app.clone();
+    w.on_window_event(move |event| {
+        match event {
+            tauri::WindowEvent::Focused(true) => {
+                app_handle
+                    .state::<AppState>()
+                    .panel_session
+                    .focus_changed(true);
+            }
+            tauri::WindowEvent::Focused(false) => {
+                if app_handle
+                    .state::<AppState>()
+                    .panel_session
+                    .focus_changed(false)
+                {
+                    schedule_focus_group_check(&app_handle);
+                }
+            }
+            tauri::WindowEvent::Destroyed => {
+                // A destroyed main window must not strand a visible
+                // preview.
+                hide_preview_window(&app_handle);
+            }
+            _ => {}
+        }
+    });
+    // Backstop: arm even if the initial focus event never arrives.
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let should_recheck = app_handle
+            .state::<AppState>()
+            .panel_session
+            .arm_after_backstop()
+            .await;
+        if should_recheck {
+            schedule_focus_group_check(&app_handle);
+        }
+    });
+}
+
+/// Retry a failed panel build up to PANEL_BUILD_RETRIES more times, 500 ms
+/// apart. Each attempt re-runs on the main thread, where windows are built.
+const PANEL_BUILD_RETRIES: u32 = 2;
+
+fn schedule_panel_rebuild(app: tauri::AppHandle, attempt: u32) {
+    if attempt > PANEL_BUILD_RETRIES {
+        log(&format!(
+            "[Mnemark] panel creation failed after {PANEL_BUILD_RETRIES} retries; \
+             the next hotkey press starts a fresh attempt"
+        ));
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let task_app = app.clone();
+        if let Err(e) = app.run_on_main_thread(move || match build_panel_window(&task_app) {
+            Ok(w) => finish_new_panel(&task_app, w),
+            Err(e) => {
+                log(&format!(
+                    "[Mnemark] panel creation failed (retry {attempt}/{PANEL_BUILD_RETRIES}): {e:?}"
+                ));
+                schedule_panel_rebuild(task_app, attempt + 1);
+            }
+        }) {
+            log(&format!("[Mnemark] run_on_main_thread failed: {e:?}"));
+        }
+    });
 }
 
 fn hide_panel(app: &tauri::AppHandle) {
@@ -1853,6 +1896,9 @@ fn tutorial_needed(version: u32) -> bool {
 }
 
 fn toggle_panel(app: &tauri::AppHandle) {
+    // Distinguishes "WM_HOTKEY never arrived" from "arrived but the panel
+    // failed to appear" in the diag log.
+    log("[Mnemark] toggle_panel triggered");
     let visible = app
         .get_webview_window("main")
         .map(|w| w.is_visible().unwrap_or(false))
@@ -1878,11 +1924,96 @@ fn register_panel_hotkey(app: &tauri::AppHandle, hotkey_str: &str) -> Result<(),
                 toggle_panel(&handle);
             }
         })
+        .map(|_| log(&format!("[Mnemark] hotkey '{hotkey_str}' registered")))
         .map_err(|e| format!("Hotkey '{}' is already in use: {}", hotkey_str, e))
+}
+
+/// Hotkey registration retry policy: a logon-time RegisterHotKey conflict is
+/// usually transient (another startup app holds the chord briefly), so the
+/// first failure retries with exponential backoff before the Settings error
+/// surfaces. Five retries, 3s→48s.
+const HOTKEY_MAX_RETRIES: u32 = 5;
+
+/// Delay before the retry numbered `attempt` (0-based, counted from the
+/// first failure). `None` = schedule exhausted.
+fn next_hotkey_retry(attempt: u32) -> Option<std::time::Duration> {
+    if attempt >= HOTKEY_MAX_RETRIES {
+        return None;
+    }
+    Some(std::time::Duration::from_secs(3 << attempt))
+}
+
+/// First registration attempt plus the background retry loop. Registration
+/// must run on the main thread (RegisterHotKey binds to the calling
+/// thread's message queue — the same thread that pumps WM_HOTKEY), which is
+/// where setup already runs; retries are scheduled back onto that thread.
+fn register_hotkey_with_retry(
+    app: tauri::AppHandle,
+    hotkey_str: String,
+    startup_error: Arc<Mutex<Option<String>>>,
+    config: Arc<Mutex<AppConfig>>,
+) {
+    if register_panel_hotkey(&app, &hotkey_str).is_ok() {
+        return;
+    }
+    spawn_hotkey_retry(app, hotkey_str, 0, startup_error, config);
+}
+
+/// Must be called on the main thread (see register_hotkey_with_retry).
+fn spawn_hotkey_retry(
+    app: tauri::AppHandle,
+    hotkey_str: String,
+    attempt: u32,
+    startup_error: Arc<Mutex<Option<String>>>,
+    config: Arc<Mutex<AppConfig>>,
+) {
+    let Some(delay) = next_hotkey_retry(attempt) else {
+        // Exhausted: surface through the existing startup-error path so the
+        // user picks another combination in Settings (reason shown inline).
+        let message = format!(
+            "Hotkey '{hotkey_str}' is already in use (failing after {HOTKEY_MAX_RETRIES} retries)"
+        );
+        log(&format!(
+            "[Mnemark] hotkey retry schedule exhausted: {message}"
+        ));
+        *lock(&startup_error) = Some(message);
+        if let Err(e) = open_settings_window(&app) {
+            log(&format!("[Mnemark] failed to open settings: {e:?}"));
+        }
+        return;
+    };
+    log(&format!(
+        "[Mnemark] hotkey registration failed; retry {} in {delay:?}",
+        attempt + 1
+    ));
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(delay).await;
+        // A Settings save may have changed the hotkey while this retry was
+        // pending; only re-register the chord that is still current (the
+        // swap already registered the new one).
+        if lock(&config).hotkey != hotkey_str {
+            log("[Mnemark] hotkey retry dropped: the configured hotkey changed meanwhile");
+            return;
+        }
+        let task_app = app.clone();
+        let task_hotkey = hotkey_str.clone();
+        let task_error = startup_error.clone();
+        let task_config = config.clone();
+        if let Err(e) = app.run_on_main_thread(move || {
+            if register_panel_hotkey(&task_app, &task_hotkey).is_ok() {
+                return;
+            }
+            spawn_hotkey_retry(task_app, task_hotkey, attempt + 1, task_error, task_config);
+        }) {
+            log(&format!("[Mnemark] run_on_main_thread failed: {e:?}"));
+        }
+    });
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run(_hidden: bool) {
+    // Diagnostics first: everything below can fail invisibly without it.
+    diag_log::init();
     update::cleanup_stale_portable_update();
     // One-time migration of legacy ClipFlow data (config/db/shortcut) into the
     // Mnemark identity. Runs before config load / persistence open so the first
@@ -1926,7 +2057,12 @@ pub fn run(_hidden: bool) {
     let tray_items = Arc::new(Mutex::new(None));
     let startup_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(migration_error));
 
-    log("[Mnemark] run() called");
+    log(&format!(
+        "[Mnemark] starting v{}, exe={:?}, args={:?}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::current_exe(),
+        std::env::args().collect::<Vec<_>>()
+    ));
 
     tauri::Builder::default()
         // Must be the FIRST plugin: a second instance exits inside this
@@ -1935,6 +2071,7 @@ pub fn run(_hidden: bool) {
         // running instance reacts like the hotkey was pressed; --hidden
         // (autostart) stays quiet.
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            log(&format!("[Mnemark] second instance launch: argv={argv:?}"));
             if !argv.iter().any(|a| a == "--hidden") {
                 show_panel(app);
             }
@@ -1970,12 +2107,15 @@ pub fn run(_hidden: bool) {
                 config.hotkey.clone()
             };
 
-            if let Err(e) = register_panel_hotkey(&handle, &hotkey_str) {
-                log(&format!("[Mnemark] hotkey registration failed: {}", e));
-                // Per spec: on conflict, open Settings so the user picks
-                // another combination — with the reason shown inline.
-                *lock(&startup_error) = Some(e);
-            }
+            // A logon-time conflict is usually transient (another startup
+            // app holds the chord briefly), so failures retry with backoff;
+            // only an exhausted schedule surfaces the Settings error.
+            register_hotkey_with_retry(
+                handle.clone(),
+                hotkey_str,
+                startup_error.clone(),
+                config_store.clone(),
+            );
 
             // Surface any startup error — a failed legacy migration or a hotkey
             // conflict — inline in Settings (see take_startup_error).
@@ -2617,5 +2757,27 @@ mod tutorial_tests {
     #[test]
     fn current_tutorial_is_not_needed() {
         assert!(!tutorial_needed(super::CURRENT_TUTORIAL_VERSION));
+    }
+}
+
+#[cfg(test)]
+mod hotkey_retry_tests {
+    use super::{next_hotkey_retry, HOTKEY_MAX_RETRIES};
+    use std::time::Duration;
+
+    #[test]
+    fn retry_schedule_stops_after_five_attempts() {
+        let delays: Vec<_> = (0..=HOTKEY_MAX_RETRIES).map(next_hotkey_retry).collect();
+        assert_eq!(
+            delays[..(HOTKEY_MAX_RETRIES as usize)],
+            [
+                Some(Duration::from_secs(3)),
+                Some(Duration::from_secs(6)),
+                Some(Duration::from_secs(12)),
+                Some(Duration::from_secs(24)),
+                Some(Duration::from_secs(48)),
+            ][..]
+        );
+        assert_eq!(delays[HOTKEY_MAX_RETRIES as usize], None);
     }
 }
