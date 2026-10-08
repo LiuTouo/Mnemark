@@ -98,6 +98,8 @@ const toast = document.getElementById("toast")!;
 const actionMenu = document.getElementById("clip-action-menu")!;
 const addMenu = document.getElementById("add-to-collection-menu")!;
 const favoritesToggle = document.getElementById("favorites-toggle") as HTMLButtonElement;
+// Drawer expanded-state persistence key (see renderPanelDrawerView / init).
+const DRAWER_OPEN_KEY = "mnemark.drawer-open";
 const selectionToggle = document.getElementById("selection-toggle") as HTMLButtonElement;
 const selectionToolbar = document.getElementById("selection-toolbar")!;
 const selectionAll = document.getElementById("selection-all") as HTMLButtonElement;
@@ -239,6 +241,15 @@ function renderPanelDrawerView(next: DrawerView, previous: DrawerView | null): v
     selectedIndex = 0;
   }
   if (next.open && previous?.open !== true) workspaceTab = "drawer";
+  // Remember the drawer's expanded state across restarts. The initial
+  // publish (previous === null) reflects backend defaults, not a user choice.
+  if (previous !== null) {
+    try {
+      localStorage.setItem(DRAWER_OPEN_KEY, next.open ? "1" : "0");
+    } catch {
+      // Storage may be unavailable (private mode); rendering continues.
+    }
+  }
   favoritesToggle.disabled = false;
   updateFavoritesToggleA11y();
   render();
@@ -257,6 +268,20 @@ async function init() {
   } catch (error) {
     console.error("Failed to load initial Drawer view:", error);
     showToast(t("drawerLoadFailed"));
+  }
+
+  // Restore the drawer's last expanded state; default to open on first run.
+  // Opening here goes through the same coordinator path as the toggle button,
+  // so the workspace layout/window resize flows normally.
+  let storedDrawerOpen: string | null = null;
+  try {
+    storedDrawerOpen = localStorage.getItem(DRAWER_OPEN_KEY);
+  } catch {
+    // Unreadable storage falls through to the default (open).
+  }
+  if ((storedDrawerOpen === null || storedDrawerOpen === "1")
+    && currentDrawerView()?.open === false) {
+    void drawerViewCoordinator.setOpen(true);
   }
 
   await getCurrentWindow().onFocusChanged(({ payload: focused }) => {
