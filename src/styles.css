@@ -1,13 +1,16 @@
 @import "./fonts.css";
 
-/* === Mnemark Visual Design System ===
-   Palette: mist/slate graphite with restrained indigo
-   Typography: IBM Plex Sans TC 400/500/600, fallback Segoe UI */
+/* === Mnemark Visual Design System — HUD 框線 ===
+   Palette: graphite panels, hairline strokes, single violet accent
+   (dark #7e89f3 / light #5a67d8). Sharp corners, cut-corner panels,
+   corner-bracket selection, hatch details, monospace metadata.
+   Typography: IBM Plex Sans TC 400/500/600 + system mono for data */
 
 /* === Tokens — Light === */
 :root {
   color-scheme: light;
   --font-family: "IBM Plex Sans TC", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "Cascadia Code", "Consolas", "IBM Plex Mono", "Microsoft JhengHei", "IBM Plex Sans TC", monospace;
   --font-size: 13px;
   --font-size-sm: 11px;
   --font-size-lg: 14px;
@@ -15,47 +18,47 @@
   --font-weight-primary: 500;
   --font-weight-strong: 600;
 
-  --bg-mist: #f5f5f7;
-  --bg-surface: #ffffff;
-  --bg-raised: #fafafa;
-  --bg-hover: #f0f0f2;
-  --bg-active: #e8e8ec;
-  --bg-pinned: rgba(90, 103, 216, 0.06);
+  --bg-mist: #eef0f4;
+  --bg-surface: #f8f9fc;
+  --bg-raised: #edeff5;
+  --bg-hover: #e9ecf3;
+  --bg-active: #e2e6ef;
+  --bg-pinned: rgba(90, 103, 216, 0.08);
 
-  --text-primary: #1d1d1f;
-  --text-secondary: #6e6e73;
-  --text-tertiary: #aeaeb2;
-  --text-placeholder: #c7c7cc;
+  --text-primary: #1d2133;
+  --text-secondary: #5c627a;
+  --text-tertiary: #969aae;
+  --text-placeholder: #c3c7d4;
 
-  --border: rgba(0, 0, 0, 0.08);
-  --border-strong: rgba(0, 0, 0, 0.12);
-  --divider: rgba(0, 0, 0, 0.06);
+  --border: rgba(20, 22, 40, 0.1);
+  --border-strong: rgba(20, 22, 40, 0.22);
+  --divider: rgba(20, 22, 40, 0.08);
 
   --accent: #5a67d8;
-  --accent-hover: #4c51bf;
-  --accent-pressed: #434190;
+  --accent-hover: #4c59c8;
+  --accent-pressed: #404cb0;
   --accent-subtle: rgba(90, 103, 216, 0.1);
 
-  --danger: #e53e3e;
-  --danger-hover: #c53030;
-  --danger-subtle: rgba(229, 62, 62, 0.08);
+  --danger: #c0392b;
+  --danger-hover: #a93226;
+  --danger-subtle: rgba(192, 57, 43, 0.08);
 
-  --warning: #d69e2e;
-  --warning-subtle: rgba(214, 158, 46, 0.1);
+  --warning: #9a6a10;
+  --warning-subtle: rgba(154, 106, 16, 0.1);
 
-  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.04);
-  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08), 0 2px 4px rgba(0, 0, 0, 0.04);
-  --shadow-lg: 0 8px 30px rgba(0, 0, 0, 0.12);
+  --shadow-xs: none;
+  --shadow-sm: 0 1px 3px rgba(10, 12, 20, 0.1);
+  --shadow-md: 0 4px 14px rgba(10, 12, 20, 0.16);
+  --shadow-lg: 0 10px 32px rgba(10, 12, 20, 0.28);
 
-  --radius-xs: 4px;
-  --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
-  --radius-xl: 16px;
+  --radius-xs: 0px;
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+  --radius-xl: 0px;
 
-  --glass-bg: #ffffff;
-  --glass-border: rgba(255, 255, 255, 0.4);
+  --glass-bg: #f8f9fc;
+  --glass-border: rgba(20, 22, 40, 0.22);
 }
 
 /* === Tokens — Dark === */
@@ -63,82 +66,82 @@
   :root:not([data-theme="light"]) {
     color-scheme: dark;
 
-    --bg-mist: #1c1c1e;
-    --bg-surface: #2c2c2e;
-    --bg-raised: #323234;
-    --bg-hover: #3a3a3c;
-    --bg-active: #48484a;
-    --bg-pinned: rgba(129, 140, 248, 0.1);
+    --bg-mist: #0a0d11;
+    --bg-surface: #11151b;
+    --bg-raised: #171c24;
+    --bg-hover: #151b23;
+    --bg-active: #1a212b;
+    --bg-pinned: rgba(126, 137, 243, 0.1);
 
-    --text-primary: #f5f5f7;
-    --text-secondary: #a1a1a6;
-    --text-tertiary: #636366;
-    --text-placeholder: #48484a;
+    --text-primary: #e9edf1;
+    --text-secondary: #9aa5b1;
+    --text-tertiary: #5a6572;
+    --text-placeholder: #3d4552;
 
-    --border: rgba(255, 255, 255, 0.08);
-    --border-strong: rgba(255, 255, 255, 0.12);
-    --divider: rgba(255, 255, 255, 0.06);
+    --border: rgba(255, 255, 255, 0.06);
+    --border-strong: rgba(255, 255, 255, 0.15);
+    --divider: rgba(255, 255, 255, 0.05);
 
-    --accent: #818cf8;
-    --accent-hover: #6366f1;
-    --accent-pressed: #4f46e5;
-    --accent-subtle: rgba(129, 140, 248, 0.12);
+    --accent: #7e89f3;
+    --accent-hover: #6f7aeb;
+    --accent-pressed: #5f69d9;
+    --accent-subtle: rgba(126, 137, 243, 0.12);
 
-    --danger: #f87171;
-    --danger-hover: #ef4444;
-    --danger-subtle: rgba(248, 113, 113, 0.1);
+    --danger: #ff5d5d;
+    --danger-hover: #ff7b7b;
+    --danger-subtle: rgba(255, 93, 93, 0.1);
 
-    --warning: #fbbf24;
-    --warning-subtle: rgba(251, 191, 36, 0.1);
+    --warning: #ffb454;
+    --warning-subtle: rgba(255, 180, 84, 0.1);
 
-    --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.2);
-    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
-    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
-    --shadow-lg: 0 8px 30px rgba(0, 0, 0, 0.5);
+    --shadow-xs: none;
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.5);
+    --shadow-lg: 0 10px 32px rgba(0, 0, 0, 0.6);
 
-    --glass-bg: #1c1c1e;
-    --glass-border: rgba(255, 255, 255, 0.06);
+    --glass-bg: #11151b;
+    --glass-border: rgba(255, 255, 255, 0.15);
   }
 }
 
 :root[data-theme="dark"] {
   color-scheme: dark;
 
-  --bg-mist: #1c1c1e;
-  --bg-surface: #2c2c2e;
-  --bg-raised: #323234;
-  --bg-hover: #3a3a3c;
-  --bg-active: #48484a;
-  --bg-pinned: rgba(129, 140, 248, 0.1);
+  --bg-mist: #0a0d11;
+  --bg-surface: #11151b;
+  --bg-raised: #171c24;
+  --bg-hover: #151b23;
+  --bg-active: #1a212b;
+  --bg-pinned: rgba(126, 137, 243, 0.1);
 
-  --text-primary: #f5f5f7;
-  --text-secondary: #a1a1a6;
-  --text-tertiary: #636366;
-  --text-placeholder: #48484a;
+  --text-primary: #e9edf1;
+  --text-secondary: #9aa5b1;
+  --text-tertiary: #5a6572;
+  --text-placeholder: #3d4552;
 
-  --border: rgba(255, 255, 255, 0.08);
-  --border-strong: rgba(255, 255, 255, 0.12);
-  --divider: rgba(255, 255, 255, 0.06);
+  --border: rgba(255, 255, 255, 0.06);
+  --border-strong: rgba(255, 255, 255, 0.15);
+  --divider: rgba(255, 255, 255, 0.05);
 
-  --accent: #818cf8;
-  --accent-hover: #6366f1;
-  --accent-pressed: #4f46e5;
-  --accent-subtle: rgba(129, 140, 248, 0.12);
+  --accent: #7e89f3;
+  --accent-hover: #6f7aeb;
+  --accent-pressed: #5f69d9;
+  --accent-subtle: rgba(126, 137, 243, 0.12);
 
-  --danger: #f87171;
-  --danger-hover: #ef4444;
-  --danger-subtle: rgba(248, 113, 113, 0.1);
+  --danger: #ff5d5d;
+  --danger-hover: #ff7b7b;
+  --danger-subtle: rgba(255, 93, 93, 0.1);
 
-  --warning: #fbbf24;
-  --warning-subtle: rgba(251, 191, 36, 0.1);
+  --warning: #ffb454;
+  --warning-subtle: rgba(255, 180, 84, 0.1);
 
-  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.2);
-  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
-  --shadow-lg: 0 8px 30px rgba(0, 0, 0, 0.5);
+  --shadow-xs: none;
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 10px 32px rgba(0, 0, 0, 0.6);
 
-  --glass-bg: #1c1c1e;
-  --glass-border: rgba(255, 255, 255, 0.06);
+  --glass-bg: #11151b;
+  --glass-border: rgba(255, 255, 255, 0.15);
 }
 
 /* === Reset === */
@@ -244,14 +247,17 @@ html, body {
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-tertiary);
-  font-family: var(--font-family);
+  font-family: var(--font-mono);
   font-size: var(--font-size-sm);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
   cursor: pointer;
 }
 
 .workspace-tabs button[aria-selected="true"] {
   background: var(--accent-subtle);
   color: var(--accent);
+  box-shadow: inset 0 -2px 0 var(--accent);
 }
 
 #workspace[data-mode="compact"] .workspace-pane,
@@ -300,6 +306,28 @@ html, body {
   opacity: var(--panel-opacity, 1);
 }
 
+/* === HUD 框線簽名裝飾 === */
+#panel,
+#favorites-panel,
+#preview-panel,
+.workspace-tabs {
+  clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 0 100%);
+}
+
+#panel::before,
+#favorites-panel::before,
+#preview-panel::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  z-index: 1;
+  background: linear-gradient(90deg, var(--accent), transparent 72%);
+  pointer-events: none;
+}
+
 /* === Search === */
 .search-container {
   display: flex;
@@ -345,7 +373,7 @@ html, body {
   border-radius: var(--radius-xs);
   background: var(--bg-raised);
   color: var(--text-tertiary);
-  font-family: var(--font-family);
+  font-family: var(--font-mono);
   font-size: var(--font-size-sm);
   font-weight: var(--font-weight-primary);
   line-height: 1;
@@ -407,6 +435,7 @@ html, body {
   background: var(--accent-subtle);
   color: var(--accent);
   font-weight: var(--font-weight-strong);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent);
 }
 
 /* === Multi-select toolbar === */
@@ -429,6 +458,7 @@ html, body {
   flex: 1;
   min-width: 56px;
   color: var(--text-secondary);
+  font-family: var(--font-mono);
   font-size: var(--font-size-sm);
   white-space: nowrap;
 }
@@ -440,7 +470,7 @@ html, body {
   border-radius: var(--radius-sm);
   background: var(--bg-surface);
   color: var(--text-primary);
-  font-family: var(--font-family);
+  font-family: var(--font-mono);
   font-size: var(--font-size-sm);
   cursor: pointer;
 }
@@ -490,6 +520,19 @@ html, body {
 
 .clip-item.selected {
   background: var(--accent-subtle);
+}
+
+/* Corner brackets on hover/selected rows (8 background layers, one per arm). */
+.clip-item:hover,
+.clip-item.selected {
+  background-image:
+    linear-gradient(var(--accent), var(--accent)), linear-gradient(var(--accent), var(--accent)),
+    linear-gradient(var(--accent), var(--accent)), linear-gradient(var(--accent), var(--accent)),
+    linear-gradient(var(--accent), var(--accent)), linear-gradient(var(--accent), var(--accent)),
+    linear-gradient(var(--accent), var(--accent)), linear-gradient(var(--accent), var(--accent));
+  background-repeat: no-repeat;
+  background-size: 8px 1px, 1px 8px, 8px 1px, 1px 8px, 8px 1px, 1px 8px, 8px 1px, 1px 8px;
+  background-position: left top, left top, right top, right top, right bottom, right bottom, left bottom, left bottom;
 }
 
 .clip-item.multi-select-mode {
@@ -630,8 +673,11 @@ html, body {
 
 .item-drag-preview-label {
   color: var(--accent);
+  font-family: var(--font-mono);
   font-size: 11px;
   font-weight: var(--font-weight-strong);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
 }
 
 .item-drag-preview-text {
@@ -746,6 +792,7 @@ html, body {
   display: flex;
   align-items: center;
   gap: 6px;
+  font-family: var(--font-mono);
   font-size: var(--font-size-sm);
   font-weight: var(--font-weight-normal);
   color: var(--text-secondary);
@@ -761,6 +808,7 @@ html, body {
 
 .clip-item .clip-time {
   flex-shrink: 0;
+  font-family: var(--font-mono);
   font-size: var(--font-size-sm);
   font-weight: var(--font-weight-normal);
   color: var(--text-tertiary);
@@ -882,18 +930,19 @@ html, body {
   align-items: center;
   padding: 4px 12px;
   gap: 8px;
-  font-size: var(--font-size-sm);
+  font-family: var(--font-mono);
+  font-size: 10px;
   font-weight: var(--font-weight-strong);
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.16em;
 }
 
 .pinned-divider::after {
   content: '';
   flex: 1;
-  height: 1px;
-  background: var(--divider);
+  height: 7px;
+  background: repeating-linear-gradient(45deg, var(--accent-subtle) 0 5px, transparent 5px 10px);
 }
 
 /* === Empty State === */
@@ -1042,11 +1091,12 @@ html, body {
 
 .settings-card-header {
   padding: 10px 16px 4px;
+  font-family: var(--font-mono);
   font-size: var(--font-size-sm);
   font-weight: var(--font-weight-strong);
   color: var(--text-secondary);
   text-transform: uppercase;
-  letter-spacing: 0.3px;
+  letter-spacing: 0.16em;
 }
 
 .settings-row {
@@ -1129,6 +1179,7 @@ label.settings-row {
 .settings-range-control output {
   width: 42px;
   color: var(--text-secondary);
+  font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   text-align: right;
 }
@@ -1141,7 +1192,7 @@ label.settings-row {
   height: 28px;
   margin: 0;
   border: none;
-  border-radius: 14px;
+  border-radius: 2px;
   background: var(--border);
   cursor: pointer;
   position: relative;
@@ -1154,7 +1205,7 @@ label.settings-row {
   position: absolute;
   width: 24px;
   height: 24px;
-  border-radius: 12px;
+  border-radius: 1px;
   background: #ffffff;
   top: 2px;
   left: 2px;
@@ -1258,7 +1309,7 @@ label.settings-row {
   padding: 12px 16px;
   border-top: 1px solid var(--border);
   background: var(--bg-mist);
-  box-shadow: 0 -1px 6px var(--shadow-xs);
+  box-shadow: none;
 }
 
 .settings-status {
@@ -1310,6 +1361,22 @@ label.settings-row {
   background: var(--bg-active);
   color: var(--text-tertiary);
   cursor: not-allowed;
+}
+
+/* Primary buttons: dark text on the violet fill in dark theme (#7e89f3 lacks
+   contrast with white). Disabled keeps its own muted styling. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .btn-primary:not(:disabled),
+  :root:not([data-theme="light"]) #update-section button:not(:disabled),
+  :root:not([data-theme="light"]) .tutorial-footer-nav .btn-primary:not(:disabled) {
+    color: #12142e;
+  }
+}
+
+:root[data-theme="dark"] .btn-primary:not(:disabled),
+:root[data-theme="dark"] #update-section button:not(:disabled),
+:root[data-theme="dark"] .tutorial-footer-nav .btn-primary:not(:disabled) {
+  color: #12142e;
 }
 
 #btn-cancel {
@@ -1545,11 +1612,17 @@ textarea:focus-visible {
 }
 
 .preview-kind {
+  font-family: var(--font-mono);
   font-size: var(--font-size-sm);
   font-weight: var(--font-weight-strong);
   color: var(--accent);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.14em;
+}
+
+.preview-kind::before {
+  content: "◤ ";
+  font-size: 9px;
 }
 
 .preview-warning {
@@ -1627,8 +1700,11 @@ textarea:focus-visible {
 .preview-note-label {
   margin-bottom: 5px;
   color: var(--accent);
+  font-family: var(--font-mono);
   font-size: var(--font-size-sm);
   font-weight: var(--font-weight-strong);
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
 }
 
 .preview-note-text {
@@ -1655,6 +1731,7 @@ textarea:focus-visible {
   align-items: baseline;
   gap: 8px;
   min-width: 0;
+  font-family: var(--font-mono);
   font-size: var(--font-size-sm);
   line-height: 1.4;
 }
@@ -1938,6 +2015,7 @@ textarea:focus-visible {
 
 .favorites-row-count {
   flex-shrink: 0;
+  font-family: var(--font-mono);
   font-size: var(--font-size-sm);
   color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;
@@ -2080,11 +2158,22 @@ textarea:focus-visible {
 
 .modal-panel {
   width: 300px;
+  position: relative;
   background: var(--bg-surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-lg);
   padding: 16px;
+}
+
+.modal-panel::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--accent), transparent 72%);
 }
 
 .modal-panel h2 {
@@ -2214,7 +2303,7 @@ textarea:focus-visible {
 .tutorial-dot {
   width: 8px;
   height: 8px;
-  border-radius: 4px;
+  border-radius: 1px;
   border: none;
   background: var(--border-strong);
   cursor: pointer;
