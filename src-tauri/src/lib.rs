@@ -2026,6 +2026,12 @@ pub fn run(_hidden: bool) {
     if config.favorites_toggle_shortcut.validate().is_err() {
         config.favorites_toggle_shortcut = PanelShortcut::default();
     }
+    // Reconcile the autostart shortcut with the config on every launch so the
+    // default-on setting materializes without a Settings round-trip. Config is
+    // the source of truth; best-effort — a failure never blocks startup.
+    if let Err(e) = startup::set_startup(config.startup) {
+        log(&format!("[Mnemark] autostart shortcut sync failed: {e}"));
+    }
     // History aggregate startup: optional SQLite persistence is loaded,
     // reconciled (72h stale-row policy) and installed inside the module. Any
     // failure degrades to memory-only operation with the existing

@@ -37,7 +37,7 @@ export interface ConfigBootstrapDependencies {
 }
 
 export function clampOpacityPercent(value: number): number {
-  return Math.min(100, Math.max(50, Number.isFinite(value) ? value : 99));
+  return Math.min(100, Math.max(50, Number.isFinite(value) ? value : 100));
 }
 
 export class ConfigBootstrap {
@@ -52,7 +52,7 @@ export class ConfigBootstrap {
       if (isCurrent()) {
         this.dependencies.applyLanguage("zh-TW");
         this.dependencies.applyTheme("system");
-        this.dependencies.applyOpacity(99);
+        this.dependencies.applyOpacity(100);
       }
       throw error;
     }

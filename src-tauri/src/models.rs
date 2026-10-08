@@ -465,9 +465,10 @@ impl Default for AppConfig {
             image_memory_budget_mb: 50,
             image_size_limit_mb: 10,
             hotkey: "Ctrl+Shift+V".to_string(),
-            // Off by default: autostart is opt-in via Settings, which creates
-            // the shell:startup shortcut at toggle time.
-            startup: false,
+            // On by default: the shell:startup shortcut (with --hidden so the
+            // panel stays minimized) is reconciled with this setting on every
+            // launch. Users who want opt-in autostart uncheck it in Settings.
+            startup: true,
             // On by default: history survives restart. Users who want
             // wipe-on-exit behavior uncheck this in Settings.
             persist: true,
@@ -479,8 +480,8 @@ impl Default for AppConfig {
             vim_mode: false,
             debounce_ms: 200,
             theme: "system".to_string(),
-            ui_opacity_percent: 99,
-            ui_scale_percent: 100,
+            ui_opacity_percent: 100,
+            ui_scale_percent: 125,
             language: "zh-TW".to_string(),
             paste_files_as_files: true,
             auto_update: true,
@@ -620,8 +621,8 @@ mod backward_compat_tests {
         }"#;
         let cfg: AppConfig = serde_json::from_str(json).expect("deserialize old config");
         assert!(!cfg.remember_history_filter);
-        assert_eq!(cfg.ui_opacity_percent, 99);
-        assert_eq!(cfg.ui_scale_percent, 100);
+        assert_eq!(cfg.ui_opacity_percent, 100);
+        assert_eq!(cfg.ui_scale_percent, 125);
     }
 
     #[test]
@@ -883,13 +884,18 @@ mod sanitize_tests {
     }
 
     #[test]
-    fn opacity_defaults_to_99() {
-        assert_eq!(AppConfig::default().ui_opacity_percent, 99);
+    fn opacity_defaults_to_100() {
+        assert_eq!(AppConfig::default().ui_opacity_percent, 100);
     }
 
     #[test]
-    fn scale_defaults_to_100() {
-        assert_eq!(AppConfig::default().ui_scale_percent, 100);
+    fn scale_defaults_to_125() {
+        assert_eq!(AppConfig::default().ui_scale_percent, 125);
+    }
+
+    #[test]
+    fn startup_defaults_to_on() {
+        assert!(AppConfig::default().startup);
     }
 
     #[test]

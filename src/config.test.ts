@@ -4,7 +4,7 @@ import type { AppConfig } from "./config";
 
 describe("ConfigBootstrap", () => {
   it.each([
-    [Number.NaN, 99],
+    [Number.NaN, 100],
     [20, 50],
     [75, 75],
     [140, 100],
@@ -44,7 +44,7 @@ describe("ConfigBootstrap", () => {
     });
 
     await expect(bootstrap.loadAndApply()).rejects.toBe(failure);
-    expect(order).toEqual(["language:zh-TW", "theme:system", "opacity:99"]);
+    expect(order).toEqual(["language:zh-TW", "theme:system", "opacity:100"]);
   });
 
   it("does not apply a load superseded by a newer bootstrap", async () => {
