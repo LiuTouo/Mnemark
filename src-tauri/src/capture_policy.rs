@@ -7,7 +7,14 @@
 use crate::history_state::HistoryState;
 use crate::models::{AppConfig, Clip, ClipboardSource, ClipboardUpdate};
 
-pub(crate) const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+/// Fallback poll cadence for shells that cannot create the event-driven
+/// clipboard listener (see clipboard_listener.rs).
+pub(crate) const FALLBACK_POLL_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(200);
+
+/// Transient-lock retry cadence (clipboard or history lock): the shell arms a
+/// one-shot timer for this long instead of polling continuously.
+const LOCK_RETRY_MS: u64 = 50;
 
 pub(crate) enum ClipboardCaptureOutcome {
     Captured(Box<Clip>),
@@ -40,11 +47,16 @@ pub(crate) enum SkipReason {
     DoubleCopy,
 }
 
+#[derive(Debug, Clone)]
 pub(crate) enum CaptureDecision {
     NoChange,
     Defer {
         pending_sequence: u32,
         reason: DeferReason,
+        /// How long the shell should wait before re-ticking this pending
+        /// sequence: the debounce window's remaining time, or the short fixed
+        /// lock-retry cadence.
+        retry_after_ms: u64,
     },
     Skip {
         consumed_sequence: u32,
@@ -175,6 +187,11 @@ impl CapturePolicy {
                 return CaptureDecision::Defer {
                     pending_sequence: sequence,
                     reason: DeferReason::Debounce,
+                    retry_after_ms: retry_after_debounce(
+                        observation.observed_at,
+                        previous.observed_at,
+                        observation.config.debounce_ms,
+                    ),
                 };
             }
         }
@@ -210,6 +227,7 @@ impl CapturePolicy {
                     CaptureStoreOutcome::Locked => CaptureDecision::Defer {
                         pending_sequence: sequence,
                         reason: DeferReason::HistoryLocked,
+                        retry_after_ms: LOCK_RETRY_MS,
                     },
                     CaptureStoreOutcome::Failed(message) => {
                         self.finish_capture(sequence, content_hash, observation.observed_at);
@@ -223,6 +241,7 @@ impl CapturePolicy {
             ClipboardCaptureOutcome::Locked => CaptureDecision::Defer {
                 pending_sequence: sequence,
                 reason: DeferReason::ClipboardLocked,
+                retry_after_ms: LOCK_RETRY_MS,
             },
             ClipboardCaptureOutcome::Skipped(reason) => {
                 self.consume_sequence(sequence);
@@ -250,6 +269,14 @@ impl CapturePolicy {
 
 fn within_debounce(now: u64, last_capture_ts: u64, debounce_ms: u64) -> bool {
     now.saturating_sub(last_capture_ts) < debounce_ms
+}
+
+/// Remaining debounce window at `now`, floored at 1 ms — a zero would arm no
+/// timer in an event-driven shell and stall the pending sequence.
+fn retry_after_debounce(now: u64, last_capture_ts: u64, debounce_ms: u64) -> u64 {
+    debounce_ms
+        .saturating_sub(now.saturating_sub(last_capture_ts))
+        .max(1)
 }
 
 fn is_double_copy(
@@ -303,7 +330,15 @@ where
         }
     }
 
-    pub(crate) fn tick(&mut self, running: bool, config: &AppConfig, observed_at: u64) {
+    /// One policy tick: read the live sequence number, decide, emit the
+    /// decision, and return it so the shell can arm its retry timer on
+    /// `Defer` (event-driven shells need no other wake source).
+    pub(crate) fn tick(
+        &mut self,
+        running: bool,
+        config: &AppConfig,
+        observed_at: u64,
+    ) -> CaptureDecision {
         let sequence = self.sequence_reader.sequence_number();
         let decision = self.policy.consume(
             CaptureObservation {
@@ -316,7 +351,8 @@ where
             &mut self.history,
             &mut self.source_sampler,
         );
-        self.emitter.emit(decision);
+        self.emitter.emit(decision.clone());
+        decision
     }
 }
 
@@ -591,6 +627,7 @@ mod tests {
                 CaptureDecision::Defer {
                     pending_sequence: 2,
                     reason: DeferReason::Debounce,
+                    retry_after_ms: _,
                 },
                 CaptureDecision::Skip {
                     consumed_sequence: 2,
@@ -680,6 +717,7 @@ mod tests {
                 CaptureDecision::Defer {
                     pending_sequence: 2,
                     reason: DeferReason::Debounce,
+                    retry_after_ms: _,
                 },
                 CaptureDecision::Store {
                     consumed_sequence: 2,
@@ -748,6 +786,7 @@ mod tests {
                 CaptureDecision::Defer {
                     pending_sequence: 1,
                     reason: DeferReason::ClipboardLocked,
+                    retry_after_ms: _,
                 },
                 CaptureDecision::Store {
                     consumed_sequence: 1,
@@ -788,6 +827,7 @@ mod tests {
                 CaptureDecision::Defer {
                     pending_sequence: 1,
                     reason: DeferReason::HistoryLocked,
+                    retry_after_ms: _,
                 },
                 CaptureDecision::Store {
                     consumed_sequence: 1,
@@ -967,6 +1007,7 @@ mod tests {
                 CaptureDecision::Defer {
                     pending_sequence: 2,
                     reason: DeferReason::Debounce,
+                    retry_after_ms: _,
                 },
                 CaptureDecision::Skip {
                     consumed_sequence: 2,
@@ -1050,7 +1091,63 @@ mod tests {
     }
 
     #[test]
-    fn production_poll_interval_remains_two_hundred_milliseconds() {
-        assert_eq!(POLL_INTERVAL, std::time::Duration::from_millis(200));
+    fn fallback_poll_interval_remains_two_hundred_milliseconds() {
+        assert_eq!(
+            FALLBACK_POLL_INTERVAL,
+            std::time::Duration::from_millis(200)
+        );
+    }
+
+    /// The event-driven shell arms its retry timer from `retry_after_ms`, so
+    /// the values must be exact: the debounce window's remaining time, and the
+    /// fixed lock-retry cadence.
+    #[test]
+    fn defer_reports_the_shell_retry_delay() {
+        let config = AppConfig {
+            debounce_ms: 200,
+            ..Default::default()
+        };
+        let mut monitor = ClipboardMonitor::new(
+            FakeSequenceReader { sequence: 1 },
+            FakeCapturer {
+                calls: 0,
+                sources_seen: Vec::new(),
+                results: vec![
+                    captured(clip("first", "hash-a", 0, "Editor.exe")),
+                    captured(clip("second", "hash-b", 150, "Editor.exe")),
+                ],
+            },
+            FakeHistory::default(),
+            RecordingEmitter::default(),
+            FixedSourceSampler::default(),
+            "Mnemark.exe".to_string(),
+        );
+
+        monitor.tick(true, &config, 0);
+        monitor.sequence_reader.sequence = 2;
+        monitor.tick(true, &config, 50);
+        assert!(matches!(
+            monitor.emitter.decisions[1],
+            CaptureDecision::Defer {
+                retry_after_ms: 150,
+                ref reason,
+                ..
+            } if *reason == DeferReason::Debounce
+        ));
+
+        // After the window elapses the same sequence stores, and a locked
+        // clipboard defers on the fixed cadence.
+        monitor.tick(true, &config, 200);
+        monitor.sequence_reader.sequence = 3;
+        monitor.capturer.results = vec![ClipboardCaptureOutcome::Locked];
+        monitor.tick(true, &config, 1_000);
+        assert!(matches!(
+            monitor.emitter.decisions[3],
+            CaptureDecision::Defer {
+                retry_after_ms: LOCK_RETRY_MS,
+                ref reason,
+                ..
+            } if *reason == DeferReason::ClipboardLocked
+        ));
     }
 }

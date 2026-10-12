@@ -3,12 +3,14 @@ mod clip_encoding;
 mod clipboard;
 #[cfg(test)]
 mod clipboard_busy_probe; // regression probes: delayed-render capture/paste interference
+mod clipboard_listener;
 mod config_transaction;
 mod diag_log;
 mod drawer;
 mod favorites;
 mod history;
 mod history_state;
+mod labels;
 mod located_clip;
 mod migration;
 mod models;
@@ -27,6 +29,7 @@ use drawer::{DrawerMutation, DrawerState, DrawerViewInvalidation, DrawerViewStat
 use favorites::FavoritesStore;
 use history::HistoryPolicy;
 use history_state::HistoryState;
+use labels::tray_labels;
 use located_clip::{
     CopyOutcome, LocatedClipModule, LocatedClipSource, LocatedClipWireError,
     LockedStateLocatedClipSource, StateLocatedClipSource, SystemLocatedClipPlatform,
@@ -89,36 +92,6 @@ struct TrayMenuItems {
     tutorial: tauri::menu::MenuItem<tauri::Wry>,
     about: tauri::menu::MenuItem<tauri::Wry>,
     quit: tauri::menu::MenuItem<tauri::Wry>,
-}
-
-struct TrayLabels {
-    pause: &'static str,
-    resume: &'static str,
-    settings: &'static str,
-    tutorial: &'static str,
-    about: &'static str,
-    quit: &'static str,
-}
-
-fn tray_labels(lang: &str) -> TrayLabels {
-    match lang {
-        "en" => TrayLabels {
-            pause: "Pause Monitoring",
-            resume: "Resume Monitoring",
-            settings: "Settings",
-            tutorial: "Tutorial",
-            about: "About",
-            quit: "Quit",
-        },
-        _ => TrayLabels {
-            pause: "暫停監聽",
-            resume: "繼續監聽",
-            settings: "設定",
-            tutorial: "教學",
-            about: "關於",
-            quit: "結束",
-        },
-    }
 }
 
 /// Fixed tray id, so the monitoring-state icon can be re-applied later via
@@ -873,8 +846,9 @@ impl CaptureEmitter for TauriCaptureEmitter {
             CaptureDecision::Defer {
                 pending_sequence,
                 reason,
+                retry_after_ms,
             } => {
-                let _ = (pending_sequence, reason);
+                let _ = (pending_sequence, reason, retry_after_ms);
             }
             CaptureDecision::Skip {
                 consumed_sequence,
@@ -912,6 +886,26 @@ impl CaptureEmitter for TauriCaptureEmitter {
     }
 }
 
+/// The concrete production monitor assembled by [`start_monitor`].
+type ProductionClipboardMonitor = ClipboardMonitor<
+    Win32SequenceReader,
+    Win32ClipboardCapturer,
+    SharedCaptureHistory,
+    TauriCaptureEmitter,
+    Win32SourceSampler,
+>;
+
+/// Read the pause flag and config, run one policy tick, return its decision.
+fn monitor_tick_decision(
+    monitor: &mut ProductionClipboardMonitor,
+    monitor_running: &Arc<Mutex<bool>>,
+    config: &Arc<Mutex<AppConfig>>,
+) -> CaptureDecision {
+    let running = *lock(monitor_running);
+    let cfg = lock(config).clone();
+    monitor.tick(running, &cfg, now_ms())
+}
+
 fn start_monitor(
     app_handle: tauri::AppHandle,
     history: Arc<Mutex<HistoryState>>,
@@ -932,20 +926,44 @@ fn start_monitor(
             self_exe,
         );
 
-        loop {
-            std::thread::sleep(capture_policy::POLL_INTERVAL);
-            let running = *lock(&monitor_running);
-            let config = lock(&config).clone();
-            // A panicking iteration must not kill clipboard monitoring:
-            // untrusted clipboard bytes reach the image decoders, and a dead
-            // monitor thread fails silently — the user never notices history
-            // has stopped. Log and keep polling.
-            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                monitor.tick(running, &config, now_ms())
-            }))
-            .is_err()
-            {
-                log("[Mnemark] monitor iteration panicked; clipboard watching continues");
+        // Event-driven fast path: WM_CLIPBOARDUPDATE wakes the tick the
+        // moment any process changes the clipboard; deferred decisions arm a
+        // one-shot retry timer and a slow heartbeat covers missed events.
+        // Panic safety lives inside the listener's window procedure — a
+        // panic must not unwind across the FFI boundary.
+        match clipboard_listener::ClipboardListener::new() {
+            Ok(listener) => {
+                let retry_hwnd = listener.hwnd();
+                log("[Mnemark] clipboard listener installed (event-driven)");
+                listener.run(move |_trigger| {
+                    match monitor_tick_decision(&mut monitor, &monitor_running, &config) {
+                        CaptureDecision::Defer { retry_after_ms, .. } => {
+                            clipboard_listener::arm_retry(retry_hwnd, retry_after_ms);
+                        }
+                        // A pending defer keeps its timer: an unchanged
+                        // sequence (heartbeat between defer and retry) must
+                        // not cancel the armed re-tick.
+                        CaptureDecision::NoChange => {}
+                        _ => clipboard_listener::clear_retry(retry_hwnd),
+                    }
+                });
+            }
+            Err(e) => {
+                log(&format!(
+                    "[Mnemark] clipboard listener unavailable; polling instead: {e}"
+                ));
+                loop {
+                    std::thread::sleep(capture_policy::FALLBACK_POLL_INTERVAL);
+                    // A panicking iteration must not kill clipboard
+                    // monitoring: log and keep polling.
+                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        monitor_tick_decision(&mut monitor, &monitor_running, &config)
+                    }))
+                    .is_err()
+                    {
+                        log("[Mnemark] monitor iteration panicked; clipboard watching continues");
+                    }
+                }
             }
         }
     });

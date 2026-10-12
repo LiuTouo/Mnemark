@@ -13,6 +13,7 @@
 //! reliable marker, since the install location is user-selectable
 //! (per-user %LOCALAPPDATA%\Programs or per-machine Program Files).
 
+use crate::labels::update_labels;
 use crate::models::AppConfig;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -526,26 +527,6 @@ pub async fn install_update(app: tauri::AppHandle) -> Result<String, String> {
 #[tauri::command]
 pub fn restart_app(app: tauri::AppHandle) {
     tauri::process::restart(&app.env());
-}
-
-struct UpdateLabels {
-    title: &'static str,
-    restart_body: &'static str,
-}
-
-/// Localized MessageBox strings, mirroring tray_labels() in lib.rs.
-fn update_labels(lang: &str) -> UpdateLabels {
-    if lang == "en" {
-        UpdateLabels {
-            title: "Mnemark Update",
-            restart_body: "A new version has been installed. Restart Mnemark now?",
-        }
-    } else {
-        UpdateLabels {
-            title: "Mnemark 更新",
-            restart_body: "已安裝新版本。現在重新啟動 Mnemark 嗎？",
-        }
-    }
 }
 
 /// Yes/No system dialog. Returns true on Yes.
