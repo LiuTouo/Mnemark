@@ -47,3 +47,6 @@ src-tauri/target-verification/
 
 # flicker-probe capture output
 target/
+
+# Local prototype scratch space
+prototype/
