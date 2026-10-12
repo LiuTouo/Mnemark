@@ -15,6 +15,7 @@ import { ChooserGate, computeMenuPlacement } from "./menu";
 import { isFavoriteItem, clipLocator } from "./drag";
 import { classifyClip, filterItems } from "./dataset";
 import type { FilterKind } from "./dataset";
+import { formatBytes } from "./format";
 import { MultiSelectState } from "./multi-select";
 import { decideWorkspaceLayout, escapeLayer, tabAfterPreviewIntent } from "./workspace-state";
 import type { WorkspaceLayout, WorkspaceTab } from "./workspace-state";
@@ -689,7 +690,7 @@ function render(scrollToSelection = !multiSelect.active) {
     meta.appendChild(source);
 
     const size = document.createElement("span");
-    size.textContent = item.kind === "Image" ? `${(item.byte_size / 1024 / 1024).toFixed(1)}MB` : `${item.byte_size} B`;
+    size.textContent = formatBytes(item.byte_size);
     meta.appendChild(size);
 
     contentDiv.appendChild(meta);
@@ -1292,6 +1293,10 @@ document.addEventListener("keydown", (e) => {
   const inSearch = document.activeElement === searchInput;
   const inFilter = document.activeElement instanceof HTMLElement && document.activeElement.closest("#filter-bar");
 
+  // Pending search renders must land before any key action reads visibleClips
+  // (Enter paste, arrows/j/k navigation, Space and Ctrl+A selection).
+  flushSearchRender();
+
   if (multiSelect.active && !inSearch && !inFilter && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
     e.preventDefault();
     multiSelect.toggleAllVisible(visibleClips.map((item) => item.id));
@@ -1417,10 +1422,30 @@ window.addEventListener("blur", () => {
   panelDrawer.cancel("window-blur");
 });
 
+// Debounced search rendering: rebuilding the whole list per keystroke janks with
+// large histories. flushSearchRender() fires a pending render immediately, so
+// keyboard actions never consume a stale visibleClips set.
+let searchRenderTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleSearchRender(): void {
+  if (searchRenderTimer) clearTimeout(searchRenderTimer);
+  searchRenderTimer = setTimeout(() => {
+    searchRenderTimer = null;
+    render();
+  }, 120);
+}
+
+function flushSearchRender(): void {
+  if (searchRenderTimer === null) return;
+  clearTimeout(searchRenderTimer);
+  searchRenderTimer = null;
+  render();
+}
+
 searchInput.addEventListener("input", () => {
   multiSelect.exit();
   selectedIndex = 0;
-  render();
+  scheduleSearchRender();
 });
 
 filterBar.addEventListener("click", (e) => {
