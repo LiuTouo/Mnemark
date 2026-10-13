@@ -4,6 +4,20 @@
 
 格式參考 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)，版本號遵循[語意化版本](https://semver.org/lang/zh-TW/)。
 
+## [0.8.14] - 2026-10-13
+
+### Added
+
+- 網站頂部導覽列新增 GitHub 儲存庫連結，可直接前往原始碼專案
+
+### Changed
+
+- 歷史項目的釘選圖示重繪為傾斜 45° 的圖釘造型，已釘選（實心）與未釘選（鏤空）狀態更一目了然
+
+### Fixed
+
+- 網站可讀性檢查改以重試斷言等待 ScrollTrigger 完成 pin 階段，取代固定捲動延遲；慢速 CI 環境不再於版面定位完成前量測課程幾何而誤判失敗
+
 ## [0.8.13] - 2026-10-13
 
 ### Changed
@@ -603,6 +617,7 @@
 
 - 初始版本：剪貼簿監聽（文字／圖片／檔案路徑）、SHA-256 內容去重、容量限制與淘汰、釘選（上限 10 則、永不淘汰）、即時搜尋、Raycast 風格浮動面板（`Ctrl+Shift+V`）、貼上模擬、刪除復原、系統匣常駐、排除清單、深淺色主題跟隨系統、免安裝可攜（設定存於 exe 旁）
 
+[0.8.14]: https://github.com/LiuTouo/Mnemark/compare/v0.8.13...v0.8.14
 [0.8.13]: https://github.com/LiuTouo/Mnemark/compare/v0.8.12...v0.8.13
 [0.8.12]: https://github.com/LiuTouo/Mnemark/compare/v0.8.11...v0.8.12
 [0.8.11]: https://github.com/LiuTouo/Mnemark/compare/v0.8.10...v0.8.11
