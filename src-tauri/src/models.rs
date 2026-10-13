@@ -102,6 +102,9 @@ pub struct ClipboardUpdate {
 #[derive(Debug, Clone, Serialize)]
 pub struct PreviewPayload {
     pub id: String,
+    /// Scope the payload's id resolves in, so the preview page can address
+    /// follow-up commands (e.g. open image externally) without extra state.
+    pub scope: ClipScope,
     pub kind: ClipKind,
     pub text_content: Option<String>,
     pub image_preview_base64: Option<String>,

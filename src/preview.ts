@@ -5,6 +5,7 @@ import { configBootstrap } from "./config";
 
 interface PreviewPayload {
   id: string;
+  scope: "history" | "drawer";
   kind: "Text" | "Image" | "FilePaths";
   text_content: string | null;
   image_preview_base64: string | null;
@@ -87,6 +88,12 @@ function render(payload: PreviewPayload) {
     const img = document.createElement("img");
     img.className = "preview-image";
     img.alt = t("previewTypeImage");
+    img.title = t("previewImageOpenHint");
+    img.addEventListener("dblclick", () => {
+      invoke("open_located_clip_image_externally", {
+        locator: { scope: payload.scope, id: payload.id },
+      }).catch((err) => console.error("Failed to open image externally:", err));
+    });
     const b64 = payload.image_preview_base64 || "";
     img.src = b64.startsWith("data:")
       ? b64

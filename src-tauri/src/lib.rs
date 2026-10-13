@@ -31,7 +31,7 @@ use history::HistoryPolicy;
 use history_state::HistoryState;
 use labels::tray_labels;
 use located_clip::{
-    CopyOutcome, LocatedClipModule, LocatedClipSource, LocatedClipWireError,
+    CopyOutcome, LocatedClipError, LocatedClipModule, LocatedClipSource, LocatedClipWireError,
     LockedStateLocatedClipSource, StateLocatedClipSource, SystemLocatedClipPlatform,
 };
 use models::{
@@ -497,6 +497,28 @@ async fn show_located_clip_preview(
         })
         .await
         .map_err(LocatedClipWireError::from)
+}
+
+/// Export one image clip's full-resolution PNG to the OS temp dir and open it
+/// with the system default image viewer. The file is named after the clip id
+/// (a SHA-256 hex string, so filename-safe) and overwritten per open, keeping
+/// temp usage bounded instead of accumulating one file per double-click.
+#[tauri::command]
+fn open_located_clip_image_externally(
+    locator: ClipLocator,
+    state: tauri::State<AppState>,
+) -> Result<(), LocatedClipWireError> {
+    let png = located_clip_module(&state)
+        .image_png_bytes(&locator)
+        .map_err(LocatedClipWireError::from)?;
+    let path = std::env::temp_dir().join(format!("mnemark-preview-{}.png", locator.id));
+    std::fs::write(&path, png).map_err(|e| {
+        LocatedClipWireError::from(LocatedClipError::PreviewPublication(e.to_string()))
+    })?;
+    crate::clipboard::open_path_with_default_app(&path).map_err(|e| {
+        LocatedClipWireError::from(LocatedClipError::PreviewPublication(e.to_string()))
+    })?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -2274,6 +2296,7 @@ pub fn run(_hidden: bool) {
             paste_located_clip,
             copy_located_clip,
             show_located_clip_preview,
+            open_located_clip_image_externally,
             hide_clip_preview,
             hide_panel_command,
             set_main_modal_open,

@@ -440,6 +440,22 @@ where
         self.write(locator)
     }
 
+    /// Full-resolution PNG of one stored image clip, for exporting to the OS
+    /// default viewer. Pure resolve-and-encode: temp-file handling and the
+    /// actual open live in the command layer.
+    pub(crate) fn image_png_bytes(
+        &self,
+        locator: &ClipLocator,
+    ) -> Result<Vec<u8>, LocatedClipError> {
+        with_resolved_clip!(self.source.resolve(locator)?, |clip| {
+            let dib = clip
+                .image_data
+                .as_deref()
+                .ok_or(LocatedClipError::MissingContent)?; // also covers non-Image kinds: they never carry bytes
+            crate::clipboard::dib_to_png_bytes(dib).map_err(LocatedClipError::PreviewPublication)
+        })
+    }
+
     pub(crate) async fn preview<Publish, F>(
         &self,
         locator: &ClipLocator,
@@ -469,6 +485,7 @@ where
             };
             let payload = PreviewPayload {
                 id: clip.id,
+                scope: locator.scope,
                 kind: clip.kind,
                 text_content: clip.text_content,
                 image_preview_base64,
@@ -778,6 +795,59 @@ mod tests {
 
         assert_eq!(error, LocatedClipError::MissingContent);
         assert!(events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn image_png_bytes_encodes_stored_dib_and_rejects_missing_content() {
+        use image::GenericImageView;
+
+        // 2x2 bottom-up 24bpp DIB: BITMAPINFOHEADER + two 8-byte rows.
+        let mut dib = Vec::new();
+        dib.extend_from_slice(&40u32.to_le_bytes()); // biSize
+        dib.extend_from_slice(&2i32.to_le_bytes()); // biWidth
+        dib.extend_from_slice(&2i32.to_le_bytes()); // biHeight (bottom-up)
+        dib.extend_from_slice(&1u16.to_le_bytes()); // biPlanes
+        dib.extend_from_slice(&24u16.to_le_bytes()); // biBitCount
+        dib.extend_from_slice(&0u32.to_le_bytes()); // BI_RGB
+        dib.extend_from_slice(&16u32.to_le_bytes()); // biSizeImage
+        dib.extend_from_slice(&2835i32.to_le_bytes()); // biXPelsPerMeter
+        dib.extend_from_slice(&2835i32.to_le_bytes()); // biYPelsPerMeter
+        dib.extend_from_slice(&0u32.to_le_bytes()); // biClrUsed
+        dib.extend_from_slice(&0u32.to_le_bytes()); // biClrImportant
+        for _ in 0..2 {
+            dib.extend_from_slice(&[0, 0, 255, 0, 0, 255, 0, 0]); // 2x BGR red + padding
+        }
+
+        let module = test_module(
+            ImageSource(Some(dib)),
+            RecordingClipboard(Arc::new(Mutex::new(Vec::new()))),
+        );
+        let locator = ClipLocator {
+            scope: ClipScope::History,
+            id: "image".to_string(),
+        };
+
+        let png = module.image_png_bytes(&locator).unwrap();
+        assert_eq!(image::load_from_memory(&png).unwrap().dimensions(), (2, 2));
+
+        // Missing bytes — a deferred/never-rendered image, or any non-Image
+        // kind (they never carry image_data) — is MissingContent, not a panic.
+        let no_bytes = test_module(
+            ImageSource(None),
+            RecordingClipboard(Arc::new(Mutex::new(Vec::new()))),
+        );
+        assert_eq!(
+            no_bytes.image_png_bytes(&locator).unwrap_err(),
+            LocatedClipError::MissingContent
+        );
+        let text = test_module(
+            MemorySource,
+            RecordingClipboard(Arc::new(Mutex::new(Vec::new()))),
+        );
+        assert_eq!(
+            text.image_png_bytes(&locator).unwrap_err(),
+            LocatedClipError::MissingContent
+        );
     }
 
     #[tokio::test]

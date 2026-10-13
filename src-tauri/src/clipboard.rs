@@ -542,7 +542,7 @@ fn read_text(config: &AppConfig, source: &ClipboardSource, now: u64) -> Result<C
 
 /// Decode raw CF_DIB bytes into a DynamicImage: manual decoder first
 /// (24/32bpp BI_RGB / BI_BITFIELDS), BMP-wrap fallback for exotic layouts.
-fn decode_clipboard_image(dib_data: &[u8]) -> Result<image::DynamicImage, String> {
+pub(crate) fn decode_clipboard_image(dib_data: &[u8]) -> Result<image::DynamicImage, String> {
     decode_dib(dib_data)
         .map(image::DynamicImage::ImageRgba8)
         .or_else(|_| {
@@ -552,6 +552,43 @@ fn decode_clipboard_image(dib_data: &[u8]) -> Result<image::DynamicImage, String
                 wrap_dib_as_bmp(dib_data).ok_or_else(|| "unsupported DIB layout".to_string())?;
             image::load_from_memory(&bmp).map_err(|e| format!("BMP decode: {}", e))
         })
+}
+
+/// Full-resolution PNG encoding of a stored DIB, for exporting one image to
+/// the OS default viewer. Unlike generate_preview_data_url this never
+/// downscales: the viewer gets the stored bytes at stored resolution.
+pub fn dib_to_png_bytes(dib_data: &[u8]) -> Result<Vec<u8>, String> {
+    let dyn_img = decode_clipboard_image(dib_data)?;
+    let mut png = Vec::new();
+    dyn_img
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .map_err(|e| format!("PNG encode: {}", e))?;
+    Ok(png)
+}
+
+/// Open a local file with the OS default application — the preview pane
+/// hands exported images to the system viewer this way. ShellExecuteW
+/// reports failure as a result <= 32 (SE_ERR_*), not an HRESULT.
+pub fn open_path_with_default_app(path: &std::path::Path) -> Result<(), String> {
+    use windows::core::{w, HSTRING, PCWSTR};
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let file = HSTRING::from(path.to_string_lossy().as_ref());
+    let result = unsafe {
+        ShellExecuteW(
+            HWND(std::ptr::null_mut()),
+            w!("open"),
+            PCWSTR::from_raw(file.as_ptr()),
+            None,
+            None,
+            SW_SHOWNORMAL,
+        )
+    };
+    if result.0 as isize <= 32 {
+        return Err(format!("ShellExecuteW failed: {}", result.0 as isize));
+    }
+    Ok(())
 }
 
 /// Re-encode an image as a 24bpp BI_RGB DIB (BITMAPINFOHEADER + bottom-up
@@ -1496,6 +1533,22 @@ mod dib_tests {
             .unwrap();
         let img = image::load_from_memory(&bytes).unwrap();
         assert_eq!(img.dimensions(), (100, 100));
+    }
+
+    #[test]
+    fn dib_to_png_bytes_round_trips_at_stored_resolution() {
+        use image::GenericImageView;
+
+        let dib = solid_dib(64, 32);
+        let png = super::dib_to_png_bytes(&dib).unwrap();
+
+        let img = image::load_from_memory(&png).unwrap();
+        assert_eq!(img.dimensions(), (64, 32)); // full resolution, no downscale
+    }
+
+    #[test]
+    fn dib_to_png_bytes_rejects_garbage_input() {
+        assert!(super::dib_to_png_bytes(&[0u8; 8]).is_err());
     }
 
     /// Solid-color bottom-up 24bpp DIB of the given size.
