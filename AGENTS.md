@@ -15,6 +15,10 @@ Mnemark is a Tauri 2 desktop application with a TypeScript frontend and Rust bac
 
 Release builds must enable Tauri's `custom-protocol` feature; use `npm run build:app` rather than an unqualified release build.
 
+## Release Procedure
+
+`src-tauri/Cargo.toml` is the single version source; CI rejects any tag that doesn't match it. Before any release tooling that runs `npm version`/creates a tag, run `npm run bump -- <version>`, fill in the CHANGELOG skeleton, sync `Cargo.lock` via `cargo check`, and commit as `chore(release): <version>`. Then create and push the tag.
+
 ## Coding Style & Naming Conventions
 
 Follow existing formatting: two-space indentation and double quotes in TypeScript; standard `rustfmt` output in Rust. Keep TypeScript strict and free of unused declarations. Use `camelCase` for TypeScript variables/functions, `PascalCase` for types, and Rust `snake_case` for modules/functions. Prefer small modules organized by behavior. Run `cargo fmt --manifest-path src-tauri/Cargo.toml` before submitting Rust changes.
