@@ -468,11 +468,16 @@ function linkIcon(): SVGElement {
 
 function pinIcon(pinned: boolean): SVGElement {
   const svg = iconRoot(15, pinned ? "currentColor" : "none", "currentColor");
-  svg.append(
-    svgEl("path", { d: "M12 2v8M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" }),
-    svgEl("path", { d: "M4 6h16" }),
-    svgEl("path", { d: "M10 10v8a2 2 0 0 0 2 2 2 2 0 0 0 2-2v-8" }),
+  const pin = svgEl("g", {
+    transform: "rotate(45 12 12)",
+    "stroke-linecap": "round",
+    "stroke-linejoin": "round",
+  });
+  pin.append(
+    svgEl("path", { d: "M8 3h8v3l-1 1v4l3 3v2H6v-2l3-3V7L8 6Z" }),
+    svgEl("path", { d: "M12 16v5", fill: "none" }),
   );
+  svg.appendChild(pin);
   return svg;
 }
 
