@@ -214,6 +214,14 @@ small {
   width: 15px;
   height: 15px;
 }
+.nav-github {
+  display: flex;
+  align-items: center;
+}
+.nav-github .icon {
+  width: 16px;
+  height: 16px;
+}
 .site-header nav > .nav-download {
   border: 1px solid #74786d;
   padding: 10px 15px;
