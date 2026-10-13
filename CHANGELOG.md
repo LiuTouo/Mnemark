@@ -4,6 +4,16 @@
 
 格式參考 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)，版本號遵循[語意化版本](https://semver.org/lang/zh-TW/)。
 
+## [0.8.15] - 2026-10-13
+
+### Added
+
+- 圖片預覽支援雙擊開啟：雙擊右側預覽圖會將剪輯儲存的圖片匯出為完整解析度暫存 PNG，並以系統預設圖片檢視器開啟（ShellExecuteW），歷史與我的最愛項目皆可使用；滑鼠停留顯示提示文字
+
+### Changed
+
+### Fixed
+
 ## [0.8.14] - 2026-10-13
 
 ### Added
@@ -617,6 +627,7 @@
 
 - 初始版本：剪貼簿監聽（文字／圖片／檔案路徑）、SHA-256 內容去重、容量限制與淘汰、釘選（上限 10 則、永不淘汰）、即時搜尋、Raycast 風格浮動面板（`Ctrl+Shift+V`）、貼上模擬、刪除復原、系統匣常駐、排除清單、深淺色主題跟隨系統、免安裝可攜（設定存於 exe 旁）
 
+[0.8.15]: https://github.com/LiuTouo/Mnemark/compare/v0.8.14...v0.8.15
 [0.8.14]: https://github.com/LiuTouo/Mnemark/compare/v0.8.13...v0.8.14
 [0.8.13]: https://github.com/LiuTouo/Mnemark/compare/v0.8.12...v0.8.13
 [0.8.12]: https://github.com/LiuTouo/Mnemark/compare/v0.8.11...v0.8.12
