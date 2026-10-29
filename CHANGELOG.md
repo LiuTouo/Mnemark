@@ -4,6 +4,19 @@
 
 格式參考 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)，版本號遵循[語意化版本](https://semver.org/lang/zh-TW/)。
 
+## [0.8.16] - 2026-10-29
+
+### Changed
+
+- 新安裝的介面縮放預設值改為 100%（既有設定不受影響，仍維持各自儲存的值）
+
+### Fixed
+
+- 修正混合 DPI 雙螢幕（如 4K 150% + FHD 100%）下面板只顯示中間History卡片、抽屜與預覽不見、內容比例過大被視窗裁掉的問題：WebView2 跨螢幕移動後不會立即重新縮放，現在跨 DPI 移動後主動強制重新抓取縮放並重算視窗邊界與可見區域
+- 版型決策改以目標螢幕的 scale factor 與設定的介面縮放計算，不再依賴跨螢幕移動時會過期的 `devicePixelRatio`
+- 版型調整失敗時自動重試（最多 2 次），且每次叫出面板都會重新檢查版型，不再一次失敗就永久只剩中間視窗
+- 面板啟動流程任一步讀取失敗不再中斷後續初始化（先前會導致抽屜、監聽與版型全部未註冊）
+- 新增前端診斷記錄：版型失敗、viewport 等待逾時（含實際尺寸與 DPI 證據）、抽屜載入失敗現在會寫入 `mnemark.log`，每次顯示面板也記錄目標螢幕縮放與視窗尺寸，便於現場問題定位
 ## [0.8.15] - 2026-10-13
 
 ### Added
@@ -627,6 +640,7 @@
 
 - 初始版本：剪貼簿監聽（文字／圖片／檔案路徑）、SHA-256 內容去重、容量限制與淘汰、釘選（上限 10 則、永不淘汰）、即時搜尋、Raycast 風格浮動面板（`Ctrl+Shift+V`）、貼上模擬、刪除復原、系統匣常駐、排除清單、深淺色主題跟隨系統、免安裝可攜（設定存於 exe 旁）
 
+[0.8.16]: https://github.com/LiuTouo/Mnemark/compare/v0.8.15...v0.8.16
 [0.8.15]: https://github.com/LiuTouo/Mnemark/compare/v0.8.14...v0.8.15
 [0.8.14]: https://github.com/LiuTouo/Mnemark/compare/v0.8.13...v0.8.14
 [0.8.13]: https://github.com/LiuTouo/Mnemark/compare/v0.8.12...v0.8.13
