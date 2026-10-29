@@ -106,11 +106,18 @@ jobs:
             ($manifest | ConvertTo-Json -Compress), [System.Text.UTF8Encoding]::new($false))
           npx tauri signer sign "$exe.manifest.json"
 
+      # Zip wrapper for browsers/AV that block the raw exe download; the exe
+      # inside is identical to the loose asset (AV still scans archive content,
+      # so this mitigates download-time blocking only).
+      - name: Zip portable exe
+        shell: pwsh
+        run: Compress-Archive -Path "Mnemark_${{ github.ref_name }}_x64-portable.exe" -DestinationPath "Mnemark_${{ github.ref_name }}_x64-portable.zip" -Force
+
       - name: Upload portable asset
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ github.ref_name }}" "Mnemark_${{ github.ref_name }}_x64-portable.exe" "Mnemark_${{ github.ref_name }}_x64-portable.exe.sig" "Mnemark_${{ github.ref_name }}_x64-portable.exe.manifest.json" "Mnemark_${{ github.ref_name }}_x64-portable.exe.manifest.json.sig" --clobber
+        run: gh release upload "${{ github.ref_name }}" "Mnemark_${{ github.ref_name }}_x64-portable.exe" "Mnemark_${{ github.ref_name }}_x64-portable.exe.sig" "Mnemark_${{ github.ref_name }}_x64-portable.exe.manifest.json" "Mnemark_${{ github.ref_name }}_x64-portable.exe.manifest.json.sig" "Mnemark_${{ github.ref_name }}_x64-portable.zip" --clobber
 
       # tauri-action creates the release with the commit message as body.
       # Replace it with this version's CHANGELOG section (header line dropped —
