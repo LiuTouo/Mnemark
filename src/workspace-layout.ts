@@ -19,6 +19,9 @@ interface LayoutRequest {
   environment: string;
 }
 
+const LAYOUT_RETRY_DELAY_MS = 400;
+const MAX_LAYOUT_FAILURES = 2;
+
 function sameRequest(a: LayoutRequest | null, b: LayoutRequest): boolean {
   return a !== null && a.environment === b.environment
     && a.layout.mode === b.layout.mode
@@ -36,6 +39,8 @@ export class WorkspaceLayoutCoordinator {
   private native: LayoutRequest | null = null;
   private running: Promise<void> | null = null;
   private attempted: LayoutRequest | null = null;
+  private failures = 0;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private readonly host: WorkspaceLayoutHost) {}
 
@@ -46,6 +51,11 @@ export class WorkspaceLayoutCoordinator {
     // The caller may already have hidden a closing pane. A quick reopen must
     // republish it even when its geometry equals the last committed layout.
     this.committed = null;
+    if (this.retryTimer !== null) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
+    this.failures = 0;
   }
 
   request(layout: WorkspaceLayout, environment: string): Promise<void> {
@@ -67,7 +77,10 @@ export class WorkspaceLayoutCoordinator {
     while (this.requested) {
       const request = this.requested;
       this.attempted = request;
-      if (sameRequest(this.committed, request)) return;
+      if (sameRequest(this.committed, request)) {
+        this.failures = 0;
+        return;
+      }
       const { layout, environment } = request;
       try {
         const needsResize = !this.native || this.native.environment !== environment
@@ -88,6 +101,7 @@ export class WorkspaceLayoutCoordinator {
         await this.host.finish(layout);
         if (request !== this.requested) continue;
         this.committed = request;
+        this.failures = 0;
         return;
       } catch (error) {
         // Native bounds may have changed even if the viewport acknowledgement
@@ -95,6 +109,16 @@ export class WorkspaceLayoutCoordinator {
         this.native = null;
         this.committed = null;
         this.host.report(error);
+        // A cross-DPI monitor move rescales WebView2 asynchronously; one
+        // abandoned attempt must not leave the panes hidden forever, so give
+        // the same intent a bounded number of retries.
+        if (request === this.requested && this.failures < MAX_LAYOUT_FAILURES) {
+          this.failures += 1;
+          this.retryTimer = setTimeout(() => {
+            this.retryTimer = null;
+            if (this.requested === request) void this.request(layout, environment);
+          }, LAYOUT_RETRY_DELAY_MS);
+        }
         if (request === this.requested) return;
       }
     }
@@ -136,7 +160,11 @@ export function waitForWorkspaceViewport(viewport: WorkspaceViewport): Promise<v
     // also work while a hidden webview has animation frames throttled.
     const timeout = setTimeout(() => {
       cleanup();
-      reject(new Error("Workspace viewport did not reach the native bounds"));
+      reject(new Error(
+        `viewport did not reach ${viewport.cssWidth}x${viewport.cssHeight}`
+          + ` (inner ${window.innerWidth}x${window.innerHeight}`
+          + ` dpr ${window.devicePixelRatio})`,
+      ));
     }, 1000);
     window.addEventListener("resize", check);
     frame = requestAnimationFrame(check);

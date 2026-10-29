@@ -46,6 +46,9 @@ let selectedIndex = -1;
 let vimMode = false;
 let previewEnabled = true;
 let rememberHistoryFilter = false;
+// UI zoom from the config (ui_scale_percent/100); the backend multiplies the
+// same value into every workspace geometry it sizes.
+let uiScaleZoom = 1;
 let activeFilter: FilterKind = "all";
 let openMenuClipId: string | null = null;
 let noteTarget: ClipLocator | null = null;
@@ -134,7 +137,10 @@ const workspaceLayout = new WorkspaceLayoutCoordinator({
       commit: true,
     });
   },
-  report: (error) => console.error("Failed to resize workspace:", error),
+  report: (error) => {
+    console.error("Failed to resize workspace:", error);
+    void invoke("frontend_log", { message: `workspace layout failed: ${error}` }).catch(() => {});
+  },
 });
 
 // Bind the primary drawer action synchronously while the deferred script is
@@ -151,6 +157,7 @@ async function refreshConfig() {
     vimMode = !!config.vim_mode;
     previewEnabled = config.preview_enabled !== false;
     rememberHistoryFilter = !!config.remember_history_filter;
+    uiScaleZoom = config.ui_scale_percent > 0 ? config.ui_scale_percent / 100 : 1;
     shortcutMatcher = new ShortcutMatcher(config.favorites_toggle_shortcut?.codes ?? FAVORITES_DEFAULT_CODES);
   } catch (err) {
     console.error("Failed to load config:", err);
@@ -199,8 +206,15 @@ async function applyWorkspaceLayout(): Promise<void> {
   if (!drawerIsOpen()) drawerPane.classList.add("hidden");
   if (!previewState.isOpen) previewPane.classList.add("hidden");
   const monitor = await currentMonitor().catch(() => null);
+  // WebView2's devicePixelRatio can stay at the old monitor's value for a
+  // while after a cross-DPI move (and only updates on a further bounds
+  // change), so derive the CSS-visible width from the target monitor's own
+  // scale factor and the configured UI zoom instead.
+  const factor = monitor?.scaleFactor
+    ? monitor.scaleFactor * uiScaleZoom
+    : (window.devicePixelRatio || 1);
   const availableCssWidth = monitor
-    ? monitor.workArea.size.width / (window.devicePixelRatio || 1)
+    ? monitor.workArea.size.width / factor
     : window.screen.availWidth;
   const layout = decideWorkspaceLayout(
     availableCssWidth,
@@ -210,7 +224,7 @@ async function applyWorkspaceLayout(): Promise<void> {
   );
   if (revision !== workspaceLayoutRevision) return;
 
-  const environment = JSON.stringify([monitor?.workArea ?? null, availableCssWidth, window.devicePixelRatio]);
+  const environment = JSON.stringify([monitor?.workArea ?? null, availableCssWidth, factor]);
   await workspaceLayout.request(layout, environment);
 }
 
@@ -260,7 +274,15 @@ async function init() {
   await refreshConfig();
   applyI18n();
 
-  await history.load();
+  // A failed read must not abort the rest of boot: the drawer projection,
+  // listeners and the workspace layout are all registered below, and one
+  // rejection here used to leave the panel center-only on every monitor.
+  try {
+    await history.load();
+  } catch (error) {
+    console.error("Failed to load history:", error);
+    void invoke("frontend_log", { message: `history load failed: ${error}` }).catch(() => {});
+  }
   selectedIndex = 0;
   render();
 
@@ -268,6 +290,7 @@ async function init() {
     await drawerViewProjection.startup();
   } catch (error) {
     console.error("Failed to load initial Drawer view:", error);
+    void invoke("frontend_log", { message: `drawer view startup failed: ${error}` }).catch(() => {});
     showToast(t("drawerLoadFailed"));
   }
 
@@ -320,11 +343,23 @@ async function init() {
     render();
   });
 
+  // A cross-monitor move can change the scale factor after show; WebView2
+  // rescales asynchronously, so re-decide the layout once it settles.
+  let scaleChangeTimer: ReturnType<typeof setTimeout> | undefined;
+  await getCurrentWindow().onScaleChanged(() => {
+    clearTimeout(scaleChangeTimer);
+    scaleChangeTimer = setTimeout(() => void applyWorkspaceLayout(), 300);
+  });
+
   await listen<void>("main-panel-reset", () => {
     closeNoteModal();
     exitMultiSelect(false);
     hideActionMenu();
     panelDrawer.closeOverlays();
+    // Every show re-checks the layout against the current monitor: a layout
+    // that failed while hidden (or on the previous monitor) heals on the next
+    // hotkey press instead of staying center-only forever.
+    void applyWorkspaceLayout();
   });
 
   selectionToggle.addEventListener("click", () => {

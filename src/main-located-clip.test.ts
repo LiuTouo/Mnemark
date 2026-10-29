@@ -23,7 +23,10 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: tauri.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: tauri.listen }));
 vi.mock("@tauri-apps/api/window", () => ({
   currentMonitor: tauri.currentMonitor,
-  getCurrentWindow: () => ({ onFocusChanged: tauri.onFocusChanged }),
+  getCurrentWindow: () => ({
+    onFocusChanged: tauri.onFocusChanged,
+    onScaleChanged: async () => () => {},
+  }),
 }));
 vi.mock("./preview", () => ({ mountPreview: vi.fn(async () => {}) }));
 vi.mock("./favorites", () => ({

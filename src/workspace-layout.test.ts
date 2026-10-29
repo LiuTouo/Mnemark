@@ -142,3 +142,59 @@ describe("workspace presentation", () => {
     expect(host.report).toHaveBeenCalledTimes(1);
   });
 });
+
+it("retries a failed layout until the viewport acknowledges", async () => {
+  vi.useFakeTimers();
+  const { host, coordinator } = setup();
+  host.resize.mockResolvedValue({ cssWidth: 848, cssHeight: 620 });
+  host.waitForViewport.mockRejectedValueOnce(new Error("viewport"));
+  const done = coordinator.request(drawer, "screen");
+  await vi.advanceTimersByTimeAsync(1);
+  expect(host.report).toHaveBeenCalledTimes(1);
+  expect(host.commit).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(400);
+  await done;
+  expect(host.resize).toHaveBeenCalledTimes(2);
+  expect(host.commit).toHaveBeenCalledWith(drawer);
+});
+
+it("stops retrying after the failure cap", async () => {
+  vi.useFakeTimers();
+  const { host, coordinator } = setup();
+  host.resize.mockResolvedValue({ cssWidth: 848, cssHeight: 620 });
+  host.waitForViewport.mockRejectedValue(new Error("viewport"));
+  const done = coordinator.request(drawer, "screen");
+  await vi.advanceTimersByTimeAsync(400 * 3);
+  await done;
+  // 1 initial attempt + 2 bounded retries, then it gives up quietly.
+  expect(host.report).toHaveBeenCalledTimes(3);
+  expect(host.resize).toHaveBeenCalledTimes(3);
+  await vi.advanceTimersByTimeAsync(400 * 5);
+  expect(host.report).toHaveBeenCalledTimes(3);
+});
+
+it("drops the retry of an invalidated intent", async () => {
+  vi.useFakeTimers();
+  const { host, coordinator } = setup();
+  host.resize.mockResolvedValue({ cssWidth: 848, cssHeight: 620 });
+  host.waitForViewport.mockRejectedValue(new Error("viewport"));
+  const done = coordinator.request(drawer, "screen");
+  await vi.advanceTimersByTimeAsync(1);
+  coordinator.invalidate();
+  await vi.advanceTimersByTimeAsync(400);
+  await done;
+  expect(host.resize).toHaveBeenCalledTimes(1);
+});
+
+it("does not resurrect a failed intent that newer requests replaced", async () => {
+  vi.useFakeTimers();
+  const { host, coordinator } = setup();
+  host.resize.mockResolvedValue({ cssWidth: 848, cssHeight: 620 });
+  host.waitForViewport.mockRejectedValueOnce(new Error("viewport"));
+  const done = coordinator.request(drawer, "screen");
+  await vi.advanceTimersByTimeAsync(1);
+  await coordinator.request(closed, "screen");
+  await vi.advanceTimersByTimeAsync(400);
+  await done;
+  expect(host.commit).toHaveBeenLastCalledWith(closed);
+});

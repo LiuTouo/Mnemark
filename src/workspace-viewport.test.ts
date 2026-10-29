@@ -41,7 +41,7 @@ it("fails a missing viewport acknowledgement without leaving timers or listeners
   const remove = vi.spyOn(window, "removeEventListener");
   Object.defineProperty(window, "innerWidth", { configurable: true, value: 480 });
   const waiting = waitForWorkspaceViewport({ cssWidth: 848, cssHeight: 620 });
-  const rejected = expect(waiting).rejects.toThrow("Workspace viewport did not reach the native bounds");
+  const rejected = expect(waiting).rejects.toThrow("viewport did not reach 848x620");
   await vi.advanceTimersByTimeAsync(1000);
   await rejected;
   expect(remove).toHaveBeenCalledWith("resize", expect.any(Function));

@@ -223,6 +223,14 @@ fn take_startup_error(state: tauri::State<AppState>) -> Option<String> {
     lock(&state.startup_error).take()
 }
 
+/// Release builds have no devtools console, so frontend failures (layout
+/// viewport never converging, drawer view not loading) are invisible in the
+/// field. Route them into the same diag log the backend writes.
+#[tauri::command]
+fn frontend_log(message: String) {
+    log(&format!("[frontend] {message}"));
+}
+
 /// Register `new_hotkey` before unregistering `old_hotkey`, so a conflict never
 /// leaves the Panel without a working shortcut.
 fn swap_panel_hotkey(
@@ -1423,10 +1431,19 @@ fn apply_main_workspace_layout(
     *lock(&state.workspace_left_extent) = left_extent;
     *lock(&state.workspace_right_extent) = right_extent;
     let size = window.inner_size().map_err(|e| e.to_string())?;
-    Ok(WorkspaceViewport {
+    let viewport = WorkspaceViewport {
         css_width: size.width as f64 / (scale * zoom),
         css_height: size.height as f64 / (scale * zoom),
-    })
+    };
+    log(&format!(
+        "[Mnemark] workspace layout: extents {left_extent}/{right_extent} monitor scale {} window scale {scale} zoom {zoom} inner {}x{} viewport {:.0}x{:.0}",
+        monitor.scale_factor(),
+        size.width,
+        size.height,
+        viewport.css_width,
+        viewport.css_height
+    ));
+    Ok(viewport)
 }
 
 #[tauri::command]
@@ -1532,6 +1549,18 @@ fn center_on_cursor_monitor(app: &tauri::AppHandle, window: &tauri::WebviewWindo
     let state = app.state::<AppState>();
     let factor = monitor.scale_factor() * ui_zoom_of(&lock(&state.config));
     let area = monitor.work_area();
+    let previous_scale = window.scale_factor().ok();
+    log(&format!(
+        "[Mnemark] panel show: cursor monitor scale {} work area {}x{} at ({},{}) window scale {previous_scale:?} inner {:?} extents {}/{}",
+        monitor.scale_factor(),
+        area.size.width,
+        area.size.height,
+        area.position.x,
+        area.position.y,
+        window.inner_size().map(|s| (s.width, s.height)).ok(),
+        *lock(&state.workspace_left_extent),
+        *lock(&state.workspace_right_extent),
+    ));
     let mut geometry = place_workspace_window(
         (area.position.x, area.position.y),
         monitor.scale_factor(),
@@ -1569,6 +1598,105 @@ fn center_on_cursor_monitor(app: &tauri::AppHandle, window: &tauri::WebviewWindo
     });
     if let Err(e) = result {
         log(&format!("[Mnemark] workspace placement failed: {e}"));
+    }
+    let target_scale = monitor.scale_factor();
+    let crossed_dpi = previous_scale
+        .map(|s| (s - target_scale).abs() > f64::EPSILON)
+        .unwrap_or(false);
+    if crossed_dpi {
+        // WebView2 re-derives its DPI from a later bounds change, not from the
+        // move itself; without the resync the page keeps rendering at the old
+        // scale (content too large, viewport acknowledgement never arrives).
+        log(&format!(
+            "[Mnemark] panel moved across DPI boundary: {previous_scale:?} -> {target_scale}; scheduling resync"
+        ));
+        let app = app.clone();
+        let window = window.clone();
+        tauri::async_runtime::spawn(async move {
+            // WebView2 needs a moment to process the monitor change before a
+            // bounds change makes it re-read the DPI.
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let resync_app = app.clone();
+            if let Err(e) = app.run_on_main_thread(move || {
+                resync_workspace_after_dpi_move(&resync_app, &window);
+            }) {
+                log(&format!("[Mnemark] dpi resync dispatch failed: {e:?}"));
+            }
+        });
+    }
+}
+
+/// Force the webview to pick up the new monitor DPI after a cross-scale move,
+/// then re-derive the workspace bounds and region from fresh values. Runs on
+/// the main thread ~300 ms after the move; must tolerate any window state.
+#[cfg(windows)]
+fn resync_workspace_after_dpi_move(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOZORDER,
+    };
+    let Ok(Some(monitor)) = window.current_monitor() else {
+        return;
+    };
+    let state = app.state::<AppState>();
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let zoom = ui_zoom_of(&lock(&state.config));
+    let wa = monitor.work_area();
+    let position = window
+        .outer_position()
+        .map(|p| (p.x, p.y))
+        .unwrap_or((wa.position.x, wa.position.y));
+    let geometry = place_workspace_window(
+        position,
+        scale,
+        zoom,
+        (wa.position.x, wa.position.y, wa.size.width, wa.size.height),
+    );
+    if let Err(e) = set_workspace_bounds(window, geometry) {
+        log(&format!("[Mnemark] dpi resync bounds failed: {e}"));
+    }
+    let Ok(hwnd) = window.hwnd() else {
+        return;
+    };
+    let width = geometry.physical_width as i32;
+    let height = geometry.physical_height as i32;
+    // SAFETY: live HWND, no pointer arguments. A 1px round trip so WebView2
+    // treats the change as a real resize and re-derives its DPI.
+    unsafe {
+        let _ = SetWindowPos(
+            HWND(hwnd.0),
+            None,
+            0,
+            0,
+            width + 1,
+            height + 1,
+            SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER,
+        );
+        let _ = SetWindowPos(
+            HWND(hwnd.0),
+            None,
+            0,
+            0,
+            width,
+            height,
+            SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER,
+        );
+    }
+    let region = workspace_region(
+        geometry.physical_width,
+        geometry.physical_height,
+        scale * zoom,
+        *lock(&state.workspace_left_extent),
+        *lock(&state.workspace_right_extent),
+    );
+    if let Err(e) = apply_workspace_region(window, region, false) {
+        log(&format!("[Mnemark] dpi resync region failed: {e}"));
+    }
+    if let Ok(size) = window.inner_size() {
+        log(&format!(
+            "[Mnemark] dpi resync done: scale {scale} zoom {zoom} inner {}x{}",
+            size.width, size.height
+        ));
     }
 }
 
@@ -2292,6 +2420,7 @@ pub fn run(_hidden: bool) {
             set_located_clip_note,
             get_config,
             take_startup_error,
+            frontend_log,
             update_config,
             paste_located_clip,
             copy_located_clip,

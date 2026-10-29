@@ -5,12 +5,22 @@ import panelHtml from "../index.html?raw";
 const native = vi.hoisted(() => ({
   invoke: vi.fn(),
   publish: (_open: boolean) => {},
+  monitor: null as { workArea: { size: { width: number } }; scaleFactor?: number } | null,
+  events: new Map<string, (payload?: unknown) => void>(),
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: native.invoke }));
-vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async (event: string, handler: (e: { payload?: unknown }) => void) => {
+    native.events.set(event, (payload) => handler({ payload }));
+    return () => {};
+  }),
+}));
 vi.mock("@tauri-apps/api/window", () => ({
-  currentMonitor: async () => ({ workArea: { size: { width: 1920 } } }),
-  getCurrentWindow: () => ({ onFocusChanged: async () => () => {} }),
+  currentMonitor: async () => native.monitor,
+  getCurrentWindow: () => ({
+    onFocusChanged: async () => () => {},
+    onScaleChanged: async () => () => {},
+  }),
 }));
 vi.mock("./preview", () => ({ mountPreview: async () => {} }));
 vi.mock("./favorites", () => ({
@@ -43,6 +53,8 @@ vi.mock("./drawer-view-tauri", () => {
 beforeEach(() => {
   vi.resetModules();
   native.invoke.mockReset();
+  native.events.clear();
+  native.monitor = { workArea: { size: { width: 1920 } } };
   document.documentElement.innerHTML = panelHtml;
   Object.defineProperty(window, "innerWidth", { configurable: true, value: 1216 });
   Object.defineProperty(window, "innerHeight", { configurable: true, value: 620 });
@@ -90,4 +102,22 @@ it("reveals the drawer only after region preparation and releases unused space a
     leftExtent: 0, rightExtent: 0, commit: true,
   }));
   expect(window.innerWidth).toBe(1216);
+});
+
+it("decides the layout from the monitor scale factor, not a stale devicePixelRatio", async () => {
+  // 1080p monitor at 100% while WebView2 still reports the 4K monitor's
+  // ratio (1.875 = 150% display × 125% UI zoom): the old dpr-based math
+  // computed 1024 CSS px, collapsed the drawer to compact/overlay and the
+  // panes never came back after the acknowledgement timed out.
+  native.monitor = { workArea: { size: { width: 1920 } }, scaleFactor: 1 };
+  Object.defineProperty(window, "devicePixelRatio", { configurable: true, value: 1.875 });
+  await import("./main");
+  window.dispatchEvent(new Event("DOMContentLoaded"));
+  await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith("set_main_workspace_layout", {
+    leftExtent: 0, rightExtent: 0, commit: true,
+  }));
+  native.publish(true);
+  await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith("set_main_workspace_layout", {
+    leftExtent: 368, rightExtent: 0,
+  }));
 });
