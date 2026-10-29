@@ -1,5 +1,37 @@
 import type { WorkspaceLayout } from "./workspace-state";
 
+/**
+ * Logical work-area the fixed panel layout was designed against (1080p;
+ * the height is the 1080p work area after the taskbar). Must match the
+ * Rust FIT_REFERENCE_* constants.
+ */
+const FIT_REFERENCE_WIDTH = 1920;
+const FIT_REFERENCE_HEIGHT = 1040;
+
+/**
+ * Mirrors the Rust fit_coefficient (src-tauri/src/lib.rs): the applied UI
+ * zoom grows with the monitor's logical resolution (capped at 2x, never
+ * below 1x) so the fixed-size panel keeps its apparent share of screens
+ * whose logical resolution far exceeds the reference — e.g. a 4K screen at
+ * 100% OS scaling. Both sides must agree, or the drawer/preview extents
+ * decided here diverge from the native window bounds and region.
+ */
+export function fitCoefficient(
+  logicalWidth: number,
+  logicalHeight: number,
+): number {
+  return Math.min(
+    2,
+    Math.max(
+      1,
+      Math.min(
+        logicalWidth / FIT_REFERENCE_WIDTH,
+        logicalHeight / FIT_REFERENCE_HEIGHT,
+      ),
+    ),
+  );
+}
+
 export interface WorkspaceViewport {
   cssWidth: number;
   cssHeight: number;

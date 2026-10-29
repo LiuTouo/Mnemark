@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { WorkspaceLayoutCoordinator } from "./workspace-layout";
+import { WorkspaceLayoutCoordinator, fitCoefficient } from "./workspace-layout";
 import { decideWorkspaceLayout } from "./workspace-state";
 import type { WorkspaceLayout } from "./workspace-state";
 
@@ -197,4 +197,21 @@ it("does not resurrect a failed intent that newer requests replaced", async () =
   await vi.advanceTimersByTimeAsync(400);
   await done;
   expect(host.commit).toHaveBeenLastCalledWith(closed);
+});
+
+describe("fitCoefficient", () => {
+  it("matches the 1080p reference and never shrinks", () => {
+    expect(fitCoefficient(1920, 1040)).toBe(1);
+    expect(fitCoefficient(1366, 728)).toBe(1);
+  });
+
+  it("grows with high logical resolution and caps at 2x", () => {
+    expect(fitCoefficient(2560, 1400)).toBeCloseTo(4 / 3, 9);
+    expect(fitCoefficient(3840, 2112)).toBe(2);
+    expect(fitCoefficient(7680, 4224)).toBe(2);
+  });
+
+  it("follows the shorter axis on short monitors", () => {
+    expect(fitCoefficient(3440, 1040)).toBe(1);
+  });
 });

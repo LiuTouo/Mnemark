@@ -19,7 +19,7 @@ import { formatBytes } from "./format";
 import { MultiSelectState } from "./multi-select";
 import { decideWorkspaceLayout, escapeLayer, tabAfterPreviewIntent } from "./workspace-state";
 import type { WorkspaceLayout, WorkspaceTab } from "./workspace-state";
-import { WorkspaceLayoutCoordinator, waitForWorkspacePaint, waitForWorkspaceViewport } from "./workspace-layout";
+import { WorkspaceLayoutCoordinator, fitCoefficient, waitForWorkspacePaint, waitForWorkspaceViewport } from "./workspace-layout";
 import type { WorkspaceViewport } from "./workspace-layout";
 import { mountDrawerRenderer } from "./favorites";
 import type { PanelDrawerRenderer } from "./favorites";
@@ -209,10 +209,18 @@ async function applyWorkspaceLayout(): Promise<void> {
   // WebView2's devicePixelRatio can stay at the old monitor's value for a
   // while after a cross-DPI move (and only updates on a further bounds
   // change), so derive the CSS-visible width from the target monitor's own
-  // scale factor and the configured UI zoom instead.
-  const factor = monitor?.scaleFactor
-    ? monitor.scaleFactor * uiScaleZoom
-    : (window.devicePixelRatio || 1);
+  // scale factor and the configured UI zoom instead. The monitor-fit zoom
+  // must mirror the Rust side exactly: the native window bounds and
+  // region are sized with it too.
+  const scaleFactor = monitor?.scaleFactor || window.devicePixelRatio || 1;
+  const logicalWidth = monitor
+    ? (monitor.workArea.size.width || window.screen.availWidth * scaleFactor) / scaleFactor
+    : window.screen.availWidth;
+  const logicalHeight = monitor
+    ? (monitor.workArea.size.height || window.screen.availHeight * scaleFactor) / scaleFactor
+    : window.screen.availHeight;
+  const fit = fitCoefficient(logicalWidth, logicalHeight);
+  const factor = scaleFactor * uiScaleZoom * fit;
   const availableCssWidth = monitor
     ? monitor.workArea.size.width / factor
     : window.screen.availWidth;

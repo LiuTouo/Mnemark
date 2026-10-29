@@ -1408,7 +1408,7 @@ fn apply_main_workspace_layout(
         .outer_position()
         .map_err(|e| format!("main outer_position failed: {:?}", e))?;
     let scale = window.scale_factor().unwrap_or(1.0);
-    let zoom = ui_zoom_of(&lock(&state.config));
+    let zoom = window_effective_zoom(&lock(&state.config), &window);
     let wa = monitor.work_area();
     let geometry = place_workspace_window(
         (position.x, position.y),
@@ -1464,7 +1464,7 @@ async fn set_main_workspace_layout(
                     .ok_or("main window not found")?;
                 let size = window.inner_size().map_err(|e| e.to_string())?;
                 let factor = window.scale_factor().map_err(|e| e.to_string())?
-                    * ui_zoom_of(&lock(&state.config));
+                    * window_effective_zoom(&lock(&state.config), &window);
                 apply_workspace_region(
                     &window,
                     workspace_region(size.width, size.height, factor, left_extent, right_extent),
@@ -1547,7 +1547,8 @@ fn center_on_cursor_monitor(app: &tauri::AppHandle, window: &tauri::WebviewWindo
     };
 
     let state = app.state::<AppState>();
-    let factor = monitor.scale_factor() * ui_zoom_of(&lock(&state.config));
+    let zoom = ui_zoom_of(&lock(&state.config)) * monitor_fit_zoom(Some(&monitor));
+    let factor = monitor.scale_factor() * zoom;
     let area = monitor.work_area();
     let previous_scale = window.scale_factor().ok();
     log(&format!(
@@ -1564,7 +1565,7 @@ fn center_on_cursor_monitor(app: &tauri::AppHandle, window: &tauri::WebviewWindo
     let mut geometry = place_workspace_window(
         (area.position.x, area.position.y),
         monitor.scale_factor(),
-        ui_zoom_of(&lock(&state.config)),
+        zoom,
         (
             area.position.x,
             area.position.y,
@@ -1640,7 +1641,7 @@ fn resync_workspace_after_dpi_move(app: &tauri::AppHandle, window: &tauri::Webvi
     };
     let state = app.state::<AppState>();
     let scale = window.scale_factor().unwrap_or(1.0);
-    let zoom = ui_zoom_of(&lock(&state.config));
+    let zoom = window_effective_zoom(&lock(&state.config), &window);
     let wa = monitor.work_area();
     let position = window
         .outer_position()
@@ -1778,7 +1779,10 @@ fn build_panel_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, ta
 /// branch of show_panel).
 fn finish_new_panel(app: &tauri::AppHandle, w: tauri::WebviewWindow) {
     log(&format!("[Mnemark] panel created: {:?}", w.label()));
-    let _ = w.set_zoom(ui_zoom_of(&lock(&app.state::<AppState>().config)));
+    let _ = w.set_zoom(window_effective_zoom(
+        &lock(&app.state::<AppState>().config),
+        &w,
+    ));
     center_on_cursor_monitor(app, &w);
     #[cfg(windows)]
     {
@@ -1794,7 +1798,10 @@ fn finish_new_panel(app: &tauri::AppHandle, w: tauri::WebviewWindow) {
             clear_panel_surface(&guard_app, &guard_window);
             if let (Ok(size), Ok(scale)) = (guard_window.inner_size(), guard_window.scale_factor())
             {
-                let zoom = ui_zoom_of(&lock(&guard_app.state::<AppState>().config));
+                let zoom = window_effective_zoom(
+                    &lock(&guard_app.state::<AppState>().config),
+                    &guard_window,
+                );
                 let _ = apply_workspace_region(
                     &guard_window,
                     workspace_region(size.width, size.height, scale * zoom, 0, 0),
@@ -2007,18 +2014,54 @@ fn logical_work_area(monitor: &tauri::Monitor) -> (u32, u32) {
     )
 }
 
+/// Logical work-area size the fixed panel layout was designed against
+/// (1080p at 100% scaling; the height is the 1080p work area after the
+/// taskbar).
+const FIT_REFERENCE_WIDTH: f64 = 1920.0;
+const FIT_REFERENCE_HEIGHT: f64 = 1040.0;
+
+/// Pure math: monitor-fit coefficient for a logical work-area size. On
+/// monitors whose logical resolution far exceeds the reference (a 4K screen
+/// at 100% OS scaling has a 3840px logical work area), the fixed 480px
+/// History card stays a small box in the middle of the screen, so the
+/// applied zoom grows with the logical size, capped at 2x. Monitors at or
+/// below the reference are never shrunk, and the shorter axis wins so a
+/// short-but-wide monitor is not zoomed into a clipped layout.
+fn fit_coefficient(logical_width: u32, logical_height: u32) -> f64 {
+    (logical_width as f64 / FIT_REFERENCE_WIDTH)
+        .min(logical_height as f64 / FIT_REFERENCE_HEIGHT)
+        .clamp(1.0, 2.0)
+}
+
+/// The fit coefficient of `monitor`; 1.0 when the monitor is unknown,
+/// preserving the pre-fit sizing.
+fn monitor_fit_zoom(monitor: Option<&tauri::Monitor>) -> f64 {
+    monitor
+        .map(|m| {
+            let (width, height) = logical_work_area(m);
+            fit_coefficient(width, height)
+        })
+        .unwrap_or(1.0)
+}
+
+/// The zoom a scalable window should use on its current monitor: the user's
+/// UI-scale percentage times the monitor fit coefficient.
+fn window_effective_zoom(config: &AppConfig, window: &tauri::WebviewWindow) -> f64 {
+    ui_zoom_of(config) * monitor_fit_zoom(window.current_monitor().ok().flatten().as_ref())
+}
+
 /// Builder-stage size for a new window: base size scaled by the configured
 /// zoom, clamped to the primary monitor's work area (the window does not
 /// exist yet, so its own monitor is unknown).
 fn zoomed_builder_size(app: &tauri::AppHandle, w: u32, h: u32) -> (f64, f64) {
     let zoom = ui_zoom_of(&lock(&app.state::<AppState>().config));
-    let (max_w, max_h) = app
-        .primary_monitor()
-        .ok()
-        .flatten()
-        .map(|m| logical_work_area(&m))
+    let primary = app.primary_monitor().ok().flatten();
+    let (max_w, max_h) = primary
+        .as_ref()
+        .map(logical_work_area)
         .unwrap_or((u32::MAX, u32::MAX));
-    zoomed_logical_size(w, h, zoom, max_w, max_h)
+    let fit = monitor_fit_zoom(primary.as_ref());
+    zoomed_logical_size(w, h, zoom * fit, max_w, max_h)
 }
 
 /// Apply the webview zoom and matching logical size to one window. Both the
@@ -2028,14 +2071,14 @@ fn apply_window_zoom(window: &tauri::WebviewWindow, zoom: f64) {
     let Some((w, h)) = base_window_size(window.label()) else {
         return;
     };
-    let (max_w, max_h) = window
-        .current_monitor()
-        .ok()
-        .flatten()
-        .map(|m| logical_work_area(&m))
+    let monitor = window.current_monitor().ok().flatten();
+    let (max_w, max_h) = monitor
+        .as_ref()
+        .map(logical_work_area)
         .unwrap_or((u32::MAX, u32::MAX));
-    let (zw, zh) = zoomed_logical_size(w, h, zoom, max_w, max_h);
-    let _ = window.set_zoom(zoom);
+    let fit = monitor_fit_zoom(monitor.as_ref());
+    let (zw, zh) = zoomed_logical_size(w, h, zoom * fit, max_w, max_h);
+    let _ = window.set_zoom(zoom * fit);
     let _ = window.set_size(tauri::LogicalSize::new(zw, zh));
 }
 
@@ -2045,7 +2088,7 @@ fn apply_ui_scale(app: &tauri::AppHandle) {
     let zoom = ui_zoom_of(&lock(&state.config));
     for (label, window) in app.webview_windows() {
         if label == "main" {
-            let _ = window.set_zoom(zoom);
+            let _ = window.set_zoom(window_effective_zoom(&lock(&state.config), &window));
             let state = app.state::<AppState>();
             let left = *lock(&state.workspace_left_extent);
             let right = *lock(&state.workspace_right_extent);
@@ -2497,7 +2540,10 @@ fn open_settings_window(app: &tauri::AppHandle) -> Result<(), tauri::Error> {
         .visible(true)
         .center()
         .build()?;
-    let _ = w.set_zoom(ui_zoom_of(&lock(&app.state::<AppState>().config)));
+    let _ = w.set_zoom(window_effective_zoom(
+        &lock(&app.state::<AppState>().config),
+        &w,
+    ));
 
     let app_handle = app.clone();
     w.on_window_event(move |event| {
@@ -2532,7 +2578,10 @@ fn open_about_dialog(app: &tauri::AppHandle) -> Result<(), tauri::Error> {
         .resizable(false)
         .center()
         .build()?;
-    let _ = w.set_zoom(ui_zoom_of(&lock(&app.state::<AppState>().config)));
+    let _ = w.set_zoom(window_effective_zoom(
+        &lock(&app.state::<AppState>().config),
+        &w,
+    ));
 
     Ok(())
 }
@@ -2579,7 +2628,10 @@ fn open_tutorial_window(app: &tauri::AppHandle) -> Result<(), tauri::Error> {
         .resizable(false)
         .center()
         .build()?;
-    let _ = w.set_zoom(ui_zoom_of(&lock(&app.state::<AppState>().config)));
+    let _ = w.set_zoom(window_effective_zoom(
+        &lock(&app.state::<AppState>().config),
+        &w,
+    ));
 
     let app_handle = app.clone();
     w.on_window_event(move |event| {
@@ -2750,7 +2802,7 @@ mod pause_badge_tests {
 
 #[cfg(test)]
 mod ui_scale_tests {
-    use super::zoomed_logical_size;
+    use super::{fit_coefficient, zoomed_logical_size};
 
     #[test]
     fn zoom_multiplies_base_size() {
@@ -2771,6 +2823,32 @@ mod ui_scale_tests {
         let (w, h) = zoomed_logical_size(0, 0, 1.0, 100, 100);
         assert_eq!(w, 1.0);
         assert_eq!(h, 1.0);
+    }
+
+    #[test]
+    fn fit_matches_reference_at_1080p() {
+        assert_eq!(fit_coefficient(1920, 1040), 1.0);
+    }
+
+    #[test]
+    fn fit_never_shrinks_below_reference() {
+        assert_eq!(fit_coefficient(1366, 728), 1.0);
+    }
+
+    #[test]
+    fn fit_scales_with_high_logical_resolution() {
+        assert!((fit_coefficient(2560, 1400) - 4.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fit_caps_at_double_for_4k_at_100_percent_scaling() {
+        assert_eq!(fit_coefficient(3840, 2112), 2.0);
+        assert_eq!(fit_coefficient(7680, 4224), 2.0);
+    }
+
+    #[test]
+    fn fit_follows_the_shorter_axis_on_short_monitors() {
+        assert_eq!(fit_coefficient(3440, 1040), 1.0);
     }
 }
 
