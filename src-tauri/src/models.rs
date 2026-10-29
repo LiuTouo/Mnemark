@@ -484,7 +484,7 @@ impl Default for AppConfig {
             debounce_ms: 200,
             theme: "system".to_string(),
             ui_opacity_percent: 100,
-            ui_scale_percent: 125,
+            ui_scale_percent: 100,
             language: "zh-TW".to_string(),
             paste_files_as_files: true,
             auto_update: true,
@@ -625,7 +625,7 @@ mod backward_compat_tests {
         let cfg: AppConfig = serde_json::from_str(json).expect("deserialize old config");
         assert!(!cfg.remember_history_filter);
         assert_eq!(cfg.ui_opacity_percent, 100);
-        assert_eq!(cfg.ui_scale_percent, 125);
+        assert_eq!(cfg.ui_scale_percent, 100);
     }
 
     #[test]
@@ -892,8 +892,8 @@ mod sanitize_tests {
     }
 
     #[test]
-    fn scale_defaults_to_125() {
-        assert_eq!(AppConfig::default().ui_scale_percent, 125);
+    fn scale_defaults_to_100() {
+        assert_eq!(AppConfig::default().ui_scale_percent, 100);
     }
 
     #[test]
