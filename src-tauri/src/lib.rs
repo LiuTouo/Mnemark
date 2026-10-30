@@ -1641,7 +1641,7 @@ fn resync_workspace_after_dpi_move(app: &tauri::AppHandle, window: &tauri::Webvi
     };
     let state = app.state::<AppState>();
     let scale = window.scale_factor().unwrap_or(1.0);
-    let zoom = window_effective_zoom(&lock(&state.config), &window);
+    let zoom = window_effective_zoom(&lock(&state.config), window);
     let wa = monitor.work_area();
     let position = window
         .outer_position()
