@@ -1409,6 +1409,10 @@ fn apply_main_workspace_layout(
         .map_err(|e| format!("main outer_position failed: {:?}", e))?;
     let scale = window.scale_factor().unwrap_or(1.0);
     let zoom = window_effective_zoom(&lock(&state.config), &window);
+    // Bounds and viewport acknowledgement must use the zoom actually applied to WebView2.
+    window
+        .set_zoom(zoom)
+        .map_err(|e| format!("workspace zoom failed: {e}"))?;
     let wa = monitor.work_area();
     let geometry = place_workspace_window(
         (position.x, position.y),
@@ -1548,6 +1552,11 @@ fn center_on_cursor_monitor(app: &tauri::AppHandle, window: &tauri::WebviewWindo
 
     let state = app.state::<AppState>();
     let zoom = ui_zoom_of(&lock(&state.config)) * monitor_fit_zoom(Some(&monitor));
+    // The destination's fit can differ even when both monitors have the same DPI.
+    if let Err(e) = window.set_zoom(zoom) {
+        log(&format!("[Mnemark] workspace placement zoom failed: {e}"));
+        return;
+    }
     let factor = monitor.scale_factor() * zoom;
     let area = monitor.work_area();
     let previous_scale = window.scale_factor().ok();
@@ -1642,6 +1651,10 @@ fn resync_workspace_after_dpi_move(app: &tauri::AppHandle, window: &tauri::Webvi
     let state = app.state::<AppState>();
     let scale = window.scale_factor().unwrap_or(1.0);
     let zoom = window_effective_zoom(&lock(&state.config), window);
+    if let Err(e) = window.set_zoom(zoom) {
+        log(&format!("[Mnemark] dpi resync zoom failed: {e}"));
+        return;
+    }
     let wa = monitor.work_area();
     let position = window
         .outer_position()
