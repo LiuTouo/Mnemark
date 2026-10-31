@@ -4,6 +4,13 @@
 
 格式參考 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)，版本號遵循[語意化版本](https://semver.org/lang/zh-TW/)。
 
+## [0.8.18] - 2026-11-01
+
+### Fixed
+
+- 修正面板版型重算時只計算縮放係數、未實際套用到 WebView2，導致抽屜與預覽窗格消失的問題：主版型套用、游標所在螢幕置中、跨 DPI 移動後重新同步三條路徑，現在都會在計算視窗邊界與 viewport 之前，先將有效的介面縮放寫入 WebView2，確保兩者使用同一組縮放，抽屜與預覽能正確恢復顯示
+- 新增工作區縮放同步的單元測試，覆蓋各版型路徑的縮放一致性
+
 ## [0.8.17] - 2026-10-30
 
 ### Fixed
@@ -649,6 +656,7 @@
 
 - 初始版本：剪貼簿監聽（文字／圖片／檔案路徑）、SHA-256 內容去重、容量限制與淘汰、釘選（上限 10 則、永不淘汰）、即時搜尋、Raycast 風格浮動面板（`Ctrl+Shift+V`）、貼上模擬、刪除復原、系統匣常駐、排除清單、深淺色主題跟隨系統、免安裝可攜（設定存於 exe 旁）
 
+[0.8.18]: https://github.com/LiuTouo/Mnemark/compare/v0.8.17...v0.8.18
 [0.8.17]: https://github.com/LiuTouo/Mnemark/compare/v0.8.16...v0.8.17
 [0.8.16]: https://github.com/LiuTouo/Mnemark/compare/v0.8.15...v0.8.16
 [0.8.15]: https://github.com/LiuTouo/Mnemark/compare/v0.8.14...v0.8.15
