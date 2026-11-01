@@ -180,6 +180,25 @@ function drawerIsOpen(): boolean {
   return currentDrawerView()?.open ?? false;
 }
 
+function drawerShouldRestoreOpen(): boolean {
+  try {
+    return localStorage.getItem(DRAWER_OPEN_KEY) !== "0";
+  } catch {
+    // Unreadable storage falls through to the default (open).
+    return true;
+  }
+}
+
+/** Retry a boot-time restore whose read failed. No-op while the drawer view
+ * is still unavailable: only a successful read publishing a closed drawer
+ * re-opens it, so a permanently unavailable backend cannot toast-spam on
+ * every focus. */
+function restoreDrawerOpenIfNeeded(): void {
+  if (drawerShouldRestoreOpen() && currentDrawerView()?.open === false) {
+    void drawerViewCoordinator.setOpen(true);
+  }
+}
+
 function activeDataset(): readonly DisplayItem[] {
   return selectedCollectionId() === null ? history.view : drawerSnapshots();
 }
@@ -265,8 +284,10 @@ function renderPanelDrawerView(next: DrawerView, previous: DrawerView | null): v
   }
   if (next.open && previous?.open !== true) workspaceTab = "drawer";
   // Remember the drawer's expanded state across restarts. The initial
-  // publish (previous === null) reflects backend defaults, not a user choice.
-  if (previous !== null) {
+  // publish (previous === null) reflects backend defaults, not a user choice,
+  // and republishing an unchanged state must not overwrite the stored
+  // preference while a failed boot restore is still pending.
+  if (previous !== null && previous.open !== next.open) {
     try {
       localStorage.setItem(DRAWER_OPEN_KEY, next.open ? "1" : "0");
     } catch {
@@ -303,25 +324,25 @@ async function init() {
   }
 
   // Restore the drawer's last expanded state; default to open on first run.
-  // Opening here goes through the same coordinator path as the toggle button,
-  // so the workspace layout/window resize flows normally.
-  let storedDrawerOpen: string | null = null;
-  try {
-    storedDrawerOpen = localStorage.getItem(DRAWER_OPEN_KEY);
-  } catch {
-    // Unreadable storage falls through to the default (open).
-  }
-  if ((storedDrawerOpen === null || storedDrawerOpen === "1")
-    && currentDrawerView()?.open === false) {
+  // Opening goes through the same coordinator path as the toggle button, so
+  // the workspace layout/window resize flows normally. Attempt it even when
+  // the first view read failed (view is null): setOpen re-enters the
+  // projection, which retries the read, so one transient boot failure no
+  // longer leaves the drawer closed for the whole session.
+  if (drawerShouldRestoreOpen() && currentDrawerView()?.open !== true) {
     void drawerViewCoordinator.setOpen(true);
   }
 
   await getCurrentWindow().onFocusChanged(({ payload: focused }) => {
     if (!focused) return;
     resyncPreviewState();
-    void drawerViewProjection.retryIfStale().catch((error) => {
-      console.error("Failed to retry stale Drawer view:", error);
-    });
+    // A boot restore that failed (transient read error) heals here: the
+    // refresh republishes the view and a still-pending restore re-opens.
+    void drawerViewProjection.retryIfStale()
+      .then(restoreDrawerOpenIfNeeded)
+      .catch((error) => {
+        console.error("Failed to retry stale Drawer view:", error);
+      });
     refreshConfig().then(() => {
       applyI18n();
       updateFavoritesToggleA11y();

@@ -13,6 +13,11 @@ pub(crate) struct DrawerState {
     favorites: Option<FavoritesStore>,
     ui: DrawerUiState,
     generation: u64,
+    // The store is opened once at boot; when that failed (database briefly
+    // locked or missing), drawer commands retry the open so the drawer
+    // recovers without an app restart. A fn pointer keeps the aggregate
+    // cheap; tests substitute a stub.
+    reopen_store: fn() -> Result<FavoritesStore, String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -40,6 +45,7 @@ impl DrawerState {
             favorites,
             ui: DrawerUiState::default(),
             generation: 0,
+            reopen_store: FavoritesStore::open,
         }
     }
 
@@ -47,14 +53,24 @@ impl DrawerState {
         self.favorites.is_some()
     }
 
-    pub(crate) fn view(&self) -> Result<DrawerViewState, String> {
+    /// Reopen the store when boot failed; a no-op once it is available.
+    fn ensure_favorites(&mut self) -> Result<(), String> {
+        if self.favorites.is_none() {
+            self.favorites = Some((self.reopen_store)()?);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn view(&mut self) -> Result<DrawerViewState, String> {
+        self.ensure_favorites()?;
         let favorites = self
             .favorites
             .as_ref()
             .ok_or_else(|| "Favorites unavailable".to_string())?;
+        let selected = self.ui.selected_collection.clone();
         let collections = favorites.list_collections()?;
-        let active_snapshots = match &self.ui.selected_collection {
-            Some(collection_id) => favorites.list_items(collection_id)?,
+        let active_snapshots = match selected {
+            Some(collection_id) => favorites.list_items(&collection_id)?,
             None => Vec::new(),
         };
         Ok(DrawerViewState {
@@ -88,10 +104,12 @@ impl DrawerState {
             .generation
             .checked_add(1)
             .ok_or_else(|| "Drawer generation exhausted".to_string())?;
-        let favorites = self
-            .favorites
-            .as_mut()
-            .ok_or_else(|| "Favorites unavailable".to_string())?;
+        self.ensure_favorites()?;
+        let favorites = match self.favorites.as_mut() {
+            Some(favorites) => favorites,
+            // Unreachable after ensure_favorites; keeps the match total.
+            None => return Err("Favorites unavailable".to_string()),
+        };
         let value = operation(favorites, &mut self.ui)?;
         self.generation = next_generation;
         Ok(DrawerMutation {
@@ -222,7 +240,7 @@ impl DrawerState {
 mod tests {
     use rusqlite::Connection;
 
-    use super::DrawerState;
+    use super::{DrawerState, DrawerUiState};
     use crate::favorites::FavoritesStore;
     use crate::models::{ClipKind, FavoriteItem};
 
@@ -255,7 +273,7 @@ mod tests {
 
     #[test]
     fn canonical_view_starts_from_one_authoritative_empty_state() {
-        let state = available_state();
+        let mut state = available_state();
 
         let view = state.view().unwrap();
 
@@ -433,13 +451,32 @@ mod tests {
         assert_eq!(view.collections[1].item_count, 0);
     }
 
+    fn unavailable_state() -> DrawerState {
+        DrawerState {
+            favorites: None,
+            ui: DrawerUiState::default(),
+            generation: 0,
+            reopen_store: locked_store_stub,
+        }
+    }
+
+    fn locked_store_stub() -> Result<FavoritesStore, String> {
+        Err("Favorites unavailable".to_string())
+    }
+
+    fn recovered_store_stub() -> Result<FavoritesStore, String> {
+        Ok(FavoritesStore::from_conn(
+            Connection::open_in_memory().unwrap(),
+        ))
+    }
+
     #[test]
     fn unavailable_store_rejects_canonical_read_and_every_mutation() {
         fn assert_unavailable<T>(result: Result<T, String>) {
             assert_eq!(result.err().as_deref(), Some("Favorites unavailable"));
         }
 
-        let mut state = DrawerState::new(None);
+        let mut state = unavailable_state();
         let item = snapshot("item");
         let ids = vec!["id".to_string()];
 
@@ -457,5 +494,17 @@ mod tests {
         assert_unavailable(state.set_open(true));
         assert_unavailable(state.toggle_open());
         assert_unavailable(state.set_selected(Some("id".to_string())));
+    }
+
+    #[test]
+    fn drawer_recovers_when_a_boot_failed_store_becomes_available_again() {
+        let mut state = unavailable_state();
+        assert_eq!(state.view().err().as_deref(), Some("Favorites unavailable"));
+
+        state.reopen_store = recovered_store_stub;
+        state.set_open(true).unwrap();
+
+        let view = state.view().unwrap();
+        assert!(view.open);
     }
 }

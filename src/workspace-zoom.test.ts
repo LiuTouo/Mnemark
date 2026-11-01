@@ -17,6 +17,17 @@ for (const name of ["apply_main_workspace_layout", "center_on_cursor_monitor", "
   });
 }
 
+it("set_main_workspace_layout re-asserts the zoom before resize-skipping commits", () => {
+  const start = nativeSource.indexOf("async fn set_main_workspace_layout(");
+  expect(start).toBeGreaterThan(-1);
+  const body = nativeSource.slice(start, nativeSource.indexOf("\nfn ", start + 1));
+  const zoom = body.search(/set_zoom\(zoom\)/);
+  expect(zoom).toBeGreaterThan(-1);
+  // The commit branch (first apply_workspace_region call in the body) must
+  // not trust a possibly desynced WebView2 zoom.
+  expect(zoom).toBeLessThan(body.indexOf("apply_workspace_region("));
+});
+
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 it("acknowledges synchronized FHD/4K viewports across OS and UI scaling combinations", async () => {

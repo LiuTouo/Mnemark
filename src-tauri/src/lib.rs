@@ -553,9 +553,9 @@ fn set_located_clip_note(
 /// Run a read against the authoritative Drawer aggregate.
 fn with_drawer<T>(
     state: &AppState,
-    read: impl FnOnce(&DrawerState) -> Result<T, String>,
+    read: impl FnOnce(&mut DrawerState) -> Result<T, String>,
 ) -> Result<T, String> {
-    read(&lock(&state.drawer))
+    read(&mut lock(&state.drawer))
 }
 
 /// Apply one Drawer mutation while holding the aggregate lock, then publish
@@ -1466,9 +1466,17 @@ async fn set_main_workspace_layout(
                 let window = handle
                     .get_webview_window("main")
                     .ok_or("main window not found")?;
+                // Even a resize-skipping commit re-asserts the zoom:
+                // apply_ui_scale and cross-monitor moves can desync WebView2
+                // while the coordinator's cached geometry (same extents and
+                // environment) skips apply_main_workspace_layout entirely,
+                // and a stale zoom clips the side panes out of the viewport.
+                let zoom = window_effective_zoom(&lock(&state.config), &window);
+                window
+                    .set_zoom(zoom)
+                    .map_err(|e| format!("workspace zoom failed: {e}"))?;
                 let size = window.inner_size().map_err(|e| e.to_string())?;
-                let factor = window.scale_factor().map_err(|e| e.to_string())?
-                    * window_effective_zoom(&lock(&state.config), &window);
+                let factor = window.scale_factor().map_err(|e| e.to_string())? * zoom;
                 apply_workspace_region(
                     &window,
                     workspace_region(size.width, size.height, factor, left_extent, right_extent),
@@ -1723,8 +1731,11 @@ fn show_panel(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         log("[Mnemark] panel exists, showing");
         disable_panel_transitions(&window);
-        let _ = window.emit("main-panel-reset", ());
         center_on_cursor_monitor(app, &window);
+        // Emit after placement: the reset handler measures its monitor on
+        // arrival, so it must not observe the pre-move monitor and size the
+        // workspace for a screen the panel is no longer on.
+        let _ = window.emit("main-panel-reset", ());
         let _ = window.show();
         strip_panel_caption(&window);
         let _ = window.set_focus();
