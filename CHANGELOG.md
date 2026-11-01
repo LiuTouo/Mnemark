@@ -4,6 +4,14 @@
 
 格式參考 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)，版本號遵循[語意化版本](https://semver.org/lang/zh-TW/)。
 
+## [0.8.20] - 2026-11-01
+
+### Fixed
+
+- 修正部分環境（例如 Windows 協助工具「文字大小」非 100%）下，開啟抽屜或預覽時窗格永遠不出現、面板只剩中間的問題：現場日誌證實，WebView2 回報的 `devicePixelRatio` 會被額外的系統縮放層放大（例如 4K 150% + 介面 75% 時實測 1.51875，而後端模型僅 1.125），固定 1216px 的工作區因此只得到 901px 的可視寬度，版型確認永遠逾時、窗格每次顯示都被隱藏；任何縮放同步修復都會被同一因子抵銷
+- 前端現在每次版型呼叫都回報實測的 `devicePixelRatio`，後端改以實測值決定視窗物理尺寸、可見區域與回傳 viewport（模型值僅作為首次量測前的後備），版面決策的可用 CSS 寬度也改用實測值——任何現存或未來的縮放層都會被自動吸收
+- 新增回歸測試：文字縮放環境下版型以實測 dpr 收斂，以及後端縮放因子的純函式單元測試
+
 ## [0.8.19] - 2026-11-01
 
 ### Fixed
@@ -668,6 +676,7 @@
 
 - 初始版本：剪貼簿監聽（文字／圖片／檔案路徑）、SHA-256 內容去重、容量限制與淘汰、釘選（上限 10 則、永不淘汰）、即時搜尋、Raycast 風格浮動面板（`Ctrl+Shift+V`）、貼上模擬、刪除復原、系統匣常駐、排除清單、深淺色主題跟隨系統、免安裝可攜（設定存於 exe 旁）
 
+[0.8.20]: https://github.com/LiuTouo/Mnemark/compare/v0.8.19...v0.8.20
 [0.8.19]: https://github.com/LiuTouo/Mnemark/compare/v0.8.18...v0.8.19
 [0.8.18]: https://github.com/LiuTouo/Mnemark/compare/v0.8.17...v0.8.18
 [0.8.17]: https://github.com/LiuTouo/Mnemark/compare/v0.8.16...v0.8.17
