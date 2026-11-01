@@ -1285,19 +1285,6 @@ fn set_workspace_bounds(
     Ok(())
 }
 
-fn place_workspace_window(
-    current_pos: (i32, i32),
-    scale: f64,
-    zoom: f64,
-    work_area: (i32, i32, u32, u32),
-) -> WorkspaceGeometry {
-    place_workspace_window_at(
-        current_pos,
-        effective_viewport_scale(scale, zoom, 0.0),
-        work_area,
-    )
-}
-
 /// The CSS→physical factor the webview actually renders with. The modeled
 /// scale × zoom misses layered factors (Windows text scaling multiplies
 /// itself into the DOM devicePixelRatio), so a measured value from the
@@ -2993,7 +2980,8 @@ mod center_coords_tests {
 #[cfg(test)]
 mod workspace_placement_tests {
     use super::{
-        effective_viewport_scale, place_workspace_window, sanitize_viewport_scale, workspace_region,
+        effective_viewport_scale, place_workspace_window_at, sanitize_viewport_scale,
+        workspace_region,
     };
 
     #[test]
@@ -3020,7 +3008,7 @@ mod workspace_placement_tests {
 
     #[test]
     fn left_pane_keeps_history_anchor_when_space_allows() {
-        let p = place_workspace_window((500, 100), 1.0, 1.0, (0, 0, 1920, 1080));
+        let p = place_workspace_window_at((500, 100), 1.0 * 1.0, (0, 0, 1920, 1080));
         let closed = workspace_region(p.physical_width, p.physical_height, 1.0, 0, 0);
         let opened = workspace_region(p.physical_width, p.physical_height, 1.0, 368, 0);
         assert_eq!(p.x, 500);
@@ -3030,29 +3018,29 @@ mod workspace_placement_tests {
 
     #[test]
     fn full_workspace_uses_both_extents() {
-        let p = place_workspace_window((700, 100), 1.0, 1.0, (0, 0, 1920, 1080));
+        let p = place_workspace_window_at((700, 100), 1.0 * 1.0, (0, 0, 1920, 1080));
         assert_eq!(p.physical_width, 1216);
         assert_eq!(p.physical_height, 620);
     }
 
     #[test]
     fn workspace_clamps_into_negative_monitor_work_area() {
-        let p = place_workspace_window((-1900, 100), 1.0, 1.0, (-1920, 0, 1920, 1080));
+        let p = place_workspace_window_at((-1900, 100), 1.0 * 1.0, (-1920, 0, 1920, 1080));
         assert!(p.x >= -1920);
         assert!(p.x + p.physical_width as i32 <= 0);
     }
 
     #[test]
     fn dpi_and_ui_zoom_scale_workspace_once_each() {
-        let p = place_workspace_window((500, 100), 1.5, 1.25, (0, 0, 2560, 1440));
+        let p = place_workspace_window_at((500, 100), 1.5 * 1.25, (0, 0, 2560, 1440));
         assert_eq!(p.physical_width, (1216.0_f64 * 1.5 * 1.25).round() as u32);
         assert_eq!(p.physical_height, (620.0_f64 * 1.5 * 1.25).round() as u32);
     }
 
     #[test]
     fn closing_left_pane_restores_history_origin_without_moving_right_preview() {
-        let opened = place_workspace_window((700, 100), 1.0, 1.0, (0, 0, 1920, 1080));
-        let closed = place_workspace_window((opened.x, opened.y), 1.0, 1.0, (0, 0, 1920, 1080));
+        let opened = place_workspace_window_at((700, 100), 1.0 * 1.0, (0, 0, 1920, 1080));
+        let closed = place_workspace_window_at((opened.x, opened.y), 1.0 * 1.0, (0, 0, 1920, 1080));
         assert_eq!(closed.x, 700);
         assert_eq!(closed, opened);
         let with_drawer = workspace_region(1216, 620, 1.0, 368, 368);
@@ -3064,14 +3052,14 @@ mod workspace_placement_tests {
     #[test]
     fn repeating_the_same_layout_does_not_drift_at_fractional_scale() {
         let area = (-2560, -200, 2560, 1440);
-        let first = place_workspace_window((-1600, 100), 1.5, 1.25, area);
-        let again = place_workspace_window((first.x, first.y), 1.5, 1.25, area);
+        let first = place_workspace_window_at((-1600, 100), 1.5 * 1.25, area);
+        let again = place_workspace_window_at((first.x, first.y), 1.5 * 1.25, area);
         assert_eq!(first, again);
     }
 
     #[test]
     fn workspace_cannot_extend_past_a_smaller_work_area() {
-        let geometry = place_workspace_window((100, 100), 1.5, 1.5, (0, 0, 800, 600));
+        let geometry = place_workspace_window_at((100, 100), 1.5 * 1.5, (0, 0, 800, 600));
         assert_eq!((geometry.x, geometry.y), (0, 0));
         assert_eq!(
             (geometry.physical_width, geometry.physical_height),
