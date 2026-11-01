@@ -75,6 +75,7 @@ it("re-checks the workspace layout every time the panel is re-shown", async () =
   await import("./main");
   window.dispatchEvent(new Event("DOMContentLoaded"));
   await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith("set_main_workspace_layout", {
+    viewportScale: 1,
     leftExtent: 0, rightExtent: 0, commit: true,
   }));
   native.invoke.mockClear();
@@ -82,6 +83,7 @@ it("re-checks the workspace layout every time the panel is re-shown", async () =
   // emits main-panel-reset right before every show_panel.
   native.events.get("main-panel-reset")?.();
   await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith("set_main_workspace_layout", {
+    viewportScale: 1,
     leftExtent: 0, rightExtent: 0, commit: true,
   }));
 });
