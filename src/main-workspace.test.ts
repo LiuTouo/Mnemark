@@ -153,6 +153,7 @@ it("reveals the drawer only after region preparation and releases unused space a
   window.dispatchEvent(new Event("DOMContentLoaded"));
   await vi.waitFor(() => expect(document.querySelector<HTMLButtonElement>("#favorites-toggle")!.disabled).toBe(false));
   await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith("set_main_workspace_layout", {
+    viewportScale: 1,
     leftExtent: 0, rightExtent: 0, commit: true,
   }));
   let finish!: (geometry: { cssWidth: number; cssHeight: number }) => void;
@@ -164,6 +165,7 @@ it("reveals the drawer only after region preparation and releases unused space a
   native.invoke.mockClear();
   native.publish(true);
   await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith("set_main_workspace_layout", {
+    viewportScale: 1,
     leftExtent: 368, rightExtent: 0,
   }));
   const drawer = document.getElementById("workspace-drawer")!;
@@ -173,12 +175,14 @@ it("reveals the drawer only after region preparation and releases unused space a
   await vi.waitFor(() => expect(drawer.classList.contains("hidden")).toBe(false));
   expect(document.getElementById("workspace")!.style.getPropertyValue("--left-extent")).toBe("368px");
   await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith("set_main_workspace_layout", {
+    viewportScale: 1,
     leftExtent: 368, rightExtent: 0, commit: true,
   }));
   native.invoke.mockClear();
   native.publish(false);
   expect(drawer.classList.contains("hidden")).toBe(true);
   await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith("set_main_workspace_layout", {
+    viewportScale: 1,
     leftExtent: 0, rightExtent: 0, commit: true,
   }));
   expect(window.innerWidth).toBe(1216);
@@ -194,17 +198,42 @@ it("decides the layout from the monitor scale factor, not a stale devicePixelRat
   await import("./main");
   window.dispatchEvent(new Event("DOMContentLoaded"));
   await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith("set_main_workspace_layout", {
+    viewportScale: 1.875,
     leftExtent: 0, rightExtent: 0, commit: true,
   }));
   native.publish(true);
   await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith("set_main_workspace_layout", {
+    viewportScale: 1.875,
     leftExtent: 368, rightExtent: 0,
   }));
   // Drain the coordinator's pending commit before the test ends: a leaked
   // finish chain would fire inside the next test's settle window.
   await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith("set_main_workspace_layout", {
+    viewportScale: 1.875,
     leftExtent: 368, rightExtent: 0, commit: true,
   }));
+});
+
+it("sizes the workspace from the measured DOM devicePixelRatio", async () => {
+  // Field evidence (v0.8.15 log): Windows text scaling multiplies itself
+  // into the DOM dpr — a 4K 150% monitor at 75% UI zoom reported dpr 1.51875
+  // while the backend modeled 1.125, so the viewport acknowledgement could
+  // never match and the panes stayed hidden forever.
+  const textScaledDpr = 1.5187500715255737;
+  native.monitor = { workArea: { size: { width: 3840 } }, scaleFactor: 1.5 };
+  Object.defineProperty(window, "devicePixelRatio", { configurable: true, value: textScaledDpr });
+  await import("./main");
+  window.dispatchEvent(new Event("DOMContentLoaded"));
+  await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith(
+    "set_main_workspace_layout",
+    expect.objectContaining({ viewportScale: textScaledDpr }),
+  ));
+  // 3840 / 1.51875 = 2528 css px — comfortably wide, drawer opens normally.
+  native.publish(true);
+  await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith(
+    "set_main_workspace_layout",
+    expect.objectContaining({ leftExtent: 368, rightExtent: 0, viewportScale: textScaledDpr }),
+  ));
 });
 
 function fireFocus(): void {
@@ -220,6 +249,7 @@ it("restores the stored drawer-open state even when the first boot read failed",
   window.dispatchEvent(new Event("DOMContentLoaded"));
   await new Promise((resolve) => setTimeout(resolve, 20));
   expect(native.invoke).not.toHaveBeenCalledWith("set_main_workspace_layout", {
+    viewportScale: 1,
     leftExtent: 368, rightExtent: 0,
   });
 
@@ -229,9 +259,11 @@ it("restores the stored drawer-open state even when the first boot read failed",
   fireFocus();
 
   await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith("set_main_workspace_layout", {
+    viewportScale: 1,
     leftExtent: 368, rightExtent: 0,
   }));
   await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith("set_main_workspace_layout", {
+    viewportScale: 1,
     leftExtent: 368, rightExtent: 0, commit: true,
   }));
   expect(localStorage.getItem("mnemark.drawer-open")).toBe("1");
@@ -246,6 +278,7 @@ it("heals a failed boot restore on the next focus instead of staying closed", as
   window.dispatchEvent(new Event("DOMContentLoaded"));
   await new Promise((resolve) => setTimeout(resolve, 20));
   expect(native.invoke).not.toHaveBeenCalledWith("set_main_workspace_layout", {
+    viewportScale: 1,
     leftExtent: 368, rightExtent: 0,
   });
 
@@ -254,6 +287,7 @@ it("heals a failed boot restore on the next focus instead of staying closed", as
   fireFocus();
   await new Promise((resolve) => setTimeout(resolve, 20));
   expect(native.invoke).not.toHaveBeenCalledWith("set_main_workspace_layout", {
+    viewportScale: 1,
     leftExtent: 368, rightExtent: 0,
   });
   // The healed read republished the closed drawer without clobbering the
@@ -266,9 +300,11 @@ it("heals a failed boot restore on the next focus instead of staying closed", as
   fireFocus();
 
   await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith("set_main_workspace_layout", {
+    viewportScale: 1,
     leftExtent: 368, rightExtent: 0,
   }));
   await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith("set_main_workspace_layout", {
+    viewportScale: 1,
     leftExtent: 368, rightExtent: 0, commit: true,
   }));
   expect(localStorage.getItem("mnemark.drawer-open")).toBe("1");

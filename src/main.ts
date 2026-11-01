@@ -126,6 +126,11 @@ const workspaceLayout = new WorkspaceLayoutCoordinator({
   resize: (layout) => invoke<WorkspaceViewport>("set_main_workspace_layout", {
     leftExtent: layout.leftExtent,
     rightExtent: layout.rightExtent,
+    // The DOM's devicePixelRatio is the ground truth for the CSS→physical
+    // mapping: layered factors (Windows text scaling) multiply into it beyond
+    // the backend's scale × zoom model, and sizing the host from the model
+    // alone can never fill the viewport those environments actually render.
+    viewportScale: window.devicePixelRatio || undefined,
   }),
   waitForViewport: waitForWorkspaceViewport,
   commit: commitWorkspaceLayout,
@@ -134,6 +139,7 @@ const workspaceLayout = new WorkspaceLayoutCoordinator({
     await invoke("set_main_workspace_layout", {
       leftExtent: layout.leftExtent,
       rightExtent: layout.rightExtent,
+      viewportScale: window.devicePixelRatio || undefined,
       commit: true,
     });
   },
@@ -240,8 +246,11 @@ async function applyWorkspaceLayout(): Promise<void> {
     : window.screen.availHeight;
   const fit = fitCoefficient(logicalWidth, logicalHeight);
   const factor = scaleFactor * uiScaleZoom * fit;
+  // The measured DOM dpr (not the model) decides how much CSS room the
+  // physical work area really offers.
+  const cssFactor = window.devicePixelRatio || factor;
   const availableCssWidth = monitor
-    ? monitor.workArea.size.width / factor
+    ? monitor.workArea.size.width / cssFactor
     : window.screen.availWidth;
   const layout = decideWorkspaceLayout(
     availableCssWidth,
@@ -251,7 +260,7 @@ async function applyWorkspaceLayout(): Promise<void> {
   );
   if (revision !== workspaceLayoutRevision) return;
 
-  const environment = JSON.stringify([monitor?.workArea ?? null, availableCssWidth, factor]);
+  const environment = JSON.stringify([monitor?.workArea ?? null, availableCssWidth, factor, cssFactor]);
   await workspaceLayout.request(layout, environment);
 }
 

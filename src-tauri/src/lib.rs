@@ -82,6 +82,13 @@ struct AppState {
     /// drawing/input region when reopening or changing display scale.
     workspace_left_extent: Arc<Mutex<u32>>,
     workspace_right_extent: Arc<Mutex<u32>>,
+    /// Measured CSS→physical factor of the main window's webview (the DOM's
+    /// devicePixelRatio). Layered environments (Windows text scaling, WebView2
+    /// zoom quantization) multiply into it beyond the modeled scale × zoom,
+    /// so sizing the fixed 1216px host from the model alone can never fill
+    /// the modeled viewport; the measured value is the only ground truth.
+    /// 0.0 until the frontend reports a measurement.
+    viewport_scale: Arc<Mutex<f64>>,
 }
 
 /// Handles to the tray menu items, kept so their labels can be re-localized
@@ -1284,8 +1291,41 @@ fn place_workspace_window(
     zoom: f64,
     work_area: (i32, i32, u32, u32),
 ) -> WorkspaceGeometry {
+    place_workspace_window_at(
+        current_pos,
+        effective_viewport_scale(scale, zoom, 0.0),
+        work_area,
+    )
+}
+
+/// The CSS→physical factor the webview actually renders with. The modeled
+/// scale × zoom misses layered factors (Windows text scaling multiplies
+/// itself into the DOM devicePixelRatio), so a measured value from the
+/// frontend always wins; the model is only the pre-measurement fallback.
+fn effective_viewport_scale(scale: f64, zoom: f64, measured: f64) -> f64 {
+    if measured >= MIN_VIEWPORT_SCALE {
+        measured
+    } else {
+        scale * zoom
+    }
+}
+
+/// Sanitized `viewport_scale` argument from the frontend: out-of-range or
+/// non-finite values are dropped rather than clamped so a bogus measurement
+/// falls back to the model instead of pinning a wrong size.
+fn sanitize_viewport_scale(value: Option<f64>) -> Option<f64> {
+    value.filter(|v| v.is_finite() && (MIN_VIEWPORT_SCALE..=MAX_VIEWPORT_SCALE).contains(v))
+}
+
+const MIN_VIEWPORT_SCALE: f64 = 0.1;
+const MAX_VIEWPORT_SCALE: f64 = 8.0;
+
+fn place_workspace_window_at(
+    current_pos: (i32, i32),
+    factor: f64,
+    work_area: (i32, i32, u32, u32),
+) -> WorkspaceGeometry {
     let (wx, wy, ww, wh) = work_area;
-    let factor = scale * zoom;
     // Changing HWND bounds presents the old WebView2 surface at the new origin
     // before Chromium paints. Reserve the whole workspace for this monitor;
     // drawer/preview changes only alter DOM and the input/drawing region.
@@ -1413,11 +1453,11 @@ fn apply_main_workspace_layout(
     window
         .set_zoom(zoom)
         .map_err(|e| format!("workspace zoom failed: {e}"))?;
+    let factor = effective_viewport_scale(scale, zoom, *lock(&state.viewport_scale));
     let wa = monitor.work_area();
-    let geometry = place_workspace_window(
+    let geometry = place_workspace_window_at(
         (position.x, position.y),
-        scale,
-        zoom,
+        factor,
         (wa.position.x, wa.position.y, wa.size.width, wa.size.height),
     );
     set_workspace_bounds(&window, geometry)?;
@@ -1426,7 +1466,7 @@ fn apply_main_workspace_layout(
         workspace_region(
             geometry.physical_width,
             geometry.physical_height,
-            scale * zoom,
+            factor,
             left_extent,
             right_extent,
         ),
@@ -1436,11 +1476,11 @@ fn apply_main_workspace_layout(
     *lock(&state.workspace_right_extent) = right_extent;
     let size = window.inner_size().map_err(|e| e.to_string())?;
     let viewport = WorkspaceViewport {
-        css_width: size.width as f64 / (scale * zoom),
-        css_height: size.height as f64 / (scale * zoom),
+        css_width: size.width as f64 / factor,
+        css_height: size.height as f64 / factor,
     };
     log(&format!(
-        "[Mnemark] workspace layout: extents {left_extent}/{right_extent} monitor scale {} window scale {scale} zoom {zoom} inner {}x{} viewport {:.0}x{:.0}",
+        "[Mnemark] workspace layout: extents {left_extent}/{right_extent} monitor scale {} window scale {scale} zoom {zoom} viewport scale {factor:.6} inner {}x{} viewport {:.0}x{:.0}",
         monitor.scale_factor(),
         size.width,
         size.height,
@@ -1455,12 +1495,20 @@ async fn set_main_workspace_layout(
     left_extent: u32,
     right_extent: u32,
     commit: Option<bool>,
+    viewport_scale: Option<f64>,
     app: tauri::AppHandle,
 ) -> Result<WorkspaceViewport, String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let handle = app.clone();
     app.run_on_main_thread(move || {
         let state = handle.state::<AppState>();
+        // The DOM's devicePixelRatio is the only ground truth for the
+        // CSS→physical mapping: layered factors (Windows text scaling)
+        // multiply into it beyond the modeled scale × zoom, and a window
+        // sized from the model alone can never fill the modeled viewport.
+        if let Some(measured) = sanitize_viewport_scale(viewport_scale) {
+            *lock(&state.viewport_scale) = measured;
+        }
         if commit == Some(true) {
             let result = (|| {
                 let window = handle
@@ -1476,7 +1524,11 @@ async fn set_main_workspace_layout(
                     .set_zoom(zoom)
                     .map_err(|e| format!("workspace zoom failed: {e}"))?;
                 let size = window.inner_size().map_err(|e| e.to_string())?;
-                let factor = window.scale_factor().map_err(|e| e.to_string())? * zoom;
+                let factor = effective_viewport_scale(
+                    window.scale_factor().unwrap_or(1.0),
+                    zoom,
+                    *lock(&state.viewport_scale),
+                );
                 apply_workspace_region(
                     &window,
                     workspace_region(size.width, size.height, factor, left_extent, right_extent),
@@ -1565,11 +1617,12 @@ fn center_on_cursor_monitor(app: &tauri::AppHandle, window: &tauri::WebviewWindo
         log(&format!("[Mnemark] workspace placement zoom failed: {e}"));
         return;
     }
-    let factor = monitor.scale_factor() * zoom;
+    let factor =
+        effective_viewport_scale(monitor.scale_factor(), zoom, *lock(&state.viewport_scale));
     let area = monitor.work_area();
     let previous_scale = window.scale_factor().ok();
     log(&format!(
-        "[Mnemark] panel show: cursor monitor scale {} work area {}x{} at ({},{}) window scale {previous_scale:?} inner {:?} extents {}/{}",
+        "[Mnemark] panel show: cursor monitor scale {} work area {}x{} at ({},{}) window scale {previous_scale:?} inner {:?} extents {}/{} viewport scale {factor:.6}",
         monitor.scale_factor(),
         area.size.width,
         area.size.height,
@@ -1579,10 +1632,9 @@ fn center_on_cursor_monitor(app: &tauri::AppHandle, window: &tauri::WebviewWindo
         *lock(&state.workspace_left_extent),
         *lock(&state.workspace_right_extent),
     ));
-    let mut geometry = place_workspace_window(
+    let mut geometry = place_workspace_window_at(
         (area.position.x, area.position.y),
-        monitor.scale_factor(),
-        zoom,
+        factor,
         (
             area.position.x,
             area.position.y,
@@ -1668,10 +1720,10 @@ fn resync_workspace_after_dpi_move(app: &tauri::AppHandle, window: &tauri::Webvi
         .outer_position()
         .map(|p| (p.x, p.y))
         .unwrap_or((wa.position.x, wa.position.y));
-    let geometry = place_workspace_window(
+    let factor = effective_viewport_scale(scale, zoom, *lock(&state.viewport_scale));
+    let geometry = place_workspace_window_at(
         position,
-        scale,
-        zoom,
+        factor,
         (wa.position.x, wa.position.y, wa.size.width, wa.size.height),
     );
     if let Err(e) = set_workspace_bounds(window, geometry) {
@@ -1707,7 +1759,7 @@ fn resync_workspace_after_dpi_move(app: &tauri::AppHandle, window: &tauri::Webvi
     let region = workspace_region(
         geometry.physical_width,
         geometry.physical_height,
-        scale * zoom,
+        factor,
         *lock(&state.workspace_left_extent),
         *lock(&state.workspace_right_extent),
     );
@@ -1716,7 +1768,7 @@ fn resync_workspace_after_dpi_move(app: &tauri::AppHandle, window: &tauri::Webvi
     }
     if let Ok(size) = window.inner_size() {
         log(&format!(
-            "[Mnemark] dpi resync done: scale {scale} zoom {zoom} inner {}x{}",
+            "[Mnemark] dpi resync done: scale {scale} zoom {zoom} viewport scale {factor:.6} inner {}x{}",
             size.width, size.height
         ));
     }
@@ -2334,6 +2386,7 @@ pub fn run(_hidden: bool) {
             drawer: drawer.clone(),
             workspace_left_extent: Arc::new(Mutex::new(0)),
             workspace_right_extent: Arc::new(Mutex::new(0)),
+            viewport_scale: Arc::new(Mutex::new(0.0)),
         })
         .setup(move |app| {
             let resource_dir = app.path().resource_dir().unwrap_or_default();
@@ -2939,7 +2992,31 @@ mod center_coords_tests {
 
 #[cfg(test)]
 mod workspace_placement_tests {
-    use super::{place_workspace_window, workspace_region};
+    use super::{
+        effective_viewport_scale, place_workspace_window, sanitize_viewport_scale, workspace_region,
+    };
+
+    #[test]
+    fn measured_viewport_scale_wins_over_the_model() {
+        // Field evidence (v0.8.15 log): Windows text scaling multiplies itself
+        // into the DOM devicePixelRatio — a 150% monitor at 75% UI zoom
+        // reported dpr 1.51875 (= 1.5 × 0.75 × 1.35) while the model said
+        // 1.125, so the modeled 1216px host never filled the modeled viewport.
+        let measured = effective_viewport_scale(1.5, 0.75, 1.51875);
+        assert!((measured - 1.51875).abs() < 1e-9);
+        // Without a measurement the model applies.
+        assert!((effective_viewport_scale(1.5, 0.75, 0.0) - 1.125).abs() < 1e-9);
+    }
+
+    #[test]
+    fn sanitize_viewport_scale_drops_bogus_measurements() {
+        assert_eq!(sanitize_viewport_scale(Some(1.51875)), Some(1.51875));
+        assert_eq!(sanitize_viewport_scale(Some(0.05)), None);
+        assert_eq!(sanitize_viewport_scale(Some(100.0)), None);
+        assert_eq!(sanitize_viewport_scale(Some(0.0)), None);
+        assert_eq!(sanitize_viewport_scale(Some(f64::NAN)), None);
+        assert_eq!(sanitize_viewport_scale(None), None);
+    }
 
     #[test]
     fn left_pane_keeps_history_anchor_when_space_allows() {
