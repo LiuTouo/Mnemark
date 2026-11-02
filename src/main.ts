@@ -594,6 +594,7 @@ function selectedBatchItems(): DisplayItem[] {
 function updateSelectionToolbar(): void {
   selectionToolbar.classList.toggle("hidden", !multiSelect.active);
   selectionToolbar.setAttribute("aria-label", t("selectionToolbarLabel"));
+  clipList.setAttribute("aria-multiselectable", String(multiSelect.active));
   selectionToggle.classList.toggle("active", multiSelect.active);
   selectionToggle.setAttribute("aria-pressed", String(multiSelect.active));
   selectionToggle.setAttribute("aria-label", t(multiSelect.active ? "selectionExit" : "selectionEnter"));
@@ -682,6 +683,7 @@ function render(scrollToSelection = !multiSelect.active) {
     el.dataset.index = String(index);
     el.dataset.clipId = item.id;
     el.dataset.isFavorite = isFav ? "1" : "0";
+    el.setAttribute("role", "option");
     el.setAttribute("aria-selected", String(multiSelect.has(item.id)));
 
     if (multiSelect.active) {
@@ -751,7 +753,7 @@ function render(scrollToSelection = !multiSelect.active) {
 
     const title = document.createElement("div");
     title.className = "clip-title";
-    let titleText = item.preview || "(empty)";
+    let titleText = item.preview || t("previewEmpty");
     if (item.kind === "Image") {
       titleText = t("imageClip");
     } else if (item.kind === "Text") {
@@ -1003,6 +1005,16 @@ noteModal.addEventListener("keydown", (e) => {
   } else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
     e.preventDefault();
     void saveNote();
+  } else if (e.key === "Tab") {
+    // Keep keyboard focus inside the dialog: the panel behind the scrim must
+    // not become the tab destination while the note editor is open.
+    e.preventDefault();
+    const order = [noteInput, noteCancel, noteSave];
+    const current = order.findIndex((el) => el === document.activeElement);
+    const next = e.shiftKey
+      ? order[(current - 1 + order.length) % order.length]
+      : order[(current + 1) % order.length];
+    next.focus();
   }
 });
 

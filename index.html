@@ -8,7 +8,7 @@
   </head>
   <body>
     <div id="workspace" data-mode="center">
-      <aside id="workspace-drawer" class="workspace-pane workspace-drawer hidden" aria-label="抽屜">
+      <aside id="workspace-drawer" class="workspace-pane workspace-drawer hidden" aria-label="抽屜" data-i18n-aria-label="favorites">
         <div id="favorites-panel">
           <header class="favorites-header">
             <h1 data-i18n="favorites">抽屜</h1>
@@ -19,7 +19,7 @@
           <div id="favorites-create-row" class="favorites-create-row hidden">
             <div id="favorites-create-input" class="favorites-create-input" role="textbox" contenteditable="plaintext-only" spellcheck="false" data-i18n-aria-label="collectionNamePlaceholder" aria-label="抽屜名稱"></div>
           </div>
-          <div id="favorites-list"></div>
+          <div id="favorites-list" role="listbox" aria-multiselectable="false"></div>
           <div id="favorites-empty" class="favorites-empty hidden">
             <p data-i18n="noCollections">尚無抽屜</p>
             <span data-i18n="noCollectionsHint">點擊右上角「新增」建立第一個抽屜</span>
@@ -71,7 +71,7 @@
         <button id="selection-destructive" class="selection-toolbar-btn selection-toolbar-danger"></button>
         <button id="selection-cancel" class="selection-toolbar-btn" data-i18n="cancel">取消</button>
       </div>
-      <div id="clip-list"></div>
+      <div id="clip-list" role="listbox" aria-multiselectable="false"></div>
       <div id="empty-state" class="hidden">
         <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
         <p id="empty-title" data-i18n="emptyTitle">尚無剪貼簿歷史</p>
@@ -82,7 +82,7 @@
       <div id="add-to-collection-menu" class="clip-action-menu hidden" role="menu"></div>
       </div>
 
-      <aside id="workspace-preview" class="workspace-pane workspace-preview hidden" aria-label="預覽">
+      <aside id="workspace-preview" class="workspace-pane workspace-preview hidden" aria-label="預覽" data-i18n-aria-label="previewTab">
         <div id="preview-panel">
           <header class="preview-header"><span class="preview-kind" id="preview-kind">文字</span></header>
           <div class="preview-warning hidden" id="preview-warning" role="alert"></div>

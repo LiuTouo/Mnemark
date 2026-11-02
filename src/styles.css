@@ -27,8 +27,8 @@
 
   --text-primary: #1d2133;
   --text-secondary: #5c627a;
-  --text-tertiary: #969aae;
-  --text-placeholder: #c3c7d4;
+  --text-tertiary: #6b7186;
+  --text-placeholder: #6b7186;
 
   --border: rgba(20, 22, 40, 0.1);
   --border-strong: rgba(20, 22, 40, 0.22);
@@ -75,8 +75,8 @@
 
     --text-primary: #e9edf1;
     --text-secondary: #9aa5b1;
-    --text-tertiary: #5a6572;
-    --text-placeholder: #3d4552;
+    --text-tertiary: #7a8694;
+    --text-placeholder: #76828e;
 
     --border: rgba(255, 255, 255, 0.06);
     --border-strong: rgba(255, 255, 255, 0.15);
@@ -116,8 +116,8 @@
 
   --text-primary: #e9edf1;
   --text-secondary: #9aa5b1;
-  --text-tertiary: #5a6572;
-  --text-placeholder: #3d4552;
+  --text-tertiary: #7a8694;
+  --text-placeholder: #76828e;
 
   --border: rgba(255, 255, 255, 0.06);
   --border-strong: rgba(255, 255, 255, 0.15);
@@ -968,6 +968,10 @@ html, body {
 }
 
 #empty-state.hidden {
+  display: none;
+}
+
+#empty-hint.hidden {
   display: none;
 }
 
@@ -2123,8 +2127,7 @@ textarea:focus-visible {
    ============================================================ */
 
 .modal-overlay {
-  position: fixed;
-  inset: 0;
+  position: absolute;
   z-index: 100;
   display: flex;
   align-items: center;
@@ -2132,24 +2135,41 @@ textarea:focus-visible {
   background: rgba(0, 0, 0, 0.4);
 }
 
-/* The main window is transparent and wider than its visible panes. A fixed
- * note overlay must not darken those transparent gaps (or the desktop behind
- * them), so each visible surface receives its own scrim instead. */
+/* The main window is transparent and wider than its visible panes, so an
+ * overlay must never span the window: it would dim the desktop behind the
+ * panes and center the dialog off-pane. Each overlay instead covers exactly
+ * its owner pane (mirroring the pane geometry in every workspace mode),
+ * darkens it, and centers the dialog inside it. The clip-path repeats the
+ * panes' cut corner so the notch stays undimmed. */
 #note-modal {
-  background: transparent;
+  top: 0;
+  left: var(--history-left);
+  width: 420px;
+  height: 540px;
+  clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 0 100%);
 }
 
-#workspace.note-editing #panel::after,
-#workspace.note-editing #favorites-panel::after,
-#workspace.note-editing #preview-panel::after,
-#workspace.note-editing .workspace-tabs:not(.hidden)::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: 90;
-  border-radius: inherit;
-  background: rgba(0, 0, 0, 0.4);
-  pointer-events: none;
+#remove-modal {
+  top: 0;
+  left: calc(var(--history-left) - var(--left-extent));
+  width: 360px;
+  height: 540px;
+  clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 0 100%);
+}
+
+#workspace[data-mode="compact"] #remove-modal,
+#workspace[data-mode="overlay"] #remove-modal {
+  top: 38px;
+  height: 502px;
+}
+
+#workspace[data-mode="compact"] #remove-modal {
+  left: var(--side-left);
+}
+
+#workspace[data-mode="overlay"] #remove-modal {
+  left: calc(var(--history-left) + 12px);
+  width: min(396px, calc(100vw - 84px));
 }
 
 .modal-overlay.hidden {
