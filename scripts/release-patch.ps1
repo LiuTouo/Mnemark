@@ -19,9 +19,10 @@
 # CHANGELOG.md and re-run the same command — bump is idempotent. Unrelated
 # dirty/untracked files are allowed as long as they cannot affect the build
 # (anything under src/ or src-tauri/, or root build inputs, must be clean —
-# the binaries are built from this tree and must match the tag). If the
-# script stops after the tag was pushed, finish the upload manually:
-# gh release create v<ver> ... <files>.
+# the binaries are built from this tree and must match the tag). Commit and
+# tag steps are idempotent too: a run that stopped after tagging resumes
+# cleanly. If the script stops after the tag was pushed, finish the upload
+# manually: gh release create v<ver> ... <files>.
 param(
     [string]$Version = "",
     [switch]$DryRun
@@ -49,8 +50,10 @@ if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
 if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
     $problems += "TAURI_SIGNING_PRIVATE_KEY not set in this shell (export from GitHub secrets, docs/release-key-rotation.md)"
 }
-if (-not $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) {
-    $problems += "TAURI_SIGNING_PRIVATE_KEY_PASSWORD not set in this shell"
+# Empty password is a valid configuration (keys without a password); only the
+# key itself is mandatory. Encrypted keys fail later with a clear error.
+if ($null -eq $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -or "" -eq $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) {
+    Write-Host "Note: TAURI_SIGNING_PRIVATE_KEY_PASSWORD not set - OK for keys without a password."
 }
 
 # ---------- version resolution ----------
@@ -66,14 +69,20 @@ if ($Version -notmatch '^\d+\.\d+\.\d+$') {
     throw "Version must be semver (e.g. 0.8.22), got: $Version"
 }
 $tag = "v$Version"
-if (git rev-parse -q --verify "refs/tags/$tag") { throw "Tag $tag already exists" }
+# Resume: an existing tag is acceptable only when it is already part of this
+# branch's history (a previous run committed + tagged but stopped later).
+if (git rev-parse -q --verify "refs/tags/$tag") {
+    git merge-base --is-ancestor "refs/tags/$tag" HEAD
+    if ($LASTEXITCODE -ne 0) { throw "Tag $tag already exists and is not on the current branch - refusing to resume" }
+    Write-Host "Resuming: tag $tag already exists on this branch"
+}
 
 $changelogPath = "CHANGELOG.md"
 $changelog = [System.IO.File]::ReadAllText($changelogPath, $utf8)
 $hasSection = $changelog -match [regex]::Escape("## [$Version]")
 
 # Bump output (resume mode: bump already ran in a previous attempt).
-$bumpFiles = @("src-tauri/Cargo.toml", "package.json", "package-lock.json", "CHANGELOG.md")
+$bumpFiles = @("src-tauri/Cargo.toml", "src-tauri/Cargo.lock", "package.json", "package-lock.json", "CHANGELOG.md")
 
 if ($DryRun) {
     Write-Host "Dry run - no changes were made."
@@ -151,10 +160,17 @@ Assert-NativeExit "cargo check"
 
 # ---------- commit + tag ----------
 git add -- $bumpFiles
-git commit -m "chore(release): $Version"
-Assert-NativeExit "git commit"
-git tag $tag
-Assert-NativeExit "git tag"
+git diff --cached --quiet -- $bumpFiles
+if ($LASTEXITCODE -ne 0) {
+    git commit -m "chore(release): $Version"
+    Assert-NativeExit "git commit"
+} else {
+    Write-Host "Resuming: release commit for $Version already in history"
+}
+if (-not (git rev-parse -q --verify "refs/tags/$tag")) {
+    git tag $tag
+    Assert-NativeExit "git tag"
+}
 
 # ---------- signed build ----------
 Write-Host "Building release bundle (this compiles the release profile; takes a while)"
@@ -165,8 +181,20 @@ $bundle = "src-tauri/target/release/bundle"
 $setup = Join-Path $bundle "nsis/Mnemark_${Version}_x64-setup.exe"
 if (-not (Test-Path $setup)) { throw "NSIS setup not found: $setup" }
 if (-not (Test-Path "$setup.sig")) { throw "Updater signature not found: $setup.sig (was the build signed?)" }
-$latest = Get-ChildItem $bundle -Recurse -Filter latest.json | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if (-not $latest) { throw "latest.json not found under $bundle (updater artifacts missing)" }
+# tauri-action created latest.json in CI; a local tauri build does not, so
+# generate it here. Shape mirrors the CI-generated file (checked against
+# v0.8.21): the installed updater downloads this from the release assets.
+$sigB64 = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes("$setup.sig"))
+$dlUrl = "https://github.com/LiuTouo/Mnemark/releases/download/$tag/Mnemark_${Version}_x64-setup.exe"
+$platEntry = [ordered]@{ signature = $sigB64; url = $dlUrl }
+$latestJson = [ordered]@{
+    version   = $Version
+    notes     = ""
+    pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+    platforms = [ordered]@{ "windows-x86_64" = $platEntry; "windows-x86_64-nsis" = $platEntry }
+}
+$latestPath = Join-Path $bundle "nsis/latest.json"
+[System.IO.File]::WriteAllText($latestPath, ($latestJson | ConvertTo-Json -Depth 5), $utf8)
 
 # ---------- portable exe + signed manifest (mirrors release.yml) ----------
 $stage = Join-Path $env:TEMP "mnemark-release-$tag"
@@ -203,7 +231,7 @@ git push origin main $tag
 Assert-NativeExit "git push"
 
 $assets = @(
-    $setup, "$setup.sig", $latest.FullName,
+    $setup, "$setup.sig", $latestPath,
     $exePath, "$exePath.sig", $manifestPath, "$manifestPath.sig", $zipPath
 )
 gh release create $tag --title "Mnemark v$Version" --notes=$notes @assets
