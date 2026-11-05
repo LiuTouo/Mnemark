@@ -16,9 +16,12 @@
 #   $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "<password>"
 #
 # Resume behavior: if the script stops after bump (CHANGELOG unfilled), fill
-# CHANGELOG.md and re-run the same command — bump is idempotent and the tree
-# may contain exactly the four bump-produced files. If it stops after the tag
-# was pushed, finish the upload manually: gh release create v<ver> ... <files>.
+# CHANGELOG.md and re-run the same command — bump is idempotent. Unrelated
+# dirty/untracked files are allowed as long as they cannot affect the build
+# (anything under src/ or src-tauri/, or root build inputs, must be clean —
+# the binaries are built from this tree and must match the tag). If the
+# script stops after the tag was pushed, finish the upload manually:
+# gh release create v<ver> ... <files>.
 param(
     [string]$Version = "",
     [switch]$DryRun
@@ -96,9 +99,18 @@ if ($problems) { $problems | ForEach-Object { Write-Host "PROBLEM: $_" }; throw 
 
 # ---------- bump (skip when resuming) ----------
 if (-not $hasSection) {
+    # The build happens from this working tree, so build-relevant paths must
+    # be clean or the artifacts would not match the tag. Everything else
+    # (docs, website/, agent-tooling dirs) is allowed and never committed.
+    $buildRoots = @("src/", "src-tauri/", "index.html", "settings.html", "about.html", "tutorial.html", "vite.config.ts", "tsconfig.json")
     $dirty = @(git status --porcelain | ForEach-Object { $_.Substring(3) })
-    $unexpected = @($dirty | Where-Object { $bumpFiles -notcontains $_ })
-    if ($unexpected) { throw "Worktree is not clean:`n$($unexpected -join "`n")`nCommit or stash before releasing." }
+    $ambiguous = @($dirty | Where-Object { $bumpFiles -ccontains $_ })
+    if ($ambiguous) { throw "These release files have uncommitted changes:`n$($ambiguous -join "`n")`nCommit or restore them before releasing." }
+    $danger = @($dirty | Where-Object {
+        $p = $_
+        (@($buildRoots | Where-Object { $p.StartsWith($_) })).Count -gt 0
+    })
+    if ($danger) { throw "These changes affect the build and must be committed or stashed first (artifacts must match the tag):`n$($danger -join "`n")" }
 
     Write-Host "Bumping $current -> $Version"
     npm run bump -- $Version
@@ -138,7 +150,7 @@ cargo check --manifest-path src-tauri/Cargo.toml
 Assert-NativeExit "cargo check"
 
 # ---------- commit + tag ----------
-git add -A
+git add -- $bumpFiles
 git commit -m "chore(release): $Version"
 Assert-NativeExit "git commit"
 git tag $tag
