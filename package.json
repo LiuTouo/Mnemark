@@ -10,7 +10,8 @@
     "build:app": "tauri build --no-sign",
     "preview": "vite preview",
     "tauri": "tauri",
-    "bump": "powershell -ExecutionPolicy Bypass -File scripts/bump-version.ps1"
+    "bump": "powershell -ExecutionPolicy Bypass -File scripts/bump-version.ps1",
+    "release": "powershell -ExecutionPolicy Bypass -File scripts/release-patch.ps1"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

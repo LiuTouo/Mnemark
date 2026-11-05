@@ -1,8 +1,12 @@
 name: release
 
 on:
-  push:
-    tags: ["v*"]
+  # TEMPORARY script-release mode: tags no longer trigger the CI release —
+  # scripts/release-patch.ps1 (npm run release) builds and publishes locally
+  # to save Actions minutes. To restore CI releases, replace this block with:
+  #   push:
+  #     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
