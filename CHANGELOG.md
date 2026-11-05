@@ -4,6 +4,13 @@
 
 格式參考 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)，版本號遵循[語意化版本](https://semver.org/lang/zh-TW/)。
 
+## [0.8.22] - 2026-11-06
+
+### Changed
+
+- 發布流程改為本地腳本（`npm run release`）：`v*` tag 不再觸發 CI release（workflow 暫改手動觸發保留備援），改由腳本完成 bump、品質關卡、簽署建置與 GitHub 發布，降低 GitHub Actions 額度消耗
+- CI 改為 A+B 流程：push tag 不再重跑整套 CI（branches 限定觸發），release 作業建置前自行重跑同組關卡（前端測試、fmt、clippy、cargo test），CI 並加入同 ref 併發取消
+
 ## [0.8.21] - 2026-11-02
 
 ### Changed
@@ -691,6 +698,7 @@
 
 - 初始版本：剪貼簿監聽（文字／圖片／檔案路徑）、SHA-256 內容去重、容量限制與淘汰、釘選（上限 10 則、永不淘汰）、即時搜尋、Raycast 風格浮動面板（`Ctrl+Shift+V`）、貼上模擬、刪除復原、系統匣常駐、排除清單、深淺色主題跟隨系統、免安裝可攜（設定存於 exe 旁）
 
+[0.8.22]: https://github.com/LiuTouo/Mnemark/compare/v0.8.21...v0.8.22
 [0.8.21]: https://github.com/LiuTouo/Mnemark/compare/v0.8.20...v0.8.21
 [0.8.20]: https://github.com/LiuTouo/Mnemark/compare/v0.8.19...v0.8.20
 [0.8.19]: https://github.com/LiuTouo/Mnemark/compare/v0.8.18...v0.8.19
