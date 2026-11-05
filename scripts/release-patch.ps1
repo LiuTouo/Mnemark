@@ -215,7 +215,9 @@ $manifest = [ordered]@{
     architecture = "x86_64"
     file         = $exeName
     length       = (Get-Item $exePath).Length
-    sha256       = (Get-Item $exePath | Get-FileHash -Algorithm SHA256).Hash.ToLowerInvariant()
+    # .NET crypto, not Get-FileHash: that cmdlet fails to auto-load in some
+    # local PS 5.1 environments (CI's pwsh 7 is unaffected).
+    sha256       = [System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash([System.IO.File]::ReadAllBytes($exePath))).Replace("-", "").ToLowerInvariant()
 }
 $manifestPath = "$exePath.manifest.json"
 # UTF-8 without BOM — the backend verifies the raw bytes it parsed.
