@@ -45,6 +45,24 @@ jobs:
           $v = (Select-String -Path src-tauri/Cargo.toml -Pattern '^version = "([^"]+)"').Matches[0].Groups[1].Value
           if ("v$v" -ne "${{ github.ref_name }}") { throw "Tag ${{ github.ref_name }} != Cargo.toml v$v" }
 
+      # Quality gates (A+B flow): CI no longer runs on tag pushes (ci.yml
+      # watches branches only), so this job re-runs the suite itself before
+      # any build/sign/publish happens — one windows-latest runner per
+      # release instead of two. beforeBuildCommand already covers the
+      # frontend build/type check, and clippy subsumes cargo check, so
+      # neither is duplicated here.
+      - name: Frontend tests
+        run: npm test -- --run
+
+      - name: Check formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
       # tauri-action runs beforeBuildCommand (npm run build) + tauri build,
       # creates the GitHub release (tagName + releaseName are REQUIRED —
       # without them it only builds and uploads nothing), uploads the NSIS

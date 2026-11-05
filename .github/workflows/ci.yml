@@ -2,10 +2,21 @@ name: ci
 
 on:
   push:
+    # Branches only ("**" matches every branch; tags never match a branch
+    # filter): a pushed v* tag used to run this suite AND release.yml — two
+    # full windows-latest runners (2× billing) per release. The release job
+    # now re-runs these gates itself (release.yml), so one runner suffices.
+    branches: ["**"]
   pull_request:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # Same pattern as website.yml: a rapid follow-up push cancels the
+  # superseded run instead of billing a full duplicate.
+  cancel-in-progress: true
 
 jobs:
   windows:
