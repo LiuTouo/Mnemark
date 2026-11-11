@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "test": "vitest",
+    "test:all": "vitest --run && cargo test --manifest-path src-tauri/Cargo.toml",
     "build:app": "tauri build --no-sign",
     "preview": "vite preview",
     "tauri": "tauri",
