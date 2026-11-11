@@ -4,6 +4,22 @@
 
 格式參考 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)，版本號遵循[語意化版本](https://semver.org/lang/zh-TW/)。
 
+## [0.8.23] - 2026-11-11
+
+### Added
+
+- 滑鼠框選（marquee）：在清單拖曳畫出矩形即可框選所有碰到的列，自動進入選取模式，取代原本的 SHIFT 範圍選取
+- 抽屜批次拖曳：拖曳選取列的握把可一次帶走整個選取範圍，一次投入多個剪貼項目
+
+### Changed
+
+- 三欄工作區改為滿版貼齊：窗格鋪滿視窗邊緣（360|420|360），移除外距與預覽前的間隙，窗格頂部 2px 強調色條移除（16px 斜角保留）
+- 新增 `npm run test:all` 一次跑完前端 vitest 與後端 cargo 測試
+
+### Fixed
+
+- 修正寬螢幕佈局下窗格間的次像素接縫：相鄰窗格重疊 1px 密合縫隙
+
 ## [0.8.22] - 2026-11-06
 
 ### Changed
@@ -698,6 +714,7 @@
 
 - 初始版本：剪貼簿監聽（文字／圖片／檔案路徑）、SHA-256 內容去重、容量限制與淘汰、釘選（上限 10 則、永不淘汰）、即時搜尋、Raycast 風格浮動面板（`Ctrl+Shift+V`）、貼上模擬、刪除復原、系統匣常駐、排除清單、深淺色主題跟隨系統、免安裝可攜（設定存於 exe 旁）
 
+[0.8.23]: https://github.com/LiuTouo/Mnemark/compare/v0.8.22...v0.8.23
 [0.8.22]: https://github.com/LiuTouo/Mnemark/compare/v0.8.21...v0.8.22
 [0.8.21]: https://github.com/LiuTouo/Mnemark/compare/v0.8.20...v0.8.21
 [0.8.20]: https://github.com/LiuTouo/Mnemark/compare/v0.8.19...v0.8.20
