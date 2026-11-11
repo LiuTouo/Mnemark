@@ -226,6 +226,20 @@ html, body {
   left: calc(var(--history-left) + 420px);
 }
 
+/* Panes butt flush against History, but each pane is an independently
+   composited layer (clip-path): at non-integer display scales the fractional
+   --history-left rounds each edge on its own device pixel and opens a
+   hairline transparent seam between panes. Overlapping History by 1px keeps
+   the seam covered, so only the pane border shows as a thin divider line. */
+#workspace[data-mode="wide"] .workspace-drawer {
+  width: 361px;
+}
+
+#workspace[data-mode="wide"] .workspace-preview {
+  left: calc(var(--history-left) + 419px);
+  width: 361px;
+}
+
 .workspace-tabs {
   position: absolute;
   top: 0;
