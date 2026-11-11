@@ -184,7 +184,11 @@ if (-not (Test-Path "$setup.sig")) { throw "Updater signature not found: $setup.
 # tauri-action created latest.json in CI; a local tauri build does not, so
 # generate it here. Shape mirrors the CI-generated file (checked against
 # v0.8.21): the installed updater downloads this from the release assets.
-$sigB64 = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes("$setup.sig"))
+# tauri's .sig file is already the base64-wrapped minisign text the updater
+# expects — re-encoding it a second time yields an unparseable signature
+# (this broke the v0.8.23 updater).
+$sigB64 = [System.IO.File]::ReadAllText("$setup.sig", $utf8).Trim()
+if (-not $sigB64.StartsWith("dW50cnVzdGVkIGNvbW1lbnQ6")) { throw "Unexpected .sig format: $setup.sig" }
 $dlUrl = "https://github.com/LiuTouo/Mnemark/releases/download/$tag/Mnemark_${Version}_x64-setup.exe"
 $platEntry = [ordered]@{ signature = $sigB64; url = $dlUrl }
 $latestJson = [ordered]@{
