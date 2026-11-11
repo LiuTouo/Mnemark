@@ -85,7 +85,7 @@ struct AppState {
     /// Measured CSS→physical factor of the main window's webview (the DOM's
     /// devicePixelRatio). Layered environments (Windows text scaling, WebView2
     /// zoom quantization) multiply into it beyond the modeled scale × zoom,
-    /// so sizing the fixed 1216px host from the model alone can never fill
+    /// so sizing the fixed host from the model alone can never fill
     /// the modeled viewport; the measured value is the only ground truth.
     /// 0.0 until the frontend reports a measurement.
     viewport_scale: Arc<Mutex<f64>>,
@@ -1016,10 +1016,12 @@ fn log(msg: &str) {
     eprintln!("{msg}");
 }
 
-/// Logical workspace dimensions: a 480x620 History frame (including 30px
-/// gutters) and up to two 368px side extents in a fixed transparent host.
-const PANEL_OFFSET: i32 = 30;
-const WORKSPACE_HOST_WIDTH: u32 = 1216;
+/// Logical workspace dimensions: a 420x540 History frame with two flush
+/// 360px side panes in a fixed transparent host (no gutters, no gaps).
+const WORKSPACE_HOST_WIDTH: u32 = 1140;
+const WORKSPACE_HOST_HEIGHT: u32 = 540;
+/// History pane width; the region math adds the open side extents to it.
+const HISTORY_WIDTH: f64 = 420.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WorkspaceGeometry {
@@ -1317,7 +1319,7 @@ fn place_workspace_window_at(
     // before Chromium paints. Reserve the whole workspace for this monitor;
     // drawer/preview changes only alter DOM and the input/drawing region.
     let physical_width = ((WORKSPACE_HOST_WIDTH as f64) * factor).round().max(1.0) as u32;
-    let physical_height = (620.0 * factor).round().max(1.0) as u32;
+    let physical_height = (WORKSPACE_HOST_HEIGHT as f64 * factor).round().max(1.0) as u32;
     let max_x = wx + ww.saturating_sub(physical_width) as i32;
     let max_y = wy + wh.saturating_sub(physical_height) as i32;
     WorkspaceGeometry {
@@ -1345,20 +1347,16 @@ fn workspace_region(
 ) -> WorkspaceRegion {
     // Mirrors the CSS clamp: keep History centered when space allows, moving
     // it within the fixed host only when a narrow monitor requires it.
-    // The top gutter (PANEL_OFFSET CSS px) is always empty: the card, its
-    // shadow and all panes start at the workspace's 30px top margin (measured:
-    // the top 30 CSS px are indistinguishable from the desktop behind).
-    // Keeping it out of the region clips the transient native/compositor
-    // artifacts that land in exactly that strip on every show — the residual
-    // one-frame light band users report as a flickering title bar.
-    let spare = (width as f64 / factor - 480.0).max(0.0);
+    // Panes are flush: no gutters and no gaps, so the region is exactly the
+    // visible panes and the whole window is active in the wide layout.
+    let spare = (width as f64 / factor - HISTORY_WIDTH).max(0.0);
     let left = left_extent as f64;
     let right = right_extent as f64;
     let history_left = (spare / 2.0).min((spare - right).max(left)).max(left);
     WorkspaceRegion {
         left: ((history_left - left) * factor).floor().max(0.0) as i32,
-        top: (PANEL_OFFSET as f64 * factor).round() as i32,
-        right: ((history_left + 480.0 + right) * factor)
+        top: 0,
+        right: ((history_left + HISTORY_WIDTH + right) * factor)
             .ceil()
             .min(width as f64) as i32,
         bottom: height as i32,
@@ -1563,8 +1561,8 @@ fn center_history_coords(
     left_extent: u32,
     factor: f64,
 ) -> (i32, i32) {
-    let history_offset = (((PANEL_OFFSET as u32 + left_extent) as f64) * factor).round() as i64;
-    let history_width = (420.0 * factor).round() as i64;
+    let history_offset = (left_extent as f64 * factor).round() as i64;
+    let history_width = (HISTORY_WIDTH * factor).round() as i64;
     let monitor_center = mon_pos.0 as i64 + mon_size.0 as i64 / 2;
     let desired_x = monitor_center - history_width / 2 - history_offset;
     let max_x = mon_pos.0 as i64 + mon_size.0.saturating_sub(win_size.0) as i64;
@@ -1629,7 +1627,8 @@ fn center_on_cursor_monitor(app: &tauri::AppHandle, window: &tauri::WebviewWindo
             area.size.height,
         ),
     );
-    let left_extent = ((geometry.physical_width as f64 / factor - 480.0).max(0.0) / 2.0) as u32;
+    let left_extent =
+        ((geometry.physical_width as f64 / factor - HISTORY_WIDTH).max(0.0) / 2.0) as u32;
     let (x, y) = center_history_coords(
         (area.position.x, area.position.y),
         (area.size.width, area.size.height),
@@ -1798,7 +1797,7 @@ fn show_panel(app: &tauri::AppHandle) {
 fn build_panel_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, tauri::Error> {
     use tauri::{webview::PageLoadEvent, WebviewUrl, WebviewWindowBuilder};
 
-    let (panel_w, panel_h) = zoomed_builder_size(app, WORKSPACE_HOST_WIDTH, 620);
+    let (panel_w, panel_h) = zoomed_builder_size(app, WORKSPACE_HOST_WIDTH, WORKSPACE_HOST_HEIGHT);
     let first_page_load = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     let first_page_load_for_callback = first_page_load.clone();
     WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
@@ -2051,7 +2050,7 @@ fn ui_zoom_of(config: &AppConfig) -> f64 {
 /// Base logical window size at zoom = 100% for each scalable window.
 fn base_window_size(label: &str) -> Option<(u32, u32)> {
     match label {
-        "main" => Some((WORKSPACE_HOST_WIDTH, 620)),
+        "main" => Some((WORKSPACE_HOST_WIDTH, WORKSPACE_HOST_HEIGHT)),
         "settings" => Some((500, 700)),
         "about" => Some((440, 540)),
         "tutorial" => Some((500, 600)),
@@ -2936,9 +2935,9 @@ mod center_coords_tests {
 
     #[test]
     fn expanded_workspace_centers_the_history_column() {
-        let (x, y) = center_history_coords((0, 0), (1920, 1080), (1216, 620), 368, 1.0);
-        assert_eq!(x + 30 + 368 + 210, 960);
-        assert_eq!(y, 230);
+        let (x, y) = center_history_coords((0, 0), (1920, 1080), (1140, 540), 360, 1.0);
+        assert_eq!(x + 360 + 210, 960);
+        assert_eq!(y, 270);
     }
 
     #[test]
@@ -2989,7 +2988,7 @@ mod workspace_placement_tests {
         // Field evidence (v0.8.15 log): Windows text scaling multiplies itself
         // into the DOM devicePixelRatio — a 150% monitor at 75% UI zoom
         // reported dpr 1.51875 (= 1.5 × 0.75 × 1.35) while the model said
-        // 1.125, so the modeled 1216px host never filled the modeled viewport.
+        // 1.125, so the modeled host never filled the modeled viewport.
         let measured = effective_viewport_scale(1.5, 0.75, 1.51875);
         assert!((measured - 1.51875).abs() < 1e-9);
         // Without a measurement the model applies.
@@ -3010,17 +3009,17 @@ mod workspace_placement_tests {
     fn left_pane_keeps_history_anchor_when_space_allows() {
         let p = place_workspace_window_at((500, 100), 1.0 * 1.0, (0, 0, 1920, 1080));
         let closed = workspace_region(p.physical_width, p.physical_height, 1.0, 0, 0);
-        let opened = workspace_region(p.physical_width, p.physical_height, 1.0, 368, 0);
+        let opened = workspace_region(p.physical_width, p.physical_height, 1.0, 360, 0);
         assert_eq!(p.x, 500);
-        assert_eq!(closed.left, opened.left + 368);
-        assert_eq!(p.physical_width, 1216);
+        assert_eq!(closed.left, opened.left + 360);
+        assert_eq!(p.physical_width, 1140);
     }
 
     #[test]
     fn full_workspace_uses_both_extents() {
         let p = place_workspace_window_at((700, 100), 1.0 * 1.0, (0, 0, 1920, 1080));
-        assert_eq!(p.physical_width, 1216);
-        assert_eq!(p.physical_height, 620);
+        assert_eq!(p.physical_width, 1140);
+        assert_eq!(p.physical_height, 540);
     }
 
     #[test]
@@ -3033,8 +3032,8 @@ mod workspace_placement_tests {
     #[test]
     fn dpi_and_ui_zoom_scale_workspace_once_each() {
         let p = place_workspace_window_at((500, 100), 1.5 * 1.25, (0, 0, 2560, 1440));
-        assert_eq!(p.physical_width, (1216.0_f64 * 1.5 * 1.25).round() as u32);
-        assert_eq!(p.physical_height, (620.0_f64 * 1.5 * 1.25).round() as u32);
+        assert_eq!(p.physical_width, (1140.0_f64 * 1.5 * 1.25).round() as u32);
+        assert_eq!(p.physical_height, (540.0_f64 * 1.5 * 1.25).round() as u32);
     }
 
     #[test]
@@ -3043,9 +3042,9 @@ mod workspace_placement_tests {
         let closed = place_workspace_window_at((opened.x, opened.y), 1.0 * 1.0, (0, 0, 1920, 1080));
         assert_eq!(closed.x, 700);
         assert_eq!(closed, opened);
-        let with_drawer = workspace_region(1216, 620, 1.0, 368, 368);
-        let without_drawer = workspace_region(1216, 620, 1.0, 0, 368);
-        assert_eq!(with_drawer.left + 368, without_drawer.left);
+        let with_drawer = workspace_region(1140, 540, 1.0, 360, 360);
+        let without_drawer = workspace_region(1140, 540, 1.0, 0, 360);
+        assert_eq!(with_drawer.left + 360, without_drawer.left);
         assert_eq!(with_drawer.right, without_drawer.right);
     }
 
@@ -3070,21 +3069,22 @@ mod workspace_placement_tests {
     #[test]
     fn unused_host_space_is_outside_the_native_region() {
         let closed = workspace_region(1900, 969, 1.5625, 0, 0);
-        assert_eq!((closed.left, closed.right), (575, 1325));
-        let preview = workspace_region(1900, 969, 1.5625, 0, 368);
-        assert_eq!((preview.left, preview.right), (575, 1900));
-        let both = workspace_region(1900, 969, 1.5625, 368, 368);
-        assert_eq!((both.left, both.right), (0, 1900));
+        assert_eq!((closed.left, closed.right), (621, 1279));
+        let preview = workspace_region(1900, 969, 1.5625, 0, 360);
+        assert_eq!((preview.left, preview.right), (621, 1841));
+        let both = workspace_region(1900, 969, 1.5625, 360, 360);
+        assert_eq!((both.left, both.right), (59, 1841));
+        assert_eq!((closed.top, closed.bottom), (0, 969));
     }
 
     #[test]
     fn narrow_host_regions_fit_without_resizing_the_surface() {
-        let closed = workspace_region(1000, 620, 1.0, 0, 0);
-        let left = workspace_region(1000, 620, 1.0, 368, 0);
-        let right = workspace_region(1000, 620, 1.0, 0, 368);
-        assert_eq!((closed.left, closed.right), (260, 740));
-        assert_eq!((left.left, left.right), (0, 848));
-        assert_eq!((right.left, right.right), (152, 1000));
+        let closed = workspace_region(1000, 540, 1.0, 0, 0);
+        let left = workspace_region(1000, 540, 1.0, 360, 0);
+        let right = workspace_region(1000, 540, 1.0, 0, 360);
+        assert_eq!((closed.left, closed.right), (290, 710));
+        assert_eq!((left.left, left.right), (0, 780));
+        assert_eq!((right.left, right.right), (220, 1000));
     }
 }
 

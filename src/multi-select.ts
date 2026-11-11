@@ -18,6 +18,12 @@ export class MultiSelectState {
     else this.selectedIds.add(id);
   }
 
+  /** Marquee selection: the rectangle decides the whole selection. */
+  replace(ids: readonly string[]): void {
+    if (!this.active) return;
+    this.selectedIds = new Set(ids);
+  }
+
   has(id: string): boolean {
     return this.selectedIds.has(id);
   }

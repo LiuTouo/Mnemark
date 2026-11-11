@@ -10,10 +10,10 @@ export interface WorkspaceLayout {
   activeTab: WorkspaceTab | null;
 }
 
-export const WORKSPACE_CENTER_WIDTH = 480;
+export const WORKSPACE_CENTER_WIDTH = 420;
 export const WORKSPACE_PANE_WIDTH = 360;
-export const WORKSPACE_GAP = 8;
-export const WORKSPACE_GUTTERS = 60;
+export const WORKSPACE_GAP = 0;
+export const WORKSPACE_GUTTERS = 0;
 
 const ONE_PANE_WIDTH = WORKSPACE_CENTER_WIDTH + WORKSPACE_PANE_WIDTH + WORKSPACE_GAP;
 const TWO_PANE_WIDTH = WORKSPACE_CENTER_WIDTH + (WORKSPACE_PANE_WIDTH + WORKSPACE_GAP) * 2;

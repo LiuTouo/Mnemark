@@ -36,6 +36,8 @@ export interface DrawerDragVisual {
 export interface DrawerDragStart<Source> {
   kind: "item";
   locator: ClipLocator;
+  /** Every Clip the drag carries; defaults to `locator` alone. */
+  locators?: readonly ClipLocator[];
   visual: DrawerDragVisual;
   x: number;
   y: number;
@@ -213,6 +215,12 @@ function pointFromStart(start: DrawerDragItemContext): DrawerDragItemPoint {
     x: start.x,
     y: start.y,
   };
+}
+
+export function dragLocators(
+  start: { locator: ClipLocator; locators?: readonly ClipLocator[] },
+): readonly ClipLocator[] {
+  return start.locators && start.locators.length > 0 ? start.locators : [start.locator];
 }
 
 function isCollectionStart<Source>(
@@ -526,7 +534,9 @@ export function createDrawerDragLifecycle<Source>(
       point: pointFromStart(startFact),
       membershipIds: null,
       membershipResult,
-      reorderContext: adapter.reorder?.context(startFact) ?? null,
+      reorderContext: dragLocators(startFact).length === 1
+        ? adapter.reorder?.context(startFact) ?? null
+        : null,
       reorderState: null,
       reorderFrame: null,
       ending: false,

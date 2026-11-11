@@ -55,6 +55,7 @@ describe("Drawer overlay controller", () => {
       mutations: {
         reorderItems: vi.fn(async () => ({ status: "succeeded" as const })),
         addToCollection: vi.fn(async () => ({ status: "succeeded" as const })),
+        addBatchToCollection: vi.fn(async () => ({ status: "succeeded" as const, changed: 1, unchanged: 0 })),
         memberCollectionIds: vi.fn(async () => []),
         createCollection: vi.fn(async () => ({ status: "succeeded" as const })),
         renameCollection: vi.fn(async () => ({ status: "succeeded" as const })),

@@ -5,7 +5,7 @@ import { localizeDrawerError, t } from "./i18n";
 import { computeMenuPlacement } from "./menu";
 import { clipLocator } from "./drag";
 import { rectContains } from "./geometry";
-import { createDrawerDragLifecycle } from "./drawer-drag";
+import { createDrawerDragLifecycle, dragLocators } from "./drawer-drag";
 import type {
   DrawerCollectionMoveDirection,
   DrawerDragCancelReason,
@@ -33,6 +33,7 @@ export type DrawerMutations = Pick<
   DrawerMutationWorkflow,
   | "reorderItems"
   | "addToCollection"
+  | "addBatchToCollection"
   | "memberCollectionIds"
   | "createCollection"
   | "renameCollection"
@@ -99,8 +100,22 @@ export function createDrawerItemMutationAdapter(
       showSuccess: () => {},
       showFailure: presentFailure,
     },
-    lookupMembership: (start) => mutations.memberCollectionIds(start.locator),
+    lookupMembership: async (start) => {
+      // A multi-item drag may only drop where NONE of its Clips live yet, so
+      // the unavailable set is the intersection of the memberships.
+      const lists = await Promise.all(
+        dragLocators(start).map((locator) => mutations.memberCollectionIds(locator)),
+      );
+      return lists.reduce((common, ids) => common.filter((id) => ids.includes(id)));
+    },
     commit: async (collectionId, start) => {
+      const locators = dragLocators(start);
+      if (locators.length > 1) {
+        const outcome = await mutations.addBatchToCollection({ collectionId, locators });
+        lastMembershipOutcome = outcome.status === "succeeded" ? { status: "succeeded" } : outcome;
+        raiseFailed(outcome);
+        return;
+      }
       const outcome = await mutations.addToCollection({
         collectionId,
         locator: start.locator,
@@ -117,14 +132,19 @@ export function createDrawerItemMutationAdapter(
   };
 }
 
-function raiseFailed(outcome: DrawerMutationOutcome): void {
+function raiseFailed(outcome: { status: string; error?: unknown }): void {
   if (outcome.status === "failed") throw outcome.error;
 }
 
 export interface PanelDrawerController {
   isAnyOverlayOpen(): boolean;
   closeOverlays(): boolean;
-  start(item: Clip | FavoriteItem, source: HTMLElement, point: DrawerDragPoint): DrawerDragSession;
+  start(
+    item: Clip | FavoriteItem,
+    source: HTMLElement,
+    point: DrawerDragPoint,
+    items?: readonly (Clip | FavoriteItem)[],
+  ): DrawerDragSession;
   move(session: DrawerDragSession, point: DrawerDragPoint): void;
   end(session: DrawerDragSession, point: DrawerDragPoint): Promise<DrawerDragTerminalOutcome | null>;
   cancel(reason: DrawerDragCancelReason, session?: DrawerDragSession): DrawerDragTerminalOutcome | null;
@@ -752,10 +772,12 @@ function createPanelDrawerController(): PanelDrawerRenderer {
       item: Clip | FavoriteItem,
       source: HTMLElement,
       point: DrawerDragPoint,
+      items: readonly (Clip | FavoriteItem)[] = [item],
     ): DrawerDragSession {
       return drawerDrag.start({
         kind: "item",
         locator: clipLocator(item),
+        locators: items.map((entry) => clipLocator(entry)),
         visual: {
           kind: item.kind,
           preview: item.preview,

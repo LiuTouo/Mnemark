@@ -17,6 +17,8 @@ import { classifyClip, filterItems } from "./dataset";
 import type { FilterKind } from "./dataset";
 import { formatBytes } from "./format";
 import { MultiSelectState } from "./multi-select";
+import { clipRect, idsInRect, marqueeRect } from "./marquee";
+import type { MarqueeRect } from "./marquee";
 import { decideWorkspaceLayout, escapeLayer, tabAfterPreviewIntent } from "./workspace-state";
 import type { WorkspaceLayout, WorkspaceTab } from "./workspace-state";
 import { WorkspaceLayoutCoordinator, fitCoefficient, waitForWorkspacePaint, waitForWorkspaceViewport } from "./workspace-layout";
@@ -111,6 +113,7 @@ const selectionCount = document.getElementById("selection-count")!;
 const selectionAdd = document.getElementById("selection-add") as HTMLButtonElement;
 const selectionDestructive = document.getElementById("selection-destructive") as HTMLButtonElement;
 const selectionCancel = document.getElementById("selection-cancel") as HTMLButtonElement;
+const marqueeEl = document.getElementById("marquee-rect")!;
 const noteModal = document.getElementById("note-modal")!;
 const noteInput = document.getElementById("note-input") as HTMLTextAreaElement;
 const noteCancel = document.getElementById("note-cancel") as HTMLButtonElement;
@@ -411,6 +414,7 @@ async function init() {
   selectionAdd.addEventListener("click", openBatchAddChooser);
   selectionDestructive.addEventListener("click", () => void runBatchDestructiveAction());
   selectionCancel.addEventListener("click", () => exitMultiSelect());
+  wireMarquee();
   drawerTab.addEventListener("click", () => {
     workspaceTab = "drawer";
     void applyWorkspaceLayout();
@@ -702,6 +706,11 @@ function render(scrollToSelection = !multiSelect.active) {
     }
 
     el.addEventListener("click", () => {
+      // The release that ends a marquee drag must not also toggle a row.
+      if (suppressRowClick) {
+        suppressRowClick = false;
+        return;
+      }
       if (multiSelect.active) {
         multiSelect.toggle(item.id);
         render();
@@ -1285,11 +1294,18 @@ function isSpaceKey(e: KeyboardEvent): boolean {
 
 function attachRowDrag(row: HTMLElement, handle: HTMLElement, item: DisplayItem) {
   let session: DrawerDragSession | null = null;
+
+  // A selected row drags the whole selection; anything else drags itself.
+  const dragItems = () =>
+    multiSelect.active && multiSelect.size > 1 && multiSelect.has(item.id)
+      ? selectedBatchItems()
+      : [item];
+
   handle.addEventListener("pointerdown", (e) => {
     e.preventDefault();
     e.stopPropagation();
     handle.setPointerCapture(e.pointerId);
-    session = panelDrawer.start(item, row, { x: e.clientX, y: e.clientY });
+    session = panelDrawer.start(item, row, { x: e.clientX, y: e.clientY }, dragItems());
   });
   handle.addEventListener("pointermove", (e) => {
     if (session === null) return;
@@ -1313,6 +1329,106 @@ function attachRowDrag(row: HTMLElement, handle: HTMLElement, item: DisplayItem)
     e.stopPropagation();
     e.preventDefault();
   });
+}
+
+// === Marquee selection ===
+// Dragging anywhere in the list draws a rectangle that selects every row it
+// touches. Drag-to-drawer stays on the grip handle, so the two gestures never
+// compete for the row body.
+const MARQUEE_THRESHOLD_PX = 6;
+
+let marqueeStart: { x: number; y: number } | null = null;
+let marqueeOrigin: { x: number; y: number } | null = null;
+let marqueeBounds: MarqueeRect | null = null;
+let marqueeRows: { id: string; rect: MarqueeRect }[] = [];
+let marqueeActive = false;
+let suppressRowClick = false;
+
+function toMarqueeRect(rect: DOMRect): MarqueeRect {
+  return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom };
+}
+
+function measureMarqueeRows(): { id: string; rect: MarqueeRect }[] {
+  return [...clipList.querySelectorAll<HTMLElement>(".clip-item")]
+    .filter((row) => (row.dataset.clipId ?? "").length > 0)
+    .map((row) => ({ id: row.dataset.clipId as string, rect: toMarqueeRect(row.getBoundingClientRect()) }));
+}
+
+/** Patch row state in place: a re-render mid-drag would drop the rectangle. */
+function paintMarqueeSelection(): void {
+  for (const row of clipList.querySelectorAll<HTMLElement>(".clip-item")) {
+    const selected = multiSelect.has(row.dataset.clipId ?? "");
+    row.classList.toggle("batch-selected", selected);
+    row.setAttribute("aria-selected", String(selected));
+    row.querySelector(".selection-checkbox")?.setAttribute("aria-checked", String(selected));
+  }
+  updateSelectionToolbar();
+}
+
+function startMarquee(e: PointerEvent): void {
+  marqueeActive = true;
+  clipList.setPointerCapture(e.pointerId);
+  if (!multiSelect.active) {
+    multiSelect.enter();
+    render();
+  }
+  // The rectangle lives inside #panel, so panel-relative offsets are its
+  // coordinate space.
+  const panel = document.getElementById("panel")!.getBoundingClientRect();
+  marqueeOrigin = { x: panel.left, y: panel.top };
+  marqueeBounds = toMarqueeRect(clipList.getBoundingClientRect());
+  marqueeRows = measureMarqueeRows();
+  marqueeEl.classList.remove("hidden");
+}
+
+function updateMarquee(e: PointerEvent): void {
+  if (marqueeStart === null || marqueeOrigin === null || marqueeBounds === null) return;
+  const rect = marqueeRect(marqueeStart, { x: e.clientX, y: e.clientY });
+  const visible = clipRect(rect, marqueeBounds);
+  marqueeEl.classList.toggle("hidden", visible === null);
+  if (visible !== null) {
+    marqueeEl.style.left = `${visible.left - marqueeOrigin.x}px`;
+    marqueeEl.style.top = `${visible.top - marqueeOrigin.y}px`;
+    marqueeEl.style.width = `${visible.right - visible.left}px`;
+    marqueeEl.style.height = `${visible.bottom - visible.top}px`;
+  }
+  multiSelect.replace(idsInRect(rect, marqueeRows));
+  paintMarqueeSelection();
+}
+
+function endMarquee(): void {
+  if (marqueeActive) {
+    marqueeActive = false;
+    marqueeEl.classList.add("hidden");
+    // The pointerup ending the drag is followed by a click on the row the drag
+    // started on; it must not toggle that row.
+    suppressRowClick = true;
+  }
+  marqueeStart = null;
+  marqueeOrigin = null;
+  marqueeBounds = null;
+  marqueeRows = [];
+}
+
+function wireMarquee(): void {
+  clipList.addEventListener("pointerdown", (e) => {
+    suppressRowClick = false;
+    if (e.button !== 0) return;
+    if ((e.target as Element).closest("button")) return;
+    marqueeStart = { x: e.clientX, y: e.clientY };
+  });
+  clipList.addEventListener("pointermove", (e) => {
+    if (marqueeStart === null) return;
+    if (!marqueeActive) {
+      const moved = Math.hypot(e.clientX - marqueeStart.x, e.clientY - marqueeStart.y);
+      if (moved < MARQUEE_THRESHOLD_PX) return;
+      startMarquee(e);
+    }
+    updateMarquee(e);
+  });
+  clipList.addEventListener("pointerup", () => endMarquee());
+  clipList.addEventListener("pointercancel", () => endMarquee());
+  clipList.addEventListener("lostpointercapture", () => endMarquee());
 }
 
 // === Toast ===

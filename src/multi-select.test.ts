@@ -30,6 +30,21 @@ describe("MultiSelectState", () => {
     expect(state.idsInOrder(["hidden", "a", "b"])).toEqual(["hidden"]);
   });
 
+  it("replaces the whole selection from a marquee rectangle", () => {
+    const state = new MultiSelectState();
+    state.enter();
+    state.toggle("a");
+    state.replace(["b", "c"]);
+    expect(state.idsInOrder(["a", "b", "c", "d"])).toEqual(["b", "c"]);
+
+    state.replace([]);
+    expect(state.size).toBe(0);
+
+    state.exit();
+    state.replace(["a"]);
+    expect(state.size).toBe(0);
+  });
+
   it("prunes ids removed by eviction or dataset refresh", () => {
     const state = new MultiSelectState();
     state.enter();

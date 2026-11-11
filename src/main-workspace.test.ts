@@ -166,17 +166,17 @@ it("reveals the drawer only after region preparation and releases unused space a
   native.publish(true);
   await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith("set_main_workspace_layout", {
     viewportScale: 1,
-    leftExtent: 368, rightExtent: 0,
+    leftExtent: 360, rightExtent: 0,
   }));
   const drawer = document.getElementById("workspace-drawer")!;
   expect(drawer.classList.contains("hidden")).toBe(true);
 
   finish({ cssWidth: 1216, cssHeight: 620 });
   await vi.waitFor(() => expect(drawer.classList.contains("hidden")).toBe(false));
-  expect(document.getElementById("workspace")!.style.getPropertyValue("--left-extent")).toBe("368px");
+  expect(document.getElementById("workspace")!.style.getPropertyValue("--left-extent")).toBe("360px");
   await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith("set_main_workspace_layout", {
     viewportScale: 1,
-    leftExtent: 368, rightExtent: 0, commit: true,
+    leftExtent: 360, rightExtent: 0, commit: true,
   }));
   native.invoke.mockClear();
   native.publish(false);
@@ -204,13 +204,13 @@ it("decides the layout from the monitor scale factor, not a stale devicePixelRat
   native.publish(true);
   await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith("set_main_workspace_layout", {
     viewportScale: 1.875,
-    leftExtent: 368, rightExtent: 0,
+    leftExtent: 360, rightExtent: 0,
   }));
   // Drain the coordinator's pending commit before the test ends: a leaked
   // finish chain would fire inside the next test's settle window.
   await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith("set_main_workspace_layout", {
     viewportScale: 1.875,
-    leftExtent: 368, rightExtent: 0, commit: true,
+    leftExtent: 360, rightExtent: 0, commit: true,
   }));
 });
 
@@ -232,7 +232,7 @@ it("sizes the workspace from the measured DOM devicePixelRatio", async () => {
   native.publish(true);
   await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith(
     "set_main_workspace_layout",
-    expect.objectContaining({ leftExtent: 368, rightExtent: 0, viewportScale: textScaledDpr }),
+    expect.objectContaining({ leftExtent: 360, rightExtent: 0, viewportScale: textScaledDpr }),
   ));
 });
 
@@ -250,7 +250,7 @@ it("restores the stored drawer-open state even when the first boot read failed",
   await new Promise((resolve) => setTimeout(resolve, 20));
   expect(native.invoke).not.toHaveBeenCalledWith("set_main_workspace_layout", {
     viewportScale: 1,
-    leftExtent: 368, rightExtent: 0,
+    leftExtent: 360, rightExtent: 0,
   });
 
   // The backend comes back: the next focus heals the read and the pending
@@ -260,11 +260,11 @@ it("restores the stored drawer-open state even when the first boot read failed",
 
   await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith("set_main_workspace_layout", {
     viewportScale: 1,
-    leftExtent: 368, rightExtent: 0,
+    leftExtent: 360, rightExtent: 0,
   }));
   await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith("set_main_workspace_layout", {
     viewportScale: 1,
-    leftExtent: 368, rightExtent: 0, commit: true,
+    leftExtent: 360, rightExtent: 0, commit: true,
   }));
   expect(localStorage.getItem("mnemark.drawer-open")).toBe("1");
 });
@@ -279,7 +279,7 @@ it("heals a failed boot restore on the next focus instead of staying closed", as
   await new Promise((resolve) => setTimeout(resolve, 20));
   expect(native.invoke).not.toHaveBeenCalledWith("set_main_workspace_layout", {
     viewportScale: 1,
-    leftExtent: 368, rightExtent: 0,
+    leftExtent: 360, rightExtent: 0,
   });
 
   // First focus: reads heal but the restore's write keeps failing.
@@ -288,7 +288,7 @@ it("heals a failed boot restore on the next focus instead of staying closed", as
   await new Promise((resolve) => setTimeout(resolve, 20));
   expect(native.invoke).not.toHaveBeenCalledWith("set_main_workspace_layout", {
     viewportScale: 1,
-    leftExtent: 368, rightExtent: 0,
+    leftExtent: 360, rightExtent: 0,
   });
   // The healed read republished the closed drawer without clobbering the
   // stored "1" (which the failed boot never got to rewrite; the old code
@@ -301,11 +301,11 @@ it("heals a failed boot restore on the next focus instead of staying closed", as
 
   await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith("set_main_workspace_layout", {
     viewportScale: 1,
-    leftExtent: 368, rightExtent: 0,
+    leftExtent: 360, rightExtent: 0,
   }));
   await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith("set_main_workspace_layout", {
     viewportScale: 1,
-    leftExtent: 368, rightExtent: 0, commit: true,
+    leftExtent: 360, rightExtent: 0, commit: true,
   }));
   expect(localStorage.getItem("mnemark.drawer-open")).toBe("1");
 });

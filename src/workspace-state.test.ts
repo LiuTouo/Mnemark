@@ -5,8 +5,8 @@ describe("workspace layout", () => {
   it("shows three columns when both side panes fit", () => {
     expect(decideWorkspaceLayout(1400, true, true, "drawer")).toMatchObject({
       mode: "wide",
-      leftExtent: 368,
-      rightExtent: 368,
+      leftExtent: 360,
+      rightExtent: 360,
       drawerVisible: true,
       previewVisible: true,
     });
@@ -16,7 +16,7 @@ describe("workspace layout", () => {
     expect(decideWorkspaceLayout(900, true, true, "drawer")).toMatchObject({
       mode: "compact",
       leftExtent: 0,
-      rightExtent: 368,
+      rightExtent: 360,
       drawerVisible: true,
       previewVisible: false,
       activeTab: "drawer",
@@ -33,8 +33,8 @@ describe("workspace layout", () => {
   });
 
   it("keeps a single drawer on the left and preview on the right", () => {
-    expect(decideWorkspaceLayout(900, true, false, "drawer").leftExtent).toBe(368);
-    expect(decideWorkspaceLayout(900, false, true, "preview").rightExtent).toBe(368);
+    expect(decideWorkspaceLayout(900, true, false, "drawer").leftExtent).toBe(360);
+    expect(decideWorkspaceLayout(900, false, true, "preview").rightExtent).toBe(360);
   });
 });
 

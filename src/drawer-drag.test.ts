@@ -907,6 +907,30 @@ describe("Drawer drag lifecycle", () => {
     },
   );
 
+  it("skips item reorder and drops a multi-item drag once", async () => {
+    const adapter = new MemoryDrawerDragAdapter();
+    const reorder = new MemoryDrawerReorderAdapter();
+    adapter.reorder = reorder;
+    adapter.collectionId = "drawer-b";
+    const lifecycle = createDrawerDragLifecycle(adapter);
+    const start: FixtureItemStart = {
+      ...favoriteStartFact(44, "snapshot-a"),
+      locators: [
+        { scope: "drawer", id: "snapshot-a" },
+        { scope: "drawer", id: "snapshot-b" },
+      ],
+    };
+
+    const session = lifecycle.start(start);
+    await resolveMembership(adapter, start, []);
+    await expect(lifecycle.end(session, point(start, 50, 125))).resolves.toBe("success");
+
+    expect(reorder.states).toEqual([]);
+    expect(reorder.commits).toEqual([]);
+    expect(adapter.commits).toEqual([{ collectionId: "drawer-b", locatorId: "snapshot-a" }]);
+    expectClean(adapter, "drawer-row-snapshot-a");
+  });
+
   it("treats the current insertion position as a reorder no-op", async () => {
     const adapter = new MemoryDrawerDragAdapter();
     const reorder = new MemoryDrawerReorderAdapter();

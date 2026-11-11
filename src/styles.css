@@ -195,12 +195,12 @@ html, body {
 #workspace {
   --left-extent: 0px;
   --right-extent: 0px;
-  --history-left: clamp(var(--left-extent), calc((100vw - 480px) / 2), calc(100vw - 480px - var(--right-extent)));
-  --side-left: calc(var(--history-left) + 428px);
+  --history-left: clamp(var(--left-extent), calc((100vw - 420px) / 2), calc(100vw - 420px - var(--right-extent)));
+  --side-left: calc(var(--history-left) + 420px);
   position: relative;
-  width: calc(100% - 60px);
+  width: 100%;
   height: 540px;
-  margin: 30px;
+  margin: 0;
 }
 
 .workspace-pane {
@@ -223,7 +223,7 @@ html, body {
 }
 
 .workspace-preview {
-  left: calc(var(--history-left) + 428px);
+  left: calc(var(--history-left) + 420px);
 }
 
 .workspace-tabs {
@@ -312,20 +312,6 @@ html, body {
 #preview-panel,
 .workspace-tabs {
   clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 0 100%);
-}
-
-#panel::before,
-#favorites-panel::before,
-#preview-panel::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 2px;
-  z-index: 1;
-  background: linear-gradient(90deg, var(--accent), transparent 72%);
-  pointer-events: none;
 }
 
 /* === Search === */
@@ -454,6 +440,20 @@ html, body {
   display: none;
 }
 
+/* Marquee selection rectangle drawn over the list while dragging. It sits
+   behind the rows so item content and grip handles are never covered. */
+.marquee-rect {
+  position: absolute;
+  z-index: 1;
+  border: 1px solid var(--accent);
+  background: var(--accent-subtle);
+  pointer-events: none;
+}
+
+.marquee-rect.hidden {
+  display: none;
+}
+
 .selection-count {
   flex: 1;
   min-width: 56px;
@@ -512,6 +512,9 @@ html, body {
   cursor: pointer;
   transition: background 0.1s ease, opacity 0.14s ease-out, transform 0.14s ease-out, box-shadow 0.14s ease-out;
   position: relative;
+  /* Above the marquee rectangle so rows and their grip handles stay legible
+     (and clickable) while a selection box is drawn over them. */
+  z-index: 2;
 }
 
 .clip-item:hover {
@@ -575,7 +578,8 @@ html, body {
   transform: rotate(45deg);
 }
 
-.clip-item.multi-select-mode .clip-drag-handle,
+/* The grip handle stays available in selection mode: it is now the only way
+   to drag the selection into a drawer. */
 .clip-item.multi-select-mode .clip-actions {
   display: none;
 }

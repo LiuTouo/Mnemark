@@ -14,6 +14,11 @@ function fakeMutations(overrides: Partial<DrawerMutations> = {}): DrawerMutation
   return {
     reorderItems: vi.fn(async (): Promise<DrawerMutationOutcome> => ({ status: "succeeded" })),
     addToCollection: vi.fn(async (): Promise<DrawerMutationOutcome> => ({ status: "succeeded" })),
+    addBatchToCollection: vi.fn(async () => ({
+      status: "succeeded" as const,
+      changed: 1,
+      unchanged: 0,
+    })),
     memberCollectionIds: vi.fn(async () => ["c1"]),
     createCollection: vi.fn(async (): Promise<DrawerMutationOutcome> => ({ status: "succeeded" })),
     renameCollection: vi.fn(async (): Promise<DrawerMutationOutcome> => ({ status: "succeeded" })),
@@ -49,6 +54,10 @@ function dragStart(locator: ClipLocator) {
     x: 10,
     y: 20,
   };
+}
+
+function multiDragStart(locators: readonly ClipLocator[]) {
+  return { ...dragStart(locators[0]), locators };
 }
 
 describe("production drag adapter mutation wiring", () => {
@@ -129,6 +138,30 @@ describe("production drag adapter mutation wiring", () => {
     expect(mutations.addToCollection).toHaveBeenCalledExactlyOnceWith({
       collectionId: "c2",
       locator: { scope: "drawer", id: "snap-a" },
+    });
+  });
+
+  it("drops a multi-item drag as one batch and intersects its memberships", async () => {
+    const mutations = fakeMutations({
+      memberCollectionIds: vi.fn(async (locator: ClipLocator) =>
+        locator.id === "a" ? ["c1", "c2"] : ["c2", "c3"]),
+    });
+    const { adapter: wired } = adapter(mutations);
+    const start = multiDragStart([
+      { scope: "history", id: "a" },
+      { scope: "history", id: "b" },
+    ]);
+
+    await expect(wired.lookupMembership(start)).resolves.toEqual(["c2"]);
+    await expect(wired.commit("c9", start)).resolves.toBeUndefined();
+
+    expect(mutations.addToCollection).not.toHaveBeenCalled();
+    expect(mutations.addBatchToCollection).toHaveBeenCalledExactlyOnceWith({
+      collectionId: "c9",
+      locators: [
+        { scope: "history", id: "a" },
+        { scope: "history", id: "b" },
+      ],
     });
   });
 

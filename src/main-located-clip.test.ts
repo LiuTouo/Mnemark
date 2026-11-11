@@ -113,6 +113,8 @@ describe("Panel located Clip callers", () => {
     document.documentElement.innerHTML = panelHtml;
     Object.defineProperty(document, "hasFocus", { configurable: true, value: () => true });
     HTMLElement.prototype.scrollIntoView = vi.fn();
+    HTMLElement.prototype.setPointerCapture = vi.fn();
+    HTMLElement.prototype.releasePointerCapture = vi.fn();
 
     const clips = [clip("clip-a", "First"), clip("clip-b", "Second")];
     tauri.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
@@ -239,6 +241,51 @@ describe("Panel located Clip callers", () => {
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
     expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest" });
     expect(document.querySelector(".clip-item.selected")?.getAttribute("data-clip-id")).toBe("clip-b");
+  });
+
+  it("marquee-drags a selection rectangle over the list", async () => {
+    const clips = ["a", "b", "c", "d", "e"].map((id) => clip(id, id));
+    tauri.invoke.mockImplementation(async (command: string) => {
+      switch (command) {
+        case "get_config":
+          return { language: "zh-TW", preview_enabled: false };
+        case "get_clips":
+          return clips;
+        case "get_active_clip_preview":
+          return null;
+        case "set_main_workspace_layout":
+          return { cssWidth: window.innerWidth, cssHeight: window.innerHeight };
+        default:
+          return undefined;
+      }
+    });
+    await import("./main");
+    window.dispatchEvent(new Event("DOMContentLoaded"));
+    await vi.waitFor(() => expect(document.querySelectorAll("#clip-list .clip-item")).toHaveLength(5));
+
+    const rows = () => Array.from(document.querySelectorAll<HTMLElement>("#clip-list .clip-item"));
+    const list = document.getElementById("clip-list")!;
+    HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
+      const index = rows().indexOf(this);
+      if (index >= 0) {
+        return {
+          left: 0, top: 100 + index * 50, right: 400, bottom: 150 + index * 50,
+        } as DOMRect;
+      }
+      if (this.id === "clip-list") {
+        return { left: 0, top: 100, right: 400, bottom: 600 } as DOMRect;
+      }
+      return { left: 0, top: 0, right: 400, bottom: 540 } as DOMRect;
+    };
+
+    rows()[0].dispatchEvent(new MouseEvent("pointerdown", { button: 0, bubbles: true, clientX: 20, clientY: 110 }));
+    list.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientX: 60, clientY: 260 }));
+    list.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
+
+    expect(rows().map((row) => row.getAttribute("aria-selected")))
+      .toEqual(["true", "true", "true", "true", "false"]);
+    expect(document.querySelectorAll("#clip-list .selection-checkbox")).toHaveLength(5);
+    expect(commandCalls("paste_located_clip")).toHaveLength(0);
   });
 
   it("routes one Escape classification through the Drawer overlay controller", async () => {

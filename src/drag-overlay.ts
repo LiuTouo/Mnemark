@@ -6,6 +6,7 @@ import type {
   DrawerDragStart,
   DrawerDragVisual,
 } from "./drawer-drag";
+import { dragLocators } from "./drawer-drag";
 import { t } from "./i18n";
 
 const CARD_WIDTH = 288;
@@ -13,7 +14,7 @@ const CARD_HEIGHT = 112;
 const CURSOR_OFFSET = 14;
 
 export interface InlineDragCard {
-  begin(start: Pick<DrawerDragStart<unknown>, "visual" | "x" | "y">): void;
+  begin(start: Pick<DrawerDragStart<unknown>, "locator" | "locators" | "visual" | "x" | "y">): void;
   move(point: DrawerDragPoint): void;
   finish(cancelled: boolean): void;
 }
@@ -21,7 +22,7 @@ export interface InlineDragCard {
 export function createInlineDragCard(card: HTMLElement): InlineDragCard {
   let hideTimer: ReturnType<typeof setTimeout> | null = null;
 
-  function renderVisual(visual: DrawerDragVisual): void {
+  function renderVisual(visual: DrawerDragVisual, count: number): void {
     card.replaceChildren();
     const visualEl = document.createElement("div");
     if (visual.kind === "Image" && visual.thumbnailBase64) {
@@ -38,7 +39,7 @@ export function createInlineDragCard(card: HTMLElement): InlineDragCard {
     copy.className = "item-drag-preview-copy";
     const label = document.createElement("span");
     label.className = "item-drag-preview-label";
-    label.textContent = t("draggingItem");
+    label.textContent = count > 1 ? t("draggingItems", { n: String(count) }) : t("draggingItem");
     const preview = document.createElement("span");
     preview.className = "item-drag-preview-text";
     preview.textContent = visual.preview || t("emptyPreview");
@@ -59,7 +60,7 @@ export function createInlineDragCard(card: HTMLElement): InlineDragCard {
   return {
     begin(start): void {
       if (hideTimer) clearTimeout(hideTimer);
-      renderVisual(start.visual);
+      renderVisual(start.visual, dragLocators(start).length);
       moveCard(start);
       card.classList.remove("hidden", "dropping", "leaving");
     },
