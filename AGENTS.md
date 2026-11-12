@@ -25,7 +25,7 @@ Follow existing formatting: two-space indentation and double quotes in TypeScrip
 
 ## Testing Guidelines
 
-Tests currently use Rust's built-in `#[test]` framework in colocated `#[cfg(test)]` modules. Name tests after observable behavior, for example `double_copy_inside_window_is_dropped`. Add regression tests beside the affected module. There is no frontend test runner; `npm run build` is the required frontend validation. No numeric coverage threshold is enforced.
+Rust tests use the built-in `#[test]` framework in colocated `#[cfg(test)]` modules. Name tests after observable behavior, for example `double_copy_inside_window_is_dropped`. Add regression tests beside the affected module. Frontend tests use Vitest (`vitest.config.ts`, colocated `src/*.test.ts`); run them with `npm test` (watch) or `npx vitest --run` (single pass). `npm run test:all` runs the Vitest suite followed by the Rust suite. There is no browser-based test runner; `npm run build` remains the required frontend build validation. No numeric coverage threshold is enforced.
 
 ## Commit & Pull Request Guidelines
 

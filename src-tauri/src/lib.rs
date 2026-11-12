@@ -2552,7 +2552,6 @@ pub fn run(_hidden: bool) {
             set_favorites_selected,
             set_main_workspace_layout,
             complete_tutorial,
-            show_panel_command,
             update::update_channel,
             update::check_for_updates,
             update::install_update,
@@ -2778,13 +2777,6 @@ async fn complete_tutorial(
 
     window_result?;
     save_result
-}
-
-/// Expose the panel show primitive so the tutorial (or any other surface) can
-/// open/restore the history panel.
-#[tauri::command]
-fn show_panel_command(app: tauri::AppHandle) {
-    show_panel(&app);
 }
 
 #[cfg(test)]

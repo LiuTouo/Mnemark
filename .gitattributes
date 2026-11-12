@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Cargo manifests: pin LF so core.autocrlf=true doesn't flag phantom diffs
+*.toml text eol=lf
