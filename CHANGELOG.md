@@ -4,6 +4,22 @@
 
 格式參考 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)，版本號遵循[語意化版本](https://semver.org/lang/zh-TW/)。
 
+## [0.8.24] - 2026-11-13
+
+### Added
+
+- 抽屜建立改為錨定在主窗格中央的 modal，位置可預期不再亂飄
+
+### Changed
+
+### Fixed
+
+- 修正常駐列剪貼寫入改在 blocking pool 執行，避免卡住非同步執行緒
+- 強化面板輸入邊緣：拖曳按鈕、刪除提示、熱鍵錄製與預覽連發的異常操作
+- 修正常 webview 冷啟動期間啟動面板召喚不可靠的問題
+- 移除窗格與 modal overlay 的 16px HUD 斜角
+- 修正 latest.json 更新簽章雙重編碼，v0.8.23 內建更新器無法解析的問題
+
 ## [0.8.23] - 2026-11-11
 
 ### Added
@@ -714,6 +730,7 @@
 
 - 初始版本：剪貼簿監聽（文字／圖片／檔案路徑）、SHA-256 內容去重、容量限制與淘汰、釘選（上限 10 則、永不淘汰）、即時搜尋、Raycast 風格浮動面板（`Ctrl+Shift+V`）、貼上模擬、刪除復原、系統匣常駐、排除清單、深淺色主題跟隨系統、免安裝可攜（設定存於 exe 旁）
 
+[0.8.24]: https://github.com/LiuTouo/Mnemark/compare/v0.8.23...v0.8.24
 [0.8.23]: https://github.com/LiuTouo/Mnemark/compare/v0.8.22...v0.8.23
 [0.8.22]: https://github.com/LiuTouo/Mnemark/compare/v0.8.21...v0.8.22
 [0.8.21]: https://github.com/LiuTouo/Mnemark/compare/v0.8.20...v0.8.21
