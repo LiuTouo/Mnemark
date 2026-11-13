@@ -40,6 +40,10 @@ clipflow.db
 # Local agent tooling
 .agent-skills-tmp/
 .claude/
+.codegraph/
+.pi/
+opencode.json
+website/.impeccable/
 .search-focus-report.md
 CLAUDE.md
 .aider*

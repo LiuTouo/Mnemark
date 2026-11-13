@@ -41,6 +41,12 @@ function Assert-NativeExit([string]$Name) {
 
 # ---------- preflight ----------
 $problems = @()
+# The push and tag below hardcode the mainline branch; refuse to release
+# from anywhere else (also catches detached HEAD, which reports "").
+$branch = git branch --show-current
+if ($branch -ne "main") {
+    $problems += "Release must run from 'main' (current branch: '$branch')"
+}
 if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
     $problems += "gh CLI not found"
 } else {
