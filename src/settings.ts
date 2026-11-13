@@ -442,6 +442,16 @@ function onHotkeyKeydown(e: KeyboardEvent) {
   const key = e.key;
   const isModifier = key === "Control" || key === "Shift" || key === "Alt" || key === "Meta";
   if (!isModifier) {
+    // Space/Dead/IME keys have no global-shortcut spelling; reject them up
+    // front instead of building e.g. "Ctrl+ " for the backend to fail on.
+    if (key.trim() === "" || key === "Dead" || key === "Process") {
+      showHotkeyError(t("hotkeyInvalid"));
+      hotkeyInput.value = config.hotkey;
+      hotkeyInput.classList.remove("recording");
+      hotkeyInput.readOnly = true;
+      updateDirtyState();
+      return;
+    }
     parts.push(key.length === 1 ? key.toUpperCase() : key);
 
     if (parts.length === 1) {

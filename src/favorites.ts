@@ -534,6 +534,9 @@ function showToast(message: string): void {
 function attachReorderDrag(handle: HTMLElement, id: string): void {
   let session: DrawerDragSession | null = null;
   handle.addEventListener("pointerdown", (e) => {
+    // Left button only — any other button's pointerup would still commit the
+    // reorder (same guard as the history rows' drag handle).
+    if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
     session = drawerDrag.start({

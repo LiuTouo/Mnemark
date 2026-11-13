@@ -1216,6 +1216,7 @@ async function deleteClip(clip: Clip) {
     });
   } catch (err) {
     console.error("Delete failed:", err);
+    showToast(localizeBackendError(String(err)));
   }
 }
 
@@ -1233,20 +1234,40 @@ async function closePanel() {
 }
 
 // === Automatic Preview ===
+// Hover previews are debounced: sweeping the pointer across the list fires
+// one request per row, and each image row re-encodes a bounded JPEG in Rust.
+const PREVIEW_HOVER_DELAY_MS = 80;
+let previewHoverTimer: ReturnType<typeof setTimeout> | null = null;
+
+function cancelPendingPreview(): void {
+  if (previewHoverTimer !== null) {
+    clearTimeout(previewHoverTimer);
+    previewHoverTimer = null;
+  }
+}
+
 function showPreviewFor(item: DisplayItem) {
+  cancelPendingPreview();
   if (!previewEnabled || previewState.currentId === item.id) return;
   const token = previewState.beginShow(item.id);
   workspaceTab = tabAfterPreviewIntent(workspaceTab, drawerIsOpen());
   void applyWorkspaceLayout();
-  locatedClip.preview(clipLocator(item))
-    .then(() => {
-      previewState.resolveShow(token, item.id);
-      void applyWorkspaceLayout();
-    })
-    .catch((err) => {
-      console.error("Failed to show preview:", localizeLocatedClipError(err));
-      if (previewState.isCurrent(token)) resyncPreviewState();
-    });
+  // Only the IPC (and its image encode in Rust) is debounced — a hover sweep
+  // fires one request per row. The optimistic open state begins immediately
+  // so Escape classification still sees the preview intent.
+  previewHoverTimer = setTimeout(() => {
+    previewHoverTimer = null;
+    if (!previewState.isCurrent(token)) return;
+    locatedClip.preview(clipLocator(item))
+      .then(() => {
+        previewState.resolveShow(token, item.id);
+        void applyWorkspaceLayout();
+      })
+      .catch((err) => {
+        console.error("Failed to show preview:", localizeLocatedClipError(err));
+        if (previewState.isCurrent(token)) resyncPreviewState();
+      });
+  }, PREVIEW_HOVER_DELAY_MS);
 }
 
 function syncPreviewToSelection() {
@@ -1262,6 +1283,7 @@ function syncPreviewToSelection() {
 }
 
 function hidePreview() {
+  cancelPendingPreview();
   const token = previewState.beginHide();
   invoke("hide_clip_preview")
     .then(() => {
@@ -1275,6 +1297,7 @@ function hidePreview() {
 }
 
 function resyncPreviewState() {
+  cancelPendingPreview();
   const token = previewState.beginResync();
   invoke<{ id: string } | null>("get_active_clip_preview")
     .then((active) => {
@@ -1302,6 +1325,10 @@ function attachRowDrag(row: HTMLElement, handle: HTMLElement, item: DisplayItem)
       : [item];
 
   handle.addEventListener("pointerdown", (e) => {
+    // Left button only: a right/middle-button drag would still commit on
+    // pointerup, silently mutating collections/reorder (marquee filters the
+    // same way).
+    if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
     handle.setPointerCapture(e.pointerId);
