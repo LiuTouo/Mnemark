@@ -16,9 +16,6 @@
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
             </button>
           </header>
-          <div id="favorites-create-row" class="favorites-create-row hidden">
-            <div id="favorites-create-input" class="favorites-create-input" role="textbox" contenteditable="plaintext-only" spellcheck="false" data-i18n-aria-label="collectionNamePlaceholder" aria-label="抽屜名稱"></div>
-          </div>
           <div id="favorites-list" role="listbox" aria-multiselectable="false"></div>
           <div id="favorites-empty" class="favorites-empty hidden">
             <p data-i18n="noCollections">尚無抽屜</p>
@@ -108,6 +105,17 @@
           <div class="modal-actions">
             <button type="button" id="note-cancel" class="btn-cancel" data-i18n="cancel">取消</button>
             <button type="button" id="note-save" class="btn-primary" data-i18n="save">儲存</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="create-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="create-modal-title">
+        <div class="modal-panel" role="document">
+          <h2 id="create-modal-title" data-i18n="createCollection">建立抽屜</h2>
+          <div id="create-modal-input" class="create-modal-input" role="textbox" contenteditable="plaintext-only" spellcheck="false" data-i18n-aria-label="collectionNamePlaceholder" aria-label="抽屜名稱"></div>
+          <div class="modal-actions">
+            <button type="button" id="create-modal-cancel" class="btn-cancel" data-i18n="cancel">取消</button>
+            <button type="button" id="create-modal-create" class="btn-primary" data-i18n="createAction">建立</button>
           </div>
         </div>
       </div>

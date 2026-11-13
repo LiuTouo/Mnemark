@@ -1,6 +1,7 @@
 // Inline Drawer pane: Collection list + History button, create/rename,
 // reorder, destructive remove modal, and the item-drop target.
 
+import { invoke } from "@tauri-apps/api/core";
 import { localizeDrawerError, t } from "./i18n";
 import { computeMenuPlacement } from "./menu";
 import { clipLocator } from "./drag";
@@ -163,7 +164,8 @@ export interface PanelDrawerRenderer extends PanelDrawerController {
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 let moreMenuFor: string | null = null;
-let editingCreate = false;
+let createBusy = false;
+let createRestoreFocus: HTMLElement | null = null;
 let renameCtl: ReturnType<typeof createRenameController>;
 let drawerDrag: DrawerDragLifecycle<HTMLElement>;
 let drawerViewController: DrawerViewController;
@@ -171,8 +173,10 @@ let drawerMutations: DrawerMutations;
 let listEl: HTMLElement;
 let drawerItemList: HTMLElement;
 let emptyEl: HTMLElement;
-let createRow: HTMLElement;
+let createModal: HTMLElement;
 let createInput: HTMLElement;
+let createCancel: HTMLButtonElement;
+let createConfirm: HTMLButtonElement;
 let addBtn: HTMLButtonElement;
 let moreMenu: HTMLElement;
 let toast: HTMLElement;
@@ -309,7 +313,6 @@ function render(view: DrawerView): void {
     listEl.append(row);
   });
 
-  createRow.classList.toggle("hidden", !editingCreate);
   updateMoreMenu();
 }
 
@@ -324,7 +327,11 @@ function selectCollection(id: string | null): void {
 // state), and paste is flattened to plaintext with no newlines.
 function wireNameEditor(
   el: HTMLElement,
-  opts: { onCommit: (value: string) => void; onCancel: () => void },
+  opts: {
+    onCommit: (value: string) => void;
+    onCancel: () => void;
+    commitOnBlur?: boolean;
+  },
 ): HTMLElement {
   el.setAttribute("role", "textbox");
   el.setAttribute("contenteditable", "plaintext-only");
@@ -359,7 +366,9 @@ function wireNameEditor(
     }
   });
 
-  el.addEventListener("blur", () => opts.onCommit(el.textContent ?? ""));
+  if (opts.commitOnBlur !== false) {
+    el.addEventListener("blur", () => opts.onCommit(el.textContent ?? ""));
+  }
 
   return el;
 }
@@ -386,33 +395,50 @@ function selectAllContents(el: HTMLElement): void {
   sel?.addRange(range);
 }
 
-// === create ===
-function startCreate(): void {
-  editingCreate = true;
-  renderCurrentView();
+// === create modal ===
+// Mirrors the note modal's focus protection: the panel would otherwise hide on
+// the transient focus loss a WebView text editor can produce.
+function openCreateModal(): void {
+  createRestoreFocus = document.activeElement as HTMLElement | null;
   createInput.textContent = "";
+  createModal.classList.remove("hidden");
   createInput.focus();
+  void invoke("set_main_modal_open", { open: true }).catch((err) => {
+    console.error("Failed to protect drawer create focus:", err);
+  });
 }
 
-function commitCreate(value: string): void {
-  if (!editingCreate) return;
-  const name = value.trim();
-  if (!name) { cancelCreate(); return; }
-  void drawerMutations.createCollection(name)
-    .then((outcome) => {
-      if (outcome.status === "failed") {
-        showToast(localizeDrawerError(String(outcome.error)));
-        return;
-      }
-      editingCreate = false;
-      renderCurrentView();
-      if (outcome.status === "succeeded") showToast(t("collectionAdded"));
+function closeCreateModal(): void {
+  const wasOpen = !createModal.classList.contains("hidden");
+  createModal.classList.add("hidden");
+  createBusy = false;
+  createConfirm.disabled = false;
+  createRestoreFocus?.focus();
+  createRestoreFocus = null;
+  if (wasOpen) {
+    void invoke("set_main_modal_open", { open: false }).catch((err) => {
+      console.error("Failed to release drawer create focus:", err);
     });
+  }
 }
 
-function cancelCreate(): void {
-  editingCreate = false;
-  renderCurrentView();
+function confirmCreate(): void {
+  if (createBusy) return;
+  const name = (createInput.textContent ?? "").trim();
+  if (!name) { closeCreateModal(); return; }
+  createBusy = true;
+  createConfirm.disabled = true;
+  void drawerMutations.createCollection(name).then((outcome) => {
+    if (outcome.status === "failed") {
+      createBusy = false;
+      createConfirm.disabled = false;
+      createInput.focus();
+      showToast(localizeDrawerError(String(outcome.error)));
+      return;
+    }
+    closeCreateModal();
+    if (outcome.status === "succeeded") showToast(t("collectionAdded"));
+  });
 }
 
 // === more menu ===
@@ -754,6 +780,7 @@ function createPanelDrawerController(): PanelDrawerRenderer {
     isAnyOverlayOpen(): boolean {
       return moreMenuFor !== null
         || !removeModal.classList.contains("hidden")
+        || !createModal.classList.contains("hidden")
         || drawerDrag.isActive();
     },
     closeOverlays(): boolean {
@@ -764,6 +791,10 @@ function createPanelDrawerController(): PanelDrawerRenderer {
       }
       if (!removeModal.classList.contains("hidden")) {
         closeRemoveModal();
+        return true;
+      }
+      if (!createModal.classList.contains("hidden")) {
+        closeCreateModal();
         return true;
       }
       return drawerDrag.cancel("explicit") !== null;
@@ -806,7 +837,7 @@ function createPanelDrawerController(): PanelDrawerRenderer {
       return drawerDrag.cancel(reason, session);
     },
     requestCreate(): void {
-      startCreate();
+      openCreateModal();
     },
   };
 }
@@ -820,8 +851,10 @@ export function mountDrawerRenderer(
   listEl = document.getElementById("favorites-list")!;
   drawerItemList = document.getElementById("clip-list")!;
   emptyEl = document.getElementById("favorites-empty")!;
-  createRow = document.getElementById("favorites-create-row")!;
-  createInput = document.getElementById("favorites-create-input") as HTMLElement;
+  createModal = document.getElementById("create-modal")!;
+  createInput = document.getElementById("create-modal-input") as HTMLElement;
+  createCancel = document.getElementById("create-modal-cancel") as HTMLButtonElement;
+  createConfirm = document.getElementById("create-modal-create") as HTMLButtonElement;
   addBtn = document.getElementById("favorites-add") as HTMLButtonElement;
   moreMenu = document.getElementById("favorites-more-menu")!;
   toast = document.getElementById("favorites-toast")!;
@@ -844,10 +877,17 @@ export function mountDrawerRenderer(
   const inlineDragCard = createInlineDragCard(document.getElementById("drag-overlay-card")!);
   drawerDrag = createProductionDrawerDrag(inlineDragCard, dependencies);
 
-  addBtn.addEventListener("click", () => { moreMenuFor = null; updateMoreMenu(); if (editingCreate) cancelCreate(); else startCreate(); });
+  addBtn.addEventListener("click", () => { moreMenuFor = null; updateMoreMenu(); if (!createModal.classList.contains("hidden")) closeCreateModal(); else openCreateModal(); });
   wireNameEditor(createInput, {
-    onCommit: (v) => commitCreate(v),
-    onCancel: () => cancelCreate(),
+    onCommit: () => confirmCreate(),
+    onCancel: () => closeCreateModal(),
+    commitOnBlur: false,
+  });
+
+  createCancel.addEventListener("click", closeCreateModal);
+  createConfirm.addEventListener("click", confirmCreate);
+  createModal.addEventListener("click", (e) => {
+    if (e.target === createModal) closeCreateModal();
   });
 
   removeCancel.addEventListener("click", closeRemoveModal);

@@ -1829,17 +1829,7 @@ textarea:focus-visible {
   background: var(--accent-subtle);
 }
 
-.favorites-create-row {
-  flex-shrink: 0;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--divider);
-}
-
-.favorites-create-row.hidden {
-  display: none;
-}
-
-.favorites-create-input,
+.create-modal-input,
 .favorites-rename-input {
   width: 100%;
   padding: 7px 10px;
@@ -2160,6 +2150,16 @@ textarea:focus-visible {
  * darkens it, and centers the dialog inside it. The clip-path repeats the
  * panes' cut corner so the notch stays undimmed. */
 #note-modal {
+  top: 0;
+  left: var(--history-left);
+  width: 420px;
+  height: 540px;
+  clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 0 100%);
+}
+
+/* Same main-pane anchoring as the note modal: centered over the history
+ * card, never over the transparent window gap. */
+#create-modal {
   top: 0;
   left: var(--history-left);
   width: 420px;
