@@ -49,6 +49,15 @@ use tauri::{Emitter, Manager};
 /// so this flag is explicitly cleared whenever the panel hides or reopens.
 static MAIN_MODAL_OPEN: AtomicBool = AtomicBool::new(false);
 
+/// Whether the panel webview's first page load has finished — before that
+/// the window composites nothing (fully transparent), so showing it is
+/// indistinguishable from "the hotkey did nothing" and only steals focus.
+static PANEL_FIRST_LOAD_DONE: AtomicBool = AtomicBool::new(false);
+
+/// A show was requested (hotkey/single-instance) while the first page load
+/// was still pending; the load callback consumes it and reveals the panel.
+static PANEL_SHOW_PENDING: AtomicBool = AtomicBool::new(false);
+
 /// Lock a shared-state mutex, recovering from poisoning instead of
 /// panicking. Clipboard state is best-effort: every mutation is a simple
 /// Vec/field update that cannot leave the structure inconsistent, so a
@@ -1798,6 +1807,16 @@ fn show_panel(app: &tauri::AppHandle) {
         .remember_paste_target();
     MAIN_MODAL_OPEN.store(false, Ordering::SeqCst);
     if let Some(window) = app.get_webview_window("main") {
+        if !PANEL_FIRST_LOAD_DONE.load(std::sync::atomic::Ordering::SeqCst) {
+            // Webview exists but paints nothing yet: revealing it now would
+            // show an invisible, focus-stealing window. Record the request;
+            // the first-load callback reveals the panel the moment it can
+            // paint (the "appears by itself" moment becomes the reply to
+            // this press).
+            log("[Mnemark] panel still loading; deferring show until first load");
+            PANEL_SHOW_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
+            return;
+        }
         log("[Mnemark] panel exists, showing");
         disable_panel_transitions(&window);
         center_on_cursor_monitor(app, &window);
@@ -1810,7 +1829,7 @@ fn show_panel(app: &tauri::AppHandle) {
         let _ = window.set_focus();
     } else {
         log("[Mnemark] creating new panel window");
-        match build_panel_window(app) {
+        match build_panel_window(app, true) {
             Ok(w) => finish_new_panel(app, w),
             Err(e) => {
                 log(&format!("[Mnemark] panel creation failed: {e:?}"));
@@ -1825,8 +1844,21 @@ fn show_panel(app: &tauri::AppHandle) {
 /// right after sign-in (user profile not yet ready, a stale msedgewebview2
 /// process holding the data folder), and the hotkey then appears dead all
 /// day because the error never surfaces.
-fn build_panel_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, tauri::Error> {
+///
+/// `show_when_ready`: reveal (center + show + focus) on the first finished
+/// page load — the hotkey path. The startup prewarm passes `false`: the
+/// window stays hidden until a later show_panel reveals the loaded panel.
+fn build_panel_window(
+    app: &tauri::AppHandle,
+    show_when_ready: bool,
+) -> Result<tauri::WebviewWindow, tauri::Error> {
     use tauri::{webview::PageLoadEvent, WebviewUrl, WebviewWindowBuilder};
+
+    // A fresh build resets the load-state pair: until the first
+    // PageLoadEvent::Finished arrives the webview paints nothing (a
+    // transparent hole), so show_panel must defer to the load callback.
+    PANEL_FIRST_LOAD_DONE.store(false, std::sync::atomic::Ordering::SeqCst);
+    PANEL_SHOW_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
 
     let (panel_w, panel_h) = zoomed_builder_size(app, WORKSPACE_HOST_WIDTH, WORKSPACE_HOST_HEIGHT);
     let first_page_load = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -1855,12 +1887,20 @@ fn build_panel_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, ta
             if matches!(payload.event(), PageLoadEvent::Finished)
                 && first_page_load_for_callback.swap(false, std::sync::atomic::Ordering::SeqCst)
             {
-                let app = window.app_handle();
-                disable_panel_transitions(&window);
-                center_on_cursor_monitor(app, &window);
-                let _ = window.show();
-                strip_panel_caption(&window);
-                let _ = window.set_focus();
+                PANEL_FIRST_LOAD_DONE.store(true, std::sync::atomic::Ordering::SeqCst);
+                // Reveal unless this was a background prewarm nobody asked
+                // for: either the hotkey path requested a show at build
+                // time, or a press arrived while the page was still loading.
+                if show_when_ready
+                    || PANEL_SHOW_PENDING.swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    let app = window.app_handle();
+                    disable_panel_transitions(&window);
+                    center_on_cursor_monitor(app, &window);
+                    let _ = window.show();
+                    strip_panel_caption(&window);
+                    let _ = window.set_focus();
+                }
             }
         })
         .visible(false)
@@ -1962,7 +2002,7 @@ fn schedule_panel_rebuild(app: tauri::AppHandle, attempt: u32) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let task_app = app.clone();
-        if let Err(e) = app.run_on_main_thread(move || match build_panel_window(&task_app) {
+        if let Err(e) = app.run_on_main_thread(move || match build_panel_window(&task_app, true) {
             Ok(w) => finish_new_panel(&task_app, w),
             Err(e) => {
                 log(&format!(
@@ -1972,6 +2012,39 @@ fn schedule_panel_rebuild(app: tauri::AppHandle, attempt: u32) {
             }
         }) {
             log(&format!("[Mnemark] run_on_main_thread failed: {e:?}"));
+        }
+    });
+}
+
+/// Prewarm the panel webview at startup: at logon, WebView2's first
+/// initialization can stall for a minute or more (field log 2026-10-11:
+/// 68 s inside `.build()`), and even warm the first page load lags the
+/// window build by seconds. Paying that cost in the background right after
+/// boot makes the first hotkey press land on a loaded panel. The window is
+/// built hidden and only revealed when a press arrives (see
+/// PANEL_SHOW_PENDING); a press before the prewarm lands takes the normal
+/// lazy path (both run on the main thread, so the existence check cannot
+/// race).
+fn spawn_panel_prewarm(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        // No delay: the sooner the (hidden) webview exists, the shorter the
+        // window in which a hotkey press lands on a cold WebView2 spawn.
+        let task_app = app.clone();
+        if let Err(e) = app.run_on_main_thread(move || {
+            if task_app.get_webview_window("main").is_some() {
+                return;
+            }
+            log("[Mnemark] prewarming panel window");
+            match build_panel_window(&task_app, false) {
+                Ok(w) => finish_new_panel(&task_app, w),
+                // Transient logon-time failure: the lazy path (with its own
+                // retries) on the next hotkey press remains the backstop.
+                Err(e) => log(&format!("[Mnemark] panel prewarm failed: {e:?}")),
+            }
+        }) {
+            log(&format!(
+                "[Mnemark] prewarm run_on_main_thread failed: {e:?}"
+            ));
         }
     });
 }
@@ -2544,6 +2617,10 @@ pub fn run(_hidden: bool) {
             {
                 let _ = open_tutorial_window(&handle);
             }
+
+            // Warm the panel webview before the user's first hotkey press
+            // (see spawn_panel_prewarm: logon-time WebView2 cold start).
+            spawn_panel_prewarm(handle.clone());
 
             Ok(())
         })
