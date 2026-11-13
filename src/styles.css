@@ -320,14 +320,6 @@ html, body {
   opacity: var(--panel-opacity, 1);
 }
 
-/* === HUD 框線簽名裝飾 === */
-#panel,
-#favorites-panel,
-#preview-panel,
-.workspace-tabs {
-  clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 0 100%);
-}
-
 /* === Search === */
 .search-container {
   display: flex;
@@ -2146,15 +2138,12 @@ textarea:focus-visible {
 /* The main window is transparent and wider than its visible panes, so an
  * overlay must never span the window: it would dim the desktop behind the
  * panes and center the dialog off-pane. Each overlay instead covers exactly
- * its owner pane (mirroring the pane geometry in every workspace mode),
- * darkens it, and centers the dialog inside it. The clip-path repeats the
- * panes' cut corner so the notch stays undimmed. */
+ * its owner pane (mirroring the pane geometry in every workspace mode). */
 #note-modal {
   top: 0;
   left: var(--history-left);
   width: 420px;
   height: 540px;
-  clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 0 100%);
 }
 
 /* Same main-pane anchoring as the note modal: centered over the history
@@ -2164,7 +2153,6 @@ textarea:focus-visible {
   left: var(--history-left);
   width: 420px;
   height: 540px;
-  clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 0 100%);
 }
 
 #remove-modal {
@@ -2172,7 +2160,6 @@ textarea:focus-visible {
   left: calc(var(--history-left) - var(--left-extent));
   width: 360px;
   height: 540px;
-  clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 0 100%);
 }
 
 #workspace[data-mode="compact"] #remove-modal,
