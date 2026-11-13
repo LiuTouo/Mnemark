@@ -422,6 +422,9 @@ where
         }
     }
 
+    /// Test contract pairing write+present; production splits them so the
+    /// blocking write can run on the blocking pool (see lib.rs).
+    #[cfg(test)]
     pub(crate) async fn paste<Present, F>(
         &self,
         locator: &ClipLocator,
@@ -436,6 +439,9 @@ where
         Ok(outcome)
     }
 
+    /// Test contract alias for write (no presentation half); production
+    /// calls write on the blocking pool directly.
+    #[cfg(test)]
     pub(crate) fn copy(&self, locator: &ClipLocator) -> Result<CopyOutcome, LocatedClipError> {
         self.write(locator)
     }
@@ -515,7 +521,11 @@ where
         self.source.set_note(locator, note)
     }
 
-    fn write(&self, locator: &ClipLocator) -> Result<CopyOutcome, LocatedClipError> {
+    /// Write the located clip's content to the clipboard. Runs wherever the
+    /// caller schedules it: the Win32 write path retries a busy clipboard
+    /// with blocking sleeps (clipboard::open_clipboard_retry), so production
+    /// invokes this on the blocking pool.
+    pub(crate) fn write(&self, locator: &ClipLocator) -> Result<CopyOutcome, LocatedClipError> {
         let resolved = self.source.resolve(locator)?;
         // A deferred Clip stands in for content the monitor never read
         // (delayed-render source, lost render). While the clipboard sequence

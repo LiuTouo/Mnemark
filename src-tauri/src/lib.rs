@@ -477,26 +477,61 @@ fn located_clip_module(
     )
 }
 
+/// Run one located-clip clipboard write on the blocking pool: the Win32
+/// write path retries a busy clipboard with blocking sleeps
+/// (clipboard::open_clipboard_retry), which must not stall async workers.
+fn spawn_located_clip_write(
+    state: &AppState,
+    locator: ClipLocator,
+) -> impl std::future::Future<Output = Result<CopyOutcome, LocatedClipWireError>> + Send {
+    let history = state.history.clone();
+    let drawer = state.drawer.clone();
+    let (paste_files_as_files, preview_enabled) = {
+        let config = lock(&state.config);
+        (config.paste_files_as_files, config.preview_enabled)
+    };
+    async move {
+        let joined = tauri::async_runtime::spawn_blocking(move || {
+            LocatedClipModule::new(
+                StateLocatedClipSource::new(history.as_ref(), drawer.as_ref()),
+                SystemLocatedClipPlatform,
+                paste_files_as_files,
+                preview_enabled,
+            )
+            .write(&locator)
+        })
+        .await;
+        match joined {
+            Ok(Ok(outcome)) => Ok(outcome),
+            Ok(Err(error)) => Err(error),
+            Err(join) => Err(LocatedClipError::ClipboardWrite(format!(
+                "write task join failed: {join}"
+            ))),
+        }
+        .map_err(LocatedClipWireError::from)
+    }
+}
+
 #[tauri::command]
 async fn paste_located_clip(
     app: tauri::AppHandle,
     locator: ClipLocator,
     state: tauri::State<'_, AppState>,
 ) -> Result<CopyOutcome, LocatedClipWireError> {
-    located_clip_module(&state)
-        .paste(&locator, || hide_and_paste(&app))
-        .await
-        .map_err(LocatedClipWireError::from)
+    // Write first, then hide the panel and send Ctrl+V — the same ordering
+    // LocatedClipModule::paste established: a failed write never dismisses
+    // the panel.
+    let outcome = spawn_located_clip_write(state.inner(), locator).await?;
+    hide_and_paste(&app).await;
+    Ok(outcome)
 }
 
 #[tauri::command]
-fn copy_located_clip(
+async fn copy_located_clip(
     locator: ClipLocator,
-    state: tauri::State<AppState>,
+    state: tauri::State<'_, AppState>,
 ) -> Result<CopyOutcome, LocatedClipWireError> {
-    located_clip_module(&state)
-        .copy(&locator)
-        .map_err(LocatedClipWireError::from)
+    spawn_located_clip_write(state.inner(), locator).await
 }
 
 #[tauri::command]
@@ -774,7 +809,7 @@ async fn commit_preview_on_main_thread(
             let _ = tx.send(Ok(()));
             return;
         }
-        let _ = tx.send(commit_preview_window(&handle, generation, &payload));
+        let _ = tx.send(commit_preview_window(&handle, &payload));
     })
     .map_err(|e| format!("run_on_main_thread failed: {:?}", e))?;
 
@@ -783,15 +818,11 @@ async fn commit_preview_on_main_thread(
 }
 
 /// Commit the current preview payload to the inline pane in the main WebView.
-fn commit_preview_window(
-    app: &tauri::AppHandle,
-    generation: u64,
-    payload: &PreviewPayload,
-) -> Result<(), String> {
+/// Generation re-check happens in the caller before this runs.
+fn commit_preview_window(app: &tauri::AppHandle, payload: &PreviewPayload) -> Result<(), String> {
     let state = app.state::<AppState>();
     *lock(&state.preview) = Some(payload.clone());
     let _ = app.emit("preview-payload-updated", payload);
-    let _ = generation;
     Ok(())
 }
 
