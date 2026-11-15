@@ -123,6 +123,8 @@ describe("Panel located Clip callers", () => {
           return { language: "zh-TW", preview_enabled: true };
         case "get_clips":
           return clips;
+        case "get_current_clip_hash":
+          return clips[0].content_hash;
         case "copy_located_clip":
           return "copied";
         case "set_located_clip_note":
@@ -147,6 +149,8 @@ describe("Panel located Clip callers", () => {
     });
 
     const firstRow = document.querySelector<HTMLElement>("#clip-list .clip-item")!;
+    expect(firstRow.classList.contains("is-current")).toBe(true);
+    expect(document.querySelectorAll("#clip-list .clip-item.is-current")).toHaveLength(1);
     firstRow.click();
     await vi.waitFor(() => {
       expect(commandCalls("paste_located_clip")).toContainEqual([

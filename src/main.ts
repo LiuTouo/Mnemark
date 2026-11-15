@@ -45,6 +45,9 @@ let workspaceLayoutRevision = 0;
 // selection indexes into this — never into the raw arrays directly.
 let visibleClips: DisplayItem[] = [];
 let selectedIndex = -1;
+// Content hash of the Clip currently in the system clipboard (backend truth
+// via get_current_clip_hash / clipboard-update); null = nothing current.
+let currentClipHash: string | null = null;
 let vimMode = false;
 let previewEnabled = true;
 let rememberHistoryFilter = false;
@@ -320,6 +323,7 @@ async function init() {
   // rejection here used to leave the panel center-only on every monitor.
   try {
     await history.load();
+    currentClipHash = await invoke<string | null>("get_current_clip_hash");
   } catch (error) {
     console.error("Failed to load history:", error);
     void invoke("frontend_log", { message: `history load failed: ${error}` }).catch(() => {});
@@ -380,6 +384,7 @@ async function init() {
   });
 
   await listen<ClipboardUpdate>("clipboard-update", (event) => {
+    currentClipHash = event.payload.clip.content_hash;
     history.applyCapture(event.payload);
     render();
   });
@@ -682,8 +687,10 @@ function render(scrollToSelection = !multiSelect.active) {
       hasUnpinned = true;
     }
 
+    const isCurrent = !isFav && item.content_hash === currentClipHash;
     const el = document.createElement("div");
-    el.className = `clip-item${item.truncated ? " truncated" : ""}${index === selectedIndex ? " selected" : ""}${multiSelect.active ? " multi-select-mode" : ""}${multiSelect.has(item.id) ? " batch-selected" : ""}`;
+    el.className = `clip-item${item.truncated ? " truncated" : ""}${index === selectedIndex ? " selected" : ""}${multiSelect.active ? " multi-select-mode" : ""}${multiSelect.has(item.id) ? " batch-selected" : ""}${isCurrent ? " is-current" : ""}`;
+    if (isCurrent) el.title = t("currentClipboardItem");
     el.dataset.index = String(index);
     el.dataset.clipId = item.id;
     el.dataset.isFavorite = isFav ? "1" : "0";

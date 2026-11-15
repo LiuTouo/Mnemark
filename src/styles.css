@@ -553,6 +553,18 @@ html, body {
   box-shadow: inset 3px 0 0 var(--accent);
 }
 
+/* History row whose content is what the system clipboard holds right now. */
+.clip-item.is-current::after {
+  content: "";
+  position: absolute;
+  right: 7px;
+  bottom: 5px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
 .selection-checkbox {
   position: relative;
   flex: 0 0 20px;

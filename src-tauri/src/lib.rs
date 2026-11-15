@@ -75,6 +75,11 @@ struct AppState {
     history: Arc<Mutex<HistoryState>>,
     config: Arc<Mutex<AppConfig>>,
     monitor_running: Arc<Mutex<bool>>,
+    /// Content hash of the history Clip currently held by the system
+    /// clipboard; None when the clipboard holds uncaptured content (skipped
+    /// capture) or monitoring is paused. Drives the panel's is-current row
+    /// marker via get_current_clip_hash.
+    current_clip_hash: Arc<Mutex<Option<String>>>,
     tray_items: Arc<Mutex<Option<TrayMenuItems>>>,
     /// Hotkey-registration failure that opened Settings at startup, shown
     /// inline there (CONTEXT: Hotkey conflict detection).
@@ -187,6 +192,11 @@ fn apply_tray_monitor_icon(app: &tauri::AppHandle, running: bool) {
 #[tauri::command]
 fn get_clips(state: tauri::State<AppState>) -> Vec<Clip> {
     lock(&state.history).clips_for_ipc()
+}
+
+#[tauri::command]
+fn get_current_clip_hash(state: tauri::State<AppState>) -> Option<String> {
+    lock(&state.current_clip_hash).clone()
 }
 
 #[tauri::command]
@@ -914,10 +924,31 @@ impl CaptureHistory for SharedCaptureHistory {
 
 struct TauriCaptureEmitter {
     app: tauri::AppHandle,
+    current_clip_hash: Arc<Mutex<Option<String>>>,
+}
+
+/// Track which history Clip the system clipboard currently holds. A Store
+/// pins the marker to the stored Clip's content; a skipped capture clears it
+/// (the clipboard changed but holds content that is not in History).
+/// DoubleCopy leaves the marker untouched — the clipboard still holds the
+/// same content — and PersistenceFailed carries no Clip in its decision, so
+/// the marker survives until the next stored capture.
+fn apply_current_clip_hash(current: &Mutex<Option<String>>, decision: &CaptureDecision) {
+    match decision {
+        CaptureDecision::Store { update, .. } => {
+            *lock(current) = Some(update.clip.content_hash.clone())
+        }
+        CaptureDecision::Skip {
+            reason: SkipReason::Capture(_),
+            ..
+        } => *lock(current) = None,
+        _ => {}
+    }
 }
 
 impl CaptureEmitter for TauriCaptureEmitter {
     fn emit(&mut self, decision: CaptureDecision) {
+        apply_current_clip_hash(&self.current_clip_hash, &decision);
         match decision {
             CaptureDecision::NoChange => {}
             CaptureDecision::Defer {
@@ -988,6 +1019,7 @@ fn start_monitor(
     history: Arc<Mutex<HistoryState>>,
     config: Arc<Mutex<AppConfig>>,
     monitor_running: Arc<Mutex<bool>>,
+    current_clip_hash: Arc<Mutex<Option<String>>>,
 ) {
     std::thread::spawn(move || {
         let self_exe = std::env::current_exe()
@@ -998,7 +1030,10 @@ fn start_monitor(
             Win32SequenceReader,
             Win32ClipboardCapturer,
             SharedCaptureHistory { history },
-            TauriCaptureEmitter { app: app_handle },
+            TauriCaptureEmitter {
+                app: app_handle,
+                current_clip_hash,
+            },
             Win32SourceSampler,
             self_exe,
         );
@@ -2436,6 +2471,7 @@ pub fn run(_hidden: bool) {
     let history = Arc::new(Mutex::new(history_state));
     let config_store = Arc::new(Mutex::new(config.clone()));
     let monitor_running = Arc::new(Mutex::new(true));
+    let current_clip_hash: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let drawer = Arc::new(Mutex::new(DrawerState::new(favorites)));
     let tray_items = Arc::new(Mutex::new(None));
     let startup_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(migration_error));
@@ -2466,6 +2502,7 @@ pub fn run(_hidden: bool) {
             history: history.clone(),
             config: config_store.clone(),
             monitor_running: monitor_running.clone(),
+            current_clip_hash: current_clip_hash.clone(),
             tray_items: tray_items.clone(),
             startup_error: startup_error.clone(),
             preview: Arc::new(Mutex::new(None)),
@@ -2534,6 +2571,7 @@ pub fn run(_hidden: bool) {
                 history.clone(),
                 config_store.clone(),
                 monitor_running.clone(),
+                current_clip_hash.clone(),
             );
 
             // Background auto-update check (installed builds only, and only
@@ -2575,6 +2613,10 @@ pub fn run(_hidden: bool) {
                         let state = app.state::<AppState>();
                         let mut running = lock(&state.monitor_running);
                         *running = !*running;
+                        // A paused monitor no longer tracks the clipboard:
+                        // stop claiming any row is current. The next stored
+                        // capture after resume re-pins the marker.
+                        *lock(&state.current_clip_hash) = None;
                         let lang = lock(&state.config).language.clone();
                         let labels = tray_labels(&lang);
                         let _ = pause_item_handle.set_text(if *running {
@@ -2626,6 +2668,7 @@ pub fn run(_hidden: bool) {
         })
         .invoke_handler(tauri::generate_handler![
             get_clips,
+            get_current_clip_hash,
             delete_clip,
             delete_clips,
             undo_delete,
@@ -3222,5 +3265,74 @@ mod hotkey_retry_tests {
             ][..]
         );
         assert_eq!(delays[HOTKEY_MAX_RETRIES as usize], None);
+    }
+}
+
+#[cfg(test)]
+mod current_clip_hash_tests {
+    use super::*;
+    use models::{Clip, ClipKind, ClipboardUpdate};
+
+    fn clip(id: &str, hash: &str) -> Clip {
+        Clip {
+            id: id.to_string(),
+            kind: ClipKind::Text,
+            text_content: Some(id.to_string()),
+            file_paths: None,
+            image_data: None,
+            thumbnail_base64: None,
+            content_hash: hash.to_string(),
+            preview: id.to_string(),
+            note: None,
+            truncated: false,
+            source_exe: "test.exe".to_string(),
+            source_title: "Test".to_string(),
+            source_icon: None,
+            captured_at: 1,
+            pinned: false,
+            byte_size: id.len() as u64,
+            deferred: None,
+        }
+    }
+
+    #[test]
+    fn store_pins_hash_and_skipped_capture_clears_it() {
+        let current = Mutex::new(None);
+        apply_current_clip_hash(
+            &current,
+            &CaptureDecision::Store {
+                consumed_sequence: 1,
+                update: Box::new(ClipboardUpdate {
+                    clip: clip("a", "hash-a"),
+                    evicted: vec![],
+                }),
+            },
+        );
+        assert_eq!(*lock(&current), Some("hash-a".to_string()));
+
+        apply_current_clip_hash(
+            &current,
+            &CaptureDecision::Skip {
+                consumed_sequence: 2,
+                reason: SkipReason::Capture("excluded app".to_string()),
+            },
+        );
+        assert_eq!(*lock(&current), None);
+    }
+
+    #[test]
+    fn double_copy_and_paused_keep_the_marker() {
+        let current = Mutex::new(Some("hash-a".to_string()));
+        for reason in [SkipReason::DoubleCopy, SkipReason::Paused] {
+            apply_current_clip_hash(
+                &current,
+                &CaptureDecision::Skip {
+                    consumed_sequence: 3,
+                    reason,
+                },
+            );
+        }
+        // The clipboard still holds the same content — the marker must stay.
+        assert_eq!(*lock(&current), Some("hash-a".to_string()));
     }
 }
