@@ -3,6 +3,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import "./focus-mode";
 import { applyI18n, t } from "./i18n";
 import { configBootstrap } from "./config";
 import type { AppConfig } from "./config";

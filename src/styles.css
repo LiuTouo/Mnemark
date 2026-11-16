@@ -1599,6 +1599,13 @@ textarea:focus-visible {
   outline-offset: 1px;
 }
 
+/* Pointer navigation: hide all focus rings (mouse users never want the
+   tab-style outline; Chromium's heuristic can otherwise leak it after a
+   single Tab press). focus-mode.ts toggles .keyboard-nav on Tab keydown. */
+body:not(.keyboard-nav) :is(button, input, select, textarea):focus-visible {
+  outline: none;
+}
+
 /* ============================================================
    LINK CLIP ICON — same as text-icon but using link SVG in markup
    ============================================================ */

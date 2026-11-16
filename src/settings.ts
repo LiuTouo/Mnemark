@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import "./focus-mode";
 import { applyI18n, setLanguage, t, localizeBackendError } from "./i18n";
 import { applyTheme } from "./theme";
 import { clampOpacityPercent, configBootstrap } from "./config";

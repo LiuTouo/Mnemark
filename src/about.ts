@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
+import "./focus-mode";
 import { open } from "@tauri-apps/plugin-shell";
 import { resourceDir } from "@tauri-apps/api/path";
 import { applyI18n, t } from "./i18n";
