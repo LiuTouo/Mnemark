@@ -251,6 +251,16 @@ html, body {
   animation: workspace-pane-conceal 0.3s cubic-bezier(0.42, 0, 1, 1) forwards;
 }
 
+/* Reduced motion: near-zero duration instead of `animation: none`, so the
+   animationend listeners (reveal class cleanup, conceal completion) still
+   fire and the layout pipeline never falls back to its backstop timer. */
+@media (prefers-reduced-motion: reduce) {
+  .workspace-drawer.pane-reveal,
+  .workspace-drawer.pane-conceal {
+    animation-duration: 0.01ms;
+  }
+}
+
 /* Narrow modes host the drawer to the right of History: slide out to the
    right instead of the left (applies to both reveal and conceal). */
 #workspace[data-mode="compact"] .workspace-drawer,
