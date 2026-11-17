@@ -249,6 +249,15 @@ fn take_startup_error(state: tauri::State<AppState>) -> Option<String> {
     lock(&state.startup_error).take()
 }
 
+/// Hide the reused settings window after its frontend close guard agreed
+/// (clean form, or the user confirmed discarding unsaved changes).
+#[tauri::command]
+fn hide_settings_window(app: tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("settings") {
+        let _ = window.hide();
+    }
+}
+
 /// Release builds have no devtools console, so frontend failures (layout
 /// viewport never converging, drawer view not loading) are invisible in the
 /// field. Route them into the same diag log the backend writes.
@@ -2677,6 +2686,7 @@ pub fn run(_hidden: bool) {
             set_located_clip_note,
             get_config,
             take_startup_error,
+            hide_settings_window,
             frontend_log,
             update_config,
             paste_located_clip,
@@ -2763,11 +2773,10 @@ fn open_settings_window(app: &tauri::AppHandle) -> Result<(), tauri::Error> {
         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
             // Never destroy: hide instead, so repeated open/close does not
             // rebuild the WebView each time (a long-running risk on Windows).
-            // Save/Cancel/Escape/title-bar all route through CloseRequested.
+            // The frontend owns the unsaved-changes guard: it confirms a
+            // dirty form, then hides via hide_settings_window.
             api.prevent_close();
-            if let Some(window) = app_handle.get_webview_window("settings") {
-                let _ = window.hide();
-            }
+            let _ = app_handle.emit("settings-close-requested", ());
         }
     });
 

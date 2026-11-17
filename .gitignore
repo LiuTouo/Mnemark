@@ -54,3 +54,6 @@ target/
 
 # Local prototype scratch space
 prototype/
+
+# Impeccable critique snapshots (local agent tooling)
+.impeccable/

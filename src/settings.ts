@@ -1,18 +1,22 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./focus-mode";
 import { applyI18n, setLanguage, t, localizeBackendError } from "./i18n";
 import { applyTheme } from "./theme";
 import { clampOpacityPercent, configBootstrap } from "./config";
 import type { AppConfig } from "./config";
 import { shortcutLabel, isModifierCode, isFunctionCode, isPrintableCode, FAVORITES_DEFAULT_CODES } from "./shortcut";
+import { resolveCloseIntent } from "./settings-close";
 
 // The saved config is the "baseline" the form is compared against for the
 // dirty check. It is only replaced after a successful save.
 let config: AppConfig;
 let loading = true;
 let saving = false;
+
+// Dirty-close confirmation state: the first close attempt on a dirty form
+// warns; the second (Esc / Cancel / title-bar X) discards and hides.
+let closeArmed = false;
 
 // Favorites toggle chord — captured as physical KeyboardEvent.code values.
 let favoritesShortcutCodes: string[] = FAVORITES_DEFAULT_CODES;
@@ -105,6 +109,11 @@ function isDirty(): boolean {
   return !configsEqual(readForm(), config);
 }
 
+/** Dirty only after a successful load; before that there is no baseline. */
+function isDirtyNow(): boolean {
+  return !loading && !saving && config !== undefined && isDirty();
+}
+
 function setStatus(message: string, isError: boolean) {
   statusEl.textContent = message;
   statusEl.classList.toggle("is-error", isError);
@@ -134,6 +143,7 @@ function clearHotkeyError() {
  * (empty required numbers, min/max, and step mismatches all disable it). */
 function updateDirtyState() {
   if (loading || saving) return;
+  if (closeArmed && !isDirtyNow()) disarmCloseConfirm();
   const dirty = isDirty();
   saveBtn.disabled = !dirty || !form.checkValidity();
   if (dirty) {
@@ -187,6 +197,8 @@ function resetTransientState() {
   favoritesModifiersSeen = new Set<string>();
   favoritesShortcutInput.classList.remove("recording");
   favoritesShortcutInput.readOnly = true;
+  closeArmed = false;
+  cancelBtn.textContent = t("cancel");
 }
 
 /** Monotonic token so a stale in-flight get_config (superseded by a newer
@@ -224,6 +236,11 @@ async function init() {
   bindFormEvents();
   await listen("settings-reopened", () => {
     void loadConfig();
+  });
+  // Title-bar X and any backend-initiated close route through the Rust
+  // CloseRequested handler, which hands the decision back to this page.
+  await listen("settings-close-requested", () => {
+    requestClose();
   });
   await loadConfig();
 
@@ -289,7 +306,7 @@ async function onSubmit(e: Event) {
   try {
     await invoke("update_config", { newConfig: next });
     config = next;
-    await getCurrentWindow().close();
+    await invoke("hide_settings_window");
   } catch (err) {
     console.error("Save failed:", err);
     setSaving(false);
@@ -471,20 +488,43 @@ function onHotkeyKeydown(e: KeyboardEvent) {
   }
 }
 
+/** Route every close attempt through the dirty guard: a dirty form warns
+ * once (status line + Cancel becomes "discard & close"); the next attempt
+ * discards and hides. Clean or warned forms hide immediately; a save in
+ * flight swallows the attempt. */
+function requestClose() {
+  const intent = resolveCloseIntent({ saving, dirty: isDirtyNow(), armed: closeArmed });
+  if (intent === "ignore") return;
+  if (intent === "arm") {
+    closeArmed = true;
+    setStatus(t("unsavedCloseWarning"), true);
+    cancelBtn.textContent = t("discardAndClose");
+    return;
+  }
+  closeArmed = false;
+  cancelBtn.textContent = t("cancel");
+  void invoke("hide_settings_window");
+}
+
+function disarmCloseConfirm() {
+  closeArmed = false;
+  cancelBtn.textContent = t("cancel");
+  updateDirtyState();
+}
+
 /** Cancel button + Escape-to-close. Bound before config load so a failed load
  * still leaves a usable exit. Escape is ignored while recording (the input's
- * own handler cancels recording) and while saving (no mid-save close). */
+ * own handler cancels recording); the saving case is decided by the guard. */
 function bindCloseEvents() {
   cancelBtn.addEventListener("click", () => {
-    getCurrentWindow().close();
+    requestClose();
   });
 
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
     if (hotkeyInput.classList.contains("recording")) return;
-    if (saving) return;
     e.preventDefault();
-    getCurrentWindow().close();
+    requestClose();
   });
 }
 
@@ -493,6 +533,7 @@ function bindFormEvents() {
   selectInput("setting-language").addEventListener("change", (e) => {
     setLanguage((e.target as HTMLSelectElement).value);
     applyI18n();
+    if (closeArmed) cancelBtn.textContent = t("discardAndClose");
     document.title = `Mnemark ${t("settings")}`;
   });
 

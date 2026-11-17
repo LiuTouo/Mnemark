@@ -37,6 +37,15 @@ function show(id: string, visible: boolean) {
   document.getElementById(id)!.classList.toggle("hidden", !visible);
 }
 
+/** One contextual follow-up button at a time; the base check button hides
+ * while a follow-up owns the next action. `null` returns to check-only. */
+function showContextual(id: string | null) {
+  show("btn-check-update", id === null);
+  for (const b of ["btn-install-update", "btn-restart", "btn-open-folder"]) {
+    show(b, b === id);
+  }
+}
+
 /** Installed build: check → install → automatic relaunch via the updater plugin. */
 async function installedCheck() {
   setStatus(t("checkingUpdate"));
@@ -44,7 +53,7 @@ async function installedCheck() {
     const result = await invoke<UpdateCheck>("check_for_updates");
     if (result.status === "available" && result.version) {
       setStatus(t("updateAvailable", { v: result.version }));
-      show("btn-install-update", true);
+      showContextual("btn-install-update");
     } else {
       setStatus(t("updateUpToDate"));
     }
@@ -55,13 +64,13 @@ async function installedCheck() {
 }
 
 async function installedInstall() {
-  show("btn-install-update", false);
+  showContextual("btn-restart");
   setStatus(t("installing"));
   try {
     await invoke<string>("install_update");
     // Windows exits during install; this is only a fallback if the platform's
     // updater returns without relaunching.
-    show("btn-restart", true);
+    showContextual("btn-restart");
   } catch (err) {
     console.error("Install failed:", err);
     setStatus(t("updateError"));
@@ -121,7 +130,7 @@ async function portableDownload(manifest: GhAsset) {
       manifestUrl: manifest.browser_download_url,
     });
     setStatus(t("portableUpdateReady", { path }));
-    show("btn-open-folder", true);
+    showContextual("btn-open-folder");
   } catch (err) {
     console.error("Portable download failed:", err);
     setStatus(t("updateError"));
@@ -167,9 +176,7 @@ async function init() {
 
   const runCheck = channel === "installed" ? installedCheck : portableCheck;
   document.getElementById("btn-check-update")!.addEventListener("click", () => {
-    show("btn-install-update", false);
-    show("btn-restart", false);
-    show("btn-open-folder", false);
+    showContextual(null);
     runCheck();
   });
   document.getElementById("btn-install-update")!.addEventListener("click", installedInstall);

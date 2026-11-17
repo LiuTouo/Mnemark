@@ -516,6 +516,19 @@ function setFilter(filter: FilterKind) {
   render();
 }
 
+/** Clear whatever produced a no-results view (search box, active filter, or
+ * both). setFilter re-renders; a search-only clear renders directly. */
+function clearSearchAndFilter() {
+  const hadSearch = searchInput.value.length > 0;
+  const hadFilter = activeFilter !== "all";
+  if (hadSearch) searchInput.value = "";
+  if (hadFilter) {
+    setFilter("all");
+  } else {
+    render();
+  }
+}
+
 function updateFilterBar() {
   filterBar.querySelectorAll(".filter-btn").forEach((btn) => {
     const el = btn as HTMLButtonElement;
@@ -704,6 +717,12 @@ function render(scrollToSelection = !multiSelect.active) {
   const totalEmpty = source.length === 0;
 
   emptyState.classList.toggle("hidden", !showEmpty);
+  // Reset any no-results action before (re)populating the state below.
+  emptyHint.classList.remove("empty-hint-action");
+  emptyHint.removeAttribute("role");
+  emptyHint.removeAttribute("tabindex");
+  emptyHint.onclick = null;
+  emptyHint.onkeydown = null;
   if (showEmpty) {
     if (totalEmpty) {
       const collectionId = selectedCollectionId();
@@ -714,9 +733,21 @@ function render(scrollToSelection = !multiSelect.active) {
         emptyHint.classList.remove("hidden");
       }
     } else if (searching || filtering) {
-      emptyTitle.textContent =
-        searching && filtering ? t("noResults") : filtering && !searching ? t("categoryEmpty") : t("noResults");
-      emptyHint.classList.add("hidden");
+      // No-results is a dead end without an exit: offer the exact reset
+      // (search, filter, or both) instead of a bare "no matches".
+      emptyTitle.textContent = t("noResults");
+      emptyHint.textContent = searching && filtering ? t("clearSearchAndFilter") : searching ? t("clearSearch") : t("clearFilter");
+      emptyHint.classList.remove("hidden");
+      emptyHint.classList.add("empty-hint-action");
+      emptyHint.setAttribute("role", "button");
+      emptyHint.setAttribute("tabindex", "0");
+      emptyHint.onclick = clearSearchAndFilter;
+      emptyHint.onkeydown = (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          clearSearchAndFilter();
+        }
+      };
     }
   }
 
