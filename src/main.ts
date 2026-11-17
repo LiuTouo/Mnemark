@@ -42,6 +42,8 @@ type DisplayItem = Clip | FavoriteItem;
 let panelDrawer: PanelDrawerRenderer;
 let workspaceTab: WorkspaceTab = "drawer";
 let workspaceLayoutRevision = 0;
+// Mirrors layout.drawerVisible across commits to detect reveal transitions.
+let drawerPaneVisible = false;
 // The search-filtered view of the active dataset, in display order. Keyboard
 // selection indexes into this — never into the raw arrays directly.
 let visibleClips: DisplayItem[] = [];
@@ -284,6 +286,14 @@ function commitWorkspaceLayout(layout: WorkspaceLayout): void {
   workspace.dataset.mode = layout.mode;
   workspace.style.setProperty("--left-extent", `${layout.leftExtent}px`);
   workspace.style.setProperty("--right-extent", `${layout.rightExtent}px`);
+  // Reveal animation only on hidden→visible; a later display toggle
+  // (none→flex) restarts the CSS animation, and the class is only
+  // dropped when the pane hides so follow-up commits never cancel a
+  // running reveal mid-slide.
+  const drawerWasVisible = drawerPaneVisible;
+  drawerPaneVisible = layout.drawerVisible;
+  if (!layout.drawerVisible) drawerPane.classList.remove("pane-reveal");
+  else if (!drawerWasVisible) drawerPane.classList.add("pane-reveal");
   drawerPane.classList.toggle("hidden", !layout.drawerVisible);
   previewPane.classList.toggle("hidden", !layout.previewVisible);
   workspaceTabs.classList.toggle("hidden", layout.mode !== "compact" && layout.mode !== "overlay");
@@ -292,6 +302,14 @@ function commitWorkspaceLayout(layout: WorkspaceLayout): void {
   drawerTab.disabled = !drawerIsOpen();
   previewTab.disabled = !previewState.isOpen;
 }
+
+// Drop the reveal class once the slide completes: in overlay mode a
+// lingering z-index 1 would keep the drawer below #panel.
+drawerPane.addEventListener("animationend", (event) => {
+  if (event.animationName === "workspace-pane-reveal") {
+    drawerPane.classList.remove("pane-reveal");
+  }
+});
 
 function renderPanelDrawerView(next: DrawerView, previous: DrawerView | null): void {
   if (previous?.selectedCollection !== next.selectedCollection) {

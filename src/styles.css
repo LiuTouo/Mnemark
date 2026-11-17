@@ -222,6 +222,35 @@ html, body {
   left: calc(var(--history-left) - var(--left-extent));
 }
 
+/* Drawer reveal: the pane slides out from behind the History panel
+   instead of popping in. While the animation runs the pane sits below
+   #panel (z-index 1), so it only becomes visible as it clears the
+   History edge — "out from the middle". The class is removed on
+   animationend, restoring the pane's usual stacking. */
+@keyframes workspace-pane-reveal {
+  from {
+    transform: translateX(var(--reveal-from, 100%));
+  }
+}
+
+.workspace-drawer.pane-reveal {
+  z-index: 1;
+  animation: workspace-pane-reveal 0.3s cubic-bezier(0.2, 0.8, 0.28, 1);
+}
+
+/* Narrow modes host the drawer to the right of History: slide out to the
+   right instead of the left. */
+#workspace[data-mode="compact"] .workspace-drawer.pane-reveal,
+#workspace[data-mode="overlay"] .workspace-drawer.pane-reveal {
+  --reveal-from: -100%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace-drawer.pane-reveal {
+    animation: none;
+  }
+}
+
 .workspace-preview {
   left: calc(var(--history-left) + 420px);
 }
@@ -291,6 +320,13 @@ html, body {
   box-shadow: var(--shadow-lg);
 }
 
+/* Overlay panes sit above #panel, but a revealing drawer must still
+   emerge from behind it (mirrors .workspace-drawer.pane-reveal's z-index
+   with enough specificity to beat the z-index 8 above). */
+#workspace[data-mode="overlay"] .workspace-drawer.pane-reveal {
+  z-index: 1;
+}
+
 #workspace[data-mode="overlay"] .workspace-tabs {
   left: calc(var(--history-left) + 12px);
   width: min(396px, calc(100vw - 84px));
@@ -318,6 +354,9 @@ html, body {
   flex-direction: column;
   overflow: hidden;
   opacity: var(--panel-opacity, 1);
+  /* Keeps the revealing drawer pane (z-index 1) underneath until it
+     clears this panel's edge. */
+  z-index: 2;
 }
 
 /* === Search === */
