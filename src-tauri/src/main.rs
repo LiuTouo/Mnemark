@@ -3,7 +3,7 @@
 use std::env;
 
 fn main() {
-    // The autostart shortcut passes --hidden (see CONTEXT.md). The flag is
+    // The autostart shortcut passes --hidden. The flag is
     // accepted for spec/forward compatibility but is currently a no-op:
     // Mnemark never opens a window at startup — the Panel only appears on
     // the global hotkey.

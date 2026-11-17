@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Mnemark is a Tauri 2 desktop application with a TypeScript frontend and Rust backend. Frontend entry points live in `src/`: `main.ts` drives the clipboard panel, while `settings.ts` and `about.ts` support their matching root-level HTML pages. Shared styling and localization are also in `src/`; static images belong in `src/assets/`. Native code is under `src-tauri/src/`, split by responsibility (`clipboard.rs`, `history.rs`, `persistence.rs`, and `update.rs`). Tauri configuration, capabilities, and application icons live under `src-tauri/`. Architecture decisions are recorded in `docs/adr/`.
+Mnemark is a Tauri 2 desktop application with a TypeScript frontend and Rust backend. Frontend entry points live in `src/`: `main.ts` drives the clipboard panel, while `settings.ts` and `about.ts` support their matching root-level HTML pages. Shared styling and localization are also in `src/`; static images belong in `src/assets/`. Native code is under `src-tauri/src/`, split by responsibility (`clipboard.rs`, `history.rs`, `persistence.rs`, and `update.rs`). Tauri configuration, capabilities, and application icons live under `src-tauri/`.
 
 ## Build, Test, and Development Commands
 
