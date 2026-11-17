@@ -234,10 +234,40 @@ function updateFavoritesToggleA11y() {
   void applyWorkspaceLayout();
 }
 
+// Slide the closing drawer back behind History before the native window
+// shrinks, so the pane never just vanishes. Shared promise keeps repeated
+// layout passes from restarting the animation; the backstop covers a
+// cancelled/missed animationend so the layout pipeline can never stall.
+let drawerConceal: Promise<void> | null = null;
+function concealDrawerPane(): Promise<void> {
+  if (drawerPane.classList.contains("hidden")) return Promise.resolve();
+  if (!drawerConceal) {
+    drawerPane.classList.remove("pane-reveal");
+    drawerPane.classList.add("pane-conceal");
+    drawerConceal = new Promise((resolve) => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        drawerPane.classList.remove("pane-conceal");
+        // A quick reopen during the slide wins: keep the pane visible.
+        if (!drawerIsOpen()) drawerPane.classList.add("hidden");
+        drawerConceal = null;
+        resolve();
+      };
+      drawerPane.addEventListener("animationend", (event) => {
+        if (event.animationName === "workspace-pane-conceal") done();
+      }, { once: true });
+      setTimeout(done, 400);
+    });
+  }
+  return drawerConceal;
+}
+
 async function applyWorkspaceLayout(): Promise<void> {
   const revision = ++workspaceLayoutRevision;
   workspaceLayout.invalidate();
-  if (!drawerIsOpen()) drawerPane.classList.add("hidden");
+  if (!drawerIsOpen()) await concealDrawerPane();
   if (!previewState.isOpen) previewPane.classList.add("hidden");
   const monitor = await currentMonitor().catch(() => null);
   // WebView2's devicePixelRatio can stay at the old monitor's value for a
@@ -293,7 +323,11 @@ function commitWorkspaceLayout(layout: WorkspaceLayout): void {
   const drawerWasVisible = drawerPaneVisible;
   drawerPaneVisible = layout.drawerVisible;
   if (!layout.drawerVisible) drawerPane.classList.remove("pane-reveal");
-  else if (!drawerWasVisible) drawerPane.classList.add("pane-reveal");
+  else {
+    // A reopen cancels an in-flight conceal slide.
+    drawerPane.classList.remove("pane-conceal");
+    if (!drawerWasVisible) drawerPane.classList.add("pane-reveal");
+  }
   drawerPane.classList.toggle("hidden", !layout.drawerVisible);
   previewPane.classList.toggle("hidden", !layout.previewVisible);
   workspaceTabs.classList.toggle("hidden", layout.mode !== "compact" && layout.mode !== "overlay");

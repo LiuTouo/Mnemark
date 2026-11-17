@@ -233,22 +233,29 @@ html, body {
   }
 }
 
+/* Conceal mirrors the reveal: slide back behind History before the
+   native window shrinks (the shrink waits for animationend). */
+@keyframes workspace-pane-conceal {
+  to {
+    transform: translateX(var(--reveal-from, 100%));
+  }
+}
+
 .workspace-drawer.pane-reveal {
   z-index: 1;
   animation: workspace-pane-reveal 0.3s cubic-bezier(0.2, 0.8, 0.28, 1);
 }
 
-/* Narrow modes host the drawer to the right of History: slide out to the
-   right instead of the left. */
-#workspace[data-mode="compact"] .workspace-drawer.pane-reveal,
-#workspace[data-mode="overlay"] .workspace-drawer.pane-reveal {
-  --reveal-from: -100%;
+.workspace-drawer.pane-conceal {
+  z-index: 1;
+  animation: workspace-pane-conceal 0.3s cubic-bezier(0.42, 0, 1, 1) forwards;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .workspace-drawer.pane-reveal {
-    animation: none;
-  }
+/* Narrow modes host the drawer to the right of History: slide out to the
+   right instead of the left (applies to both reveal and conceal). */
+#workspace[data-mode="compact"] .workspace-drawer,
+#workspace[data-mode="overlay"] .workspace-drawer {
+  --reveal-from: -100%;
 }
 
 .workspace-preview {
@@ -323,7 +330,8 @@ html, body {
 /* Overlay panes sit above #panel, but a revealing drawer must still
    emerge from behind it (mirrors .workspace-drawer.pane-reveal's z-index
    with enough specificity to beat the z-index 8 above). */
-#workspace[data-mode="overlay"] .workspace-drawer.pane-reveal {
+#workspace[data-mode="overlay"] .workspace-drawer.pane-reveal,
+#workspace[data-mode="overlay"] .workspace-drawer.pane-conceal {
   z-index: 1;
 }
 

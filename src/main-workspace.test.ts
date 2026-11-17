@@ -180,7 +180,11 @@ it("reveals the drawer only after region preparation and releases unused space a
   }));
   native.invoke.mockClear();
   native.publish(false);
-  expect(drawer.classList.contains("hidden")).toBe(true);
+  // Closing now conceals: the pane stays visible while it slides back
+  // behind History (pane-conceal), then hides once the slide completes.
+  expect(drawer.classList.contains("hidden")).toBe(false);
+  expect(drawer.classList.contains("pane-conceal")).toBe(true);
+  await vi.waitFor(() => expect(drawer.classList.contains("hidden")).toBe(true));
   await vi.waitFor(() => expect(native.invoke).toHaveBeenCalledWith("set_main_workspace_layout", {
     viewportScale: 1,
     leftExtent: 0, rightExtent: 0, commit: true,
