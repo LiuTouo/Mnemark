@@ -120,11 +120,7 @@ Var MnemarkRebrandAbort
     ${EndIf}
     FileClose $R7
     Delete "$WINDIR\mnemark_elev_probe.tmp"
-    MessageBox MB_OK|MB_ICONEXCLAMATION "偵測到舊版 ClipFlow 的使用者層級登錄檔紀錄，但此安裝程序以提升權限執行；已略過自動移除以免執行未受信任的內容。請先手動移除 ClipFlow 後再重新安裝。$
-$
-$
-$
-A user-level legacy ClipFlow record was found, but this installer is running elevated; automatic removal was skipped to avoid executing untrusted content. Uninstall ClipFlow manually, then run this installer again."
+    MessageBox MB_OK|MB_ICONEXCLAMATION "偵測到舊版 ClipFlow 的使用者層級登錄檔紀錄，但此安裝程序以提升權限執行；已略過自動移除以免執行未受信任的內容。請先手動移除 ClipFlow 後再重新安裝。$\r$\n$\r$\nA user-level legacy ClipFlow record was found, but this installer is running elevated; automatic removal was skipped to avoid executing untrusted content. Uninstall ClipFlow manually, then run this installer again."
     DetailPrint "Elevated install: skipped user-writable HKCU legacy record (hive=$R5)."
     Goto legacy_none
     legacy_hkcu_accept:
