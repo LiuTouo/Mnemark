@@ -412,6 +412,12 @@ impl Clip {
 /// above every clamp in [`AppConfig::sanitized`] as a fixed safety ceiling
 /// (CWE-770/CWE-789), and the persistence reload filter applies the same
 /// value so an oversized stored row never re-enters memory.
+/// Raw-format read ceiling. Deliberately above every sanitized config
+/// maximum (image_size_limit_mb can reach 256 MiB — see the
+/// `hard_payload_cap_sits_above_every_configurable_limit` test): lowering
+/// this requires lowering those maxima first, or legit large captures get
+/// rejected. Cost note: a payload at the cap can transiently use ~2× this
+/// in memory (raw copy + decoded form).
 pub const HARD_PAYLOAD_CAP_BYTES: usize = 512 * 1024 * 1024;
 
 /// User-configurable settings stored in mnemark.config.json
@@ -518,7 +524,7 @@ impl AppConfig {
         self.image_count_limit = self.image_count_limit.clamp(1, 1_000);
         self.image_memory_budget_mb = self.image_memory_budget_mb.clamp(1, 2_048);
         self.image_size_limit_mb = self.image_size_limit_mb.clamp(1, 256);
-        self.debounce_ms = self.debounce_ms.min(10_000);
+        self.debounce_ms = self.debounce_ms.clamp(10, 10_000);
         self.ui_opacity_percent = self.ui_opacity_percent.clamp(50, 100);
         self.ui_scale_percent = self.ui_scale_percent.clamp(75, 150);
         self
@@ -581,18 +587,28 @@ fn preserve_corrupt_config(path: &std::path::Path) {
 /// Files, which is not user-writable) so they use %APPDATA%\Mnemark.
 pub fn data_dir() -> std::path::PathBuf {
     if crate::update::is_installed_build() {
-        let dir = std::env::var_os("APPDATA")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("Mnemark");
-        let _ = std::fs::create_dir_all(&dir);
-        return dir;
+        // APPDATA absent → fall back to the exe dir, never ".": a cwd
+        // fallback would scatter data into whatever directory launched us.
+        let base = match std::env::var_os("APPDATA") {
+            Some(appdata) => std::path::PathBuf::from(appdata).join("Mnemark"),
+            None => std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+                .unwrap_or_else(|| std::path::PathBuf::from("Mnemark")),
+        };
+        let _ = std::fs::create_dir_all(&base);
+        return base;
     }
+    // Portable build: keep data next to the exe (the documented portable
+    // contract). Falling back to "." would scatter data into whatever the
+    // process cwd happens to be, so resolve the exe dir or fail explicitly.
     std::env::current_exe()
-        .unwrap_or_else(|_| std::path::PathBuf::from("mnemark.exe"))
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .to_path_buf()
+        .map(|exe| {
+            exe.parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_default()
+        })
+        .unwrap_or_default()
 }
 
 fn config_path() -> std::path::PathBuf {
@@ -870,6 +886,18 @@ mod sanitize_tests {
         assert_eq!(cfg.debounce_ms, 10_000);
         assert_eq!(cfg.ui_opacity_percent, 100);
         assert_eq!(cfg.ui_scale_percent, 150);
+    }
+
+    #[test]
+    fn zero_debounce_is_clamped_to_a_usable_minimum() {
+        // A hand-edited 0/negative-ish debounce must not disable the dedup
+        // window (every capture would look like a fresh copy).
+        let cfg = AppConfig {
+            debounce_ms: 0,
+            ..AppConfig::default()
+        }
+        .sanitized();
+        assert_eq!(cfg.debounce_ms, 10);
     }
 
     #[test]

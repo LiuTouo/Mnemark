@@ -87,6 +87,17 @@ fn truncate_text(text: &str, limit: usize) -> (String, bool) {
 /// therefore always name the app that owned the copy, even when a deferred
 /// capture runs after focus has moved elsewhere. An undeterminable source
 /// never reaches here: the policy skips the sequence conservatively.
+/// Compare on the file NAME only: source.exe is a bare executable name,
+/// and a user-entered full path must still match its target (the settings
+/// UI documents bare names, but hand-edited configs may carry paths).
+fn matches_exclusion(exe: &str, excluded: &str) -> bool {
+    let excluded_name = std::path::Path::new(excluded)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(excluded);
+    exe.to_lowercase() == excluded_name.to_lowercase()
+}
+
 pub fn capture_clipboard(
     config: &AppConfig,
     source: &ClipboardSource,
@@ -94,7 +105,7 @@ pub fn capture_clipboard(
     let now = crate::now_ms();
 
     for excluded in &config.exclusion_list {
-        if source.exe.to_lowercase() == excluded.to_lowercase() {
+        if matches_exclusion(&source.exe, excluded) {
             return Err(CaptureError::Skip("Source is excluded".to_string()));
         }
     }
@@ -825,7 +836,9 @@ fn decode_dib(dib: &[u8]) -> Result<image::RgbaImage, String> {
         }
         let shift = mask.trailing_zeros();
         let max = mask >> shift;
-        (((px & mask) >> shift) * 255 / max) as u8
+        // u64 intermediate: crafted BI_BITFIELDS masks can push the scaled
+        // value past u32 before the divide (wrap → garbage colors).
+        ((((px & mask) >> shift) as u64 * 255) / max as u64) as u8
     };
 
     let mut buf = vec![0u8; pixel_count * 4];
@@ -1268,9 +1281,27 @@ pub fn simulate_ctrl_v() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_hdrop_list, truncate_text, FILE_LIST_MAX_ENTRIES, FILE_LIST_MAX_ENTRY_UNITS,
-        FILE_LIST_TOTAL_BYTES,
+        matches_exclusion, parse_hdrop_list, truncate_text, FILE_LIST_MAX_ENTRIES,
+        FILE_LIST_MAX_ENTRY_UNITS, FILE_LIST_TOTAL_BYTES,
     };
+
+    #[test]
+    fn exclusion_entries_match_bare_names_and_full_paths() {
+        // Bare names keep working...
+        assert!(matches_exclusion("keepass.exe", "KeePass.exe"));
+        // ...and a full-path entry still excludes its target executable.
+        assert!(matches_exclusion(
+            "keepass.exe",
+            "C:\\Program Files\\KeePass\\KeePass.exe"
+        ));
+        assert!(matches_exclusion("KPASS.EXE", "c:/tools/keepass/kpass.exe"));
+        // Different executables are not excluded.
+        assert!(!matches_exclusion("other.exe", "KeePass.exe"));
+        assert!(!matches_exclusion(
+            "keepassx.exe",
+            "C:\\Program Files\\KeePass\\KeePass.exe"
+        ));
+    }
 
     #[test]
     fn file_path_hash_is_unambiguous_about_delimiter_characters() {

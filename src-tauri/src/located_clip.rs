@@ -541,11 +541,22 @@ where
         }
         with_resolved_clip!(resolved, |clip| {
             match clip.kind {
-                ClipKind::Text => self
-                    .platform
-                    .write_text(clip.text_content.as_deref().unwrap_or(""))
-                    .map(|_| CopyOutcome::Copied)
-                    .map_err(LocatedClipError::ClipboardWrite),
+                ClipKind::Text => {
+                    // A Text clip without content (a deferred row that lost its
+                    // session marker via reload/snapshot/dedup) must fail, not
+                    // write an empty string: the Win32 write path empties the
+                    // clipboard first, so an empty write destroys what the
+                    // user currently has copied.
+                    let text = clip
+                        .text_content
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .ok_or(LocatedClipError::MissingContent)?;
+                    self.platform
+                        .write_text(text)
+                        .map(|_| CopyOutcome::Copied)
+                        .map_err(LocatedClipError::ClipboardWrite)
+                }
                 ClipKind::Image => self
                     .platform
                     .write_image(
@@ -556,7 +567,13 @@ where
                     .map(|_| CopyOutcome::Copied)
                     .map_err(LocatedClipError::ClipboardWrite),
                 ClipKind::FilePaths => {
+                    // Same invariant as the Text arm: contentless rows must
+                    // expire, never write an empty clipboard.
                     let text = clip.text_content.as_deref().unwrap_or("");
+                    let paths_known = clip.file_paths.as_ref().is_some_and(|p| !p.is_empty());
+                    if text.is_empty() && !paths_known {
+                        return Err(LocatedClipError::MissingContent);
+                    }
                     if self.paste_files_as_files {
                         let paths = clip
                             .file_paths
@@ -805,6 +822,79 @@ mod tests {
 
         assert_eq!(error, LocatedClipError::MissingContent);
         assert!(events.lock().unwrap().is_empty());
+    }
+
+    /// Regression: a contentless Text/FilePaths row — a deferred clip whose
+    /// session-scoped marker was lost via reload, Drawer snapshot, or dedup
+    /// recapture — must fail with MissingContent. The previous behavior
+    /// wrote an empty string: the Win32 write path empties the clipboard
+    /// first, so the user's current clipboard content was destroyed while
+    /// the command still reported Copied.
+    struct ContentlessSource(ClipKind);
+
+    impl LocatedClipSource for ContentlessSource {
+        fn resolve(&self, locator: &ClipLocator) -> Result<ResolvedClip, LocatedClipError> {
+            let mut clip = match self.0 {
+                ClipKind::Text => text_clip(&locator.id, "contentless"),
+                ClipKind::FilePaths => file_clip(&locator.id, "contentless"),
+                ClipKind::Image => unreachable!(),
+            };
+            clip.text_content = None;
+            clip.file_paths = None;
+            clip.byte_size = 0;
+            clip.deferred = None; // the marker lost on reload/snapshot/dedup
+            Ok(ResolvedClip::History(clip))
+        }
+
+        fn set_note(
+            &self,
+            _locator: &ClipLocator,
+            _note: Option<String>,
+        ) -> Result<NoteCommit, LocatedClipError> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn contentless_text_clip_fails_without_touching_clipboard() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let module = test_module(
+            ContentlessSource(ClipKind::Text),
+            RecordingClipboard(Arc::clone(&events)),
+        );
+        let locator = ClipLocator {
+            scope: ClipScope::History,
+            id: "lost-render".to_string(),
+        };
+
+        let error = module.write(&locator).unwrap_err();
+
+        assert_eq!(error, LocatedClipError::MissingContent);
+        assert!(
+            events.lock().unwrap().is_empty(),
+            "no clipboard write may happen"
+        );
+    }
+
+    #[tokio::test]
+    async fn contentless_file_clip_fails_without_touching_clipboard() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let module = test_module(
+            ContentlessSource(ClipKind::FilePaths),
+            RecordingClipboard(Arc::clone(&events)),
+        );
+        let locator = ClipLocator {
+            scope: ClipScope::History,
+            id: "lost-render".to_string(),
+        };
+
+        let error = module.write(&locator).unwrap_err();
+
+        assert_eq!(error, LocatedClipError::MissingContent);
+        assert!(
+            events.lock().unwrap().is_empty(),
+            "no clipboard write may happen"
+        );
     }
 
     #[test]

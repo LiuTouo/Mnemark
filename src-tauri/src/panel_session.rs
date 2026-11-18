@@ -115,7 +115,10 @@ where
     }
 
     pub(crate) async fn prepare_paste(&self, hide: impl FnOnce()) -> PasteAction {
-        let target = self.paste_target.load(Ordering::SeqCst);
+        // Consume the remembered target: an HWND held across hide/show
+        // cycles could match a recycled window handle; a missing target
+        // suppresses the paste instead of trusting a stale value.
+        let target = self.paste_target.swap(0, Ordering::SeqCst);
         hide();
         let deadline = self.clock.now_ms().saturating_add(PASTE_FOCUS_TIMEOUT_MS);
 

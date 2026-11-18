@@ -107,6 +107,27 @@ Var MnemarkRebrandAbort
   Goto legacy_none
 
   legacy_hkcu_found:
+    ; HKCU uninstall values are writable by any same-user process without
+    ; elevation. Never execute them from an elevated installer (confused
+    ; deputy): an elevated run would execute planted values with admin
+    ; rights. Elevation probe — a write into the Windows directory succeeds
+    ; only with an elevated token. HKLM records stay usable (writing them
+    ; already required admin).
+    ClearErrors
+    FileOpen $R7 "$WINDIR\mnemark_elev_probe.tmp" w
+    ${If} ${Errors}
+      Goto legacy_hkcu_accept
+    ${EndIf}
+    FileClose $R7
+    Delete "$WINDIR\mnemark_elev_probe.tmp"
+    MessageBox MB_OK|MB_ICONEXCLAMATION "偵測到舊版 ClipFlow 的使用者層級登錄檔紀錄，但此安裝程序以提升權限執行；已略過自動移除以免執行未受信任的內容。請先手動移除 ClipFlow 後再重新安裝。$
+$
+$
+$
+A user-level legacy ClipFlow record was found, but this installer is running elevated; automatic removal was skipped to avoid executing untrusted content. Uninstall ClipFlow manually, then run this installer again."
+    DetailPrint "Elevated install: skipped user-writable HKCU legacy record (hive=$R5)."
+    Goto legacy_none
+    legacy_hkcu_accept:
     StrCpy $R5 "HKCU"
     Goto legacy_found
   legacy_hklm_found:

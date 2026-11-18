@@ -57,3 +57,6 @@ prototype/
 
 # Impeccable critique snapshots (local agent tooling)
 .impeccable/
+
+# Local credential files must never land in the repo
+.env

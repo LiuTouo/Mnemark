@@ -305,7 +305,10 @@ async function onSubmit(e: Event) {
 
   try {
     await invoke("update_config", { newConfig: next });
-    config = next;
+    // The backend sanitizes/clamps the stored values; re-read the
+    // authoritative config so the dirty-check baseline matches what was
+    // actually persisted instead of trusting the submitted form state.
+    config = await invoke<AppConfig>("get_config");
     await invoke("hide_settings_window");
   } catch (err) {
     console.error("Save failed:", err);

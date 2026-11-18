@@ -88,9 +88,21 @@ fn migrate_one(src_dir: &Path, legacy: &str, dest_dir: &Path, new: &str) -> Resu
             e
         )
     })?;
-    // Confirm the destination before considering the file migrated.
-    let src_len = std::fs::metadata(&src).map(|m| m.len()).unwrap_or(0);
-    let dest_len = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+    // Confirm the destination before considering the file migrated. A stat
+    // failure is a failed verification, not a zero length — otherwise two
+    // failed reads would compare 0 == 0 and pass a bad copy.
+    let src_len = std::fs::metadata(&src).map(|m| m.len()).map_err(|e| {
+        format!(
+            "Migration failed to stat {}: {e} — legacy data preserved",
+            src.display()
+        )
+    })?;
+    let dest_len = std::fs::metadata(&dest).map(|m| m.len()).map_err(|e| {
+        format!(
+            "Migration failed to stat {}: {e} — legacy data preserved",
+            dest.display()
+        )
+    })?;
     if dest_len != src_len {
         let _ = std::fs::remove_file(&dest);
         return Err(format!(

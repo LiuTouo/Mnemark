@@ -250,9 +250,13 @@ impl Persistence {
     }
 
     pub fn delete(&self, id: &str) -> Result<(), String> {
-        self.conn
+        let updated = self
+            .conn
             .execute("DELETE FROM clips WHERE id = ?1", params![id])
             .map_err(|e| e.to_string())?;
+        if updated == 0 {
+            return Err("Clip not found".to_string());
+        }
         Ok(())
     }
 
@@ -268,12 +272,16 @@ impl Persistence {
     }
 
     pub fn set_pinned(&self, id: &str, pinned: bool) -> Result<(), String> {
-        self.conn
+        let updated = self
+            .conn
             .execute(
                 "UPDATE clips SET pinned = ?1 WHERE id = ?2",
                 params![pinned as i64, id],
             )
             .map_err(|e| e.to_string())?;
+        if updated == 0 {
+            return Err("Clip not found".to_string());
+        }
         Ok(())
     }
 
@@ -468,6 +476,18 @@ mod tests {
         let mut ids: Vec<String> = p.load_all().unwrap().into_iter().map(|c| c.id).collect();
         ids.sort();
         assert_eq!(ids, vec!["b".to_string(), "r".to_string()]);
+    }
+
+    #[test]
+    fn delete_and_set_pinned_report_missing_rows() {
+        // Row-count checks keep memory state and the database from drifting
+        // apart when a write silently matches nothing (set_note already did).
+        let mut p = test_persistence();
+        assert_eq!(p.delete("ghost").unwrap_err(), "Clip not found");
+        assert_eq!(p.set_pinned("ghost", true).unwrap_err(), "Clip not found");
+        p.dump(&[clip("a", "ha", 1)]).unwrap();
+        p.delete("a").unwrap();
+        assert_eq!(p.delete("a").unwrap_err(), "Clip not found");
     }
 
     #[test]

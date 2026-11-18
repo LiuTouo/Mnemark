@@ -14,6 +14,12 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
+    # The tag name is maintainer-controlled but still untrusted template
+    # input: it reaches several pwsh blocks below, so it is passed as an
+    # environment variable instead of `${{ }}` interpolation into script
+    # text (expression-injection hardening).
+    env:
+      REF_NAME: ${{ github.ref_name }}
     # Protected-environment gate (CWE-829): every release waits for manual
     # approval BEFORE this job — and with it the signing key and publish
     # token — runs at all. Requires the `release-signing` environment to
@@ -47,7 +53,7 @@ jobs:
         shell: pwsh
         run: |
           $v = (Select-String -Path src-tauri/Cargo.toml -Pattern '^version = "([^"]+)"').Matches[0].Groups[1].Value
-          if ("v$v" -ne "${{ github.ref_name }}") { throw "Tag ${{ github.ref_name }} != Cargo.toml v$v" }
+          if ("v$v" -ne $env:REF_NAME) { throw "Tag $env:REF_NAME != Cargo.toml v$v" }
 
       # Quality gates (A+B flow): CI no longer runs on tag pushes (ci.yml
       # watches branches only), so this job re-runs the suite itself before
@@ -113,10 +119,10 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          $exe = "Mnemark_${{ github.ref_name }}_x64-portable.exe"
+          $exe = "Mnemark_$($env:REF_NAME)_x64-portable.exe"
           $manifest = [ordered]@{
             repository   = "LiuTouo/Mnemark"
-            version      = "${{ github.ref_name }}".TrimStart('v')
+            version      = $env:REF_NAME.TrimStart('v')
             channel      = "portable"
             architecture = "x86_64"
             file         = $exe
@@ -133,13 +139,13 @@ jobs:
       # so this mitigates download-time blocking only).
       - name: Zip portable exe
         shell: pwsh
-        run: Compress-Archive -Path "Mnemark_${{ github.ref_name }}_x64-portable.exe" -DestinationPath "Mnemark_${{ github.ref_name }}_x64-portable.zip" -Force
+        run: Compress-Archive -Path "Mnemark_$($env:REF_NAME)_x64-portable.exe" -DestinationPath "Mnemark_$($env:REF_NAME)_x64-portable.zip" -Force
 
       - name: Upload portable asset
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ github.ref_name }}" "Mnemark_${{ github.ref_name }}_x64-portable.exe" "Mnemark_${{ github.ref_name }}_x64-portable.exe.sig" "Mnemark_${{ github.ref_name }}_x64-portable.exe.manifest.json" "Mnemark_${{ github.ref_name }}_x64-portable.exe.manifest.json.sig" "Mnemark_${{ github.ref_name }}_x64-portable.zip" --clobber
+        run: gh release upload $env:REF_NAME "Mnemark_$($env:REF_NAME)_x64-portable.exe" "Mnemark_$($env:REF_NAME)_x64-portable.exe.sig" "Mnemark_$($env:REF_NAME)_x64-portable.exe.manifest.json" "Mnemark_$($env:REF_NAME)_x64-portable.exe.manifest.json.sig" "Mnemark_$($env:REF_NAME)_x64-portable.zip" --clobber
 
       # tauri-action creates the release with the commit message as body.
       # Replace it with this version's CHANGELOG section (header line dropped —
@@ -153,9 +159,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $ver = "${{ github.ref_name }}".TrimStart('v')
+          $ver = $env:REF_NAME.TrimStart('v')
           $changelog = [System.IO.File]::ReadAllText("CHANGELOG.md", [System.Text.UTF8Encoding]::new($false))
-          $m = [regex]::Match($changelog, "(?ms)^## \[$([regex]::Escape($ver))\].*?(?=^## \[|^\[\d|\z)")
+          $m = [regex]::Match($changelog, "(?ms)^## \[" + [regex]::Escape($ver) + "\].*?(?=^## \[|^\[\d|\z)")
           if (-not $m.Success) { throw "CHANGELOG.md has no section for $ver" }
           $notes = (($m.Value.Trim() -split "`r?`n") | Select-Object -Skip 1) -join "`n"
-          gh release edit "${{ github.ref_name }}" --notes=$notes
+          gh release edit $env:REF_NAME --notes=$notes

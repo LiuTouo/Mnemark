@@ -203,7 +203,7 @@ fn get_current_clip_hash(state: tauri::State<AppState>) -> Option<String> {
 fn delete_clip(id: String, state: tauri::State<AppState>) -> Result<(), String> {
     lock(&state.history)
         .delete(&id)
-        .map(|_| ())
+        .map(|_| remove_temp_preview(&id))
         .map_err(|e| e.message())
 }
 
@@ -218,7 +218,11 @@ fn undo_delete(id: String, state: tauri::State<AppState>) -> Result<Clip, String
 fn delete_clips(ids: Vec<String>, state: tauri::State<AppState>) -> Result<(), String> {
     lock(&state.history)
         .delete_many(&ids)
-        .map(|_| ())
+        .map(|_| {
+            for id in &ids {
+                remove_temp_preview(id);
+            }
+        })
         .map_err(|e| e.message())
 }
 
@@ -263,7 +267,26 @@ fn hide_settings_window(app: tauri::AppHandle) {
 /// field. Route them into the same diag log the backend writes.
 #[tauri::command]
 fn frontend_log(message: String) {
-    log(&format!("[frontend] {message}"));
+    log(&format!(
+        "[frontend] {}",
+        sanitize_frontend_message(&message)
+    ));
+}
+
+/// Clip-derived error text flows through frontend_log: embedded newlines
+/// could forge diagnostic lines, and an unbounded message grows the log
+/// without limit. Strip line breaks, then clip to a bounded length.
+fn sanitize_frontend_message(message: &str) -> String {
+    const MAX_FRONTEND_LOG: usize = 2_048;
+    let mut clean: String = message
+        .chars()
+        .filter(|c| *c != '\n' && *c != '\r')
+        .collect();
+    if clean.chars().count() > MAX_FRONTEND_LOG {
+        let kept: String = clean.chars().take(MAX_FRONTEND_LOG).collect();
+        clean = format!("{kept}…[truncated]");
+    }
+    clean
 }
 
 /// Register `new_hotkey` before unregistering `old_hotkey`, so a conflict never
@@ -373,7 +396,7 @@ impl ConfigEffects for SystemConfigEffects<'_> {
     }
 }
 
-fn validate_config_update(new_config: &AppConfig, old_config: &AppConfig) -> Result<(), String> {
+fn validate_config_update(new_config: &AppConfig, _old_config: &AppConfig) -> Result<(), String> {
     new_config.favorites_toggle_shortcut.validate()?;
     if new_config
         .favorites_toggle_shortcut
@@ -382,10 +405,10 @@ fn validate_config_update(new_config: &AppConfig, old_config: &AppConfig) -> Res
         return Err("Drawer shortcut conflicts with the panel hotkey".to_string());
     }
 
-    if new_config.hotkey == old_config.hotkey {
-        return Ok(());
-    }
-
+    // Always re-validate the hotkey, even when unchanged: a hand-edited
+    // config file can carry an invalid chord past load-time defaults, and
+    // skipping the check here would let it persist through unrelated config
+    // updates.
     // A bare key (e.g. "A" or "F1") as a global shortcut makes that key
     // unusable in every other application — require a modifier.
     let has_modifier = ["Ctrl", "Shift", "Alt", "Super"]
@@ -577,19 +600,57 @@ async fn show_located_clip_preview(
         .map_err(LocatedClipWireError::from)
 }
 
+/// Remove one exported temp preview PNG for `id` (if any). Best-effort:
+/// viewer failure to release the file must not fail the clip deletion.
+fn remove_temp_preview(id: &str) {
+    let _ = std::fs::remove_file(temp_preview_path(id));
+}
+
+fn temp_preview_path(id: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("mnemark-preview-{id}.png"))
+}
+
+/// Clip ids are SHA-256 hex digests everywhere; the temp-preview filename
+/// safety below depends on it, so validate instead of trusting the caller.
+fn is_sha256_hex(id: &str) -> bool {
+    id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Delete leftover `mnemark-preview-*.png` exports from previous sessions
+/// (the external viewer owns the file while open, so per-open cleanup is
+/// best-effort only; this sweep bounds what can linger in %TEMP%).
+fn sweep_temp_previews() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.starts_with("mnemark-preview-") && name.ends_with(".png") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Export one image clip's full-resolution PNG to the OS temp dir and open it
-/// with the system default image viewer. The file is named after the clip id
-/// (a SHA-256 hex string, so filename-safe) and overwritten per open, keeping
-/// temp usage bounded instead of accumulating one file per double-click.
+/// with the system default image viewer. The path safety below depends on the
+/// clip id being a SHA-256 hex string, so anything else is rejected up front
+/// instead of trusting the doc comment.
 #[tauri::command]
 fn open_located_clip_image_externally(
     locator: ClipLocator,
     state: tauri::State<AppState>,
 ) -> Result<(), LocatedClipWireError> {
+    let id = locator.id.as_str();
+    if !is_sha256_hex(id) {
+        return Err(LocatedClipWireError::from(
+            LocatedClipError::PreviewPublication("clip id is not a SHA-256 hex string".to_string()),
+        ));
+    }
     let png = located_clip_module(&state)
         .image_png_bytes(&locator)
         .map_err(LocatedClipWireError::from)?;
-    let path = std::env::temp_dir().join(format!("mnemark-preview-{}.png", locator.id));
+    let path = temp_preview_path(id);
     std::fs::write(&path, png).map_err(|e| {
         LocatedClipWireError::from(LocatedClipError::PreviewPublication(e.to_string()))
     })?;
@@ -1198,6 +1259,11 @@ fn install_panel_style_guard(window: &tauri::WebviewWindow) {
     };
 
     /// Original window proc chained to by the guard; swapped in on install.
+    /// Invariant: only the single panel window ever installs the guard, so
+    /// this process-global static holds exactly one live proc — keep it that
+    /// way if more guarded windows appear (per-window storage then).
+    /// Unlike monitor_wndproc, no user Rust callback runs inside this proc
+    /// (only infallible GDI/pointer operations), so no catch_unwind wrapper.
     static PREV_WNDPROC: AtomicIsize = AtomicIsize::new(0);
 
     unsafe extern "system" fn guard_proc(
@@ -2436,6 +2502,7 @@ pub fn run(_hidden: bool) {
     // Diagnostics first: everything below can fail invisibly without it.
     diag_log::init();
     update::cleanup_stale_portable_update();
+    sweep_temp_previews();
     // One-time migration of legacy ClipFlow data (config/db/shortcut) into the
     // Mnemark identity. Runs before config load / persistence open so the first
     // launch reads the migrated files. Errors preserve the legacy data and are
@@ -3343,5 +3410,32 @@ mod current_clip_hash_tests {
         }
         // The clipboard still holds the same content — the marker must stay.
         assert_eq!(*lock(&current), Some("hash-a".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod preview_export_tests {
+    use super::{is_sha256_hex, sanitize_frontend_message};
+
+    #[test]
+    fn sha256_hex_ids_are_accepted_and_everything_else_rejected() {
+        assert!(is_sha256_hex(
+            "a3f1c09d5e8b47f2a6c0d1e9f8b7a6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9"
+        ));
+        // Wrong length, traversal, non-hex, mixed case garbage, empty.
+        assert!(!is_sha256_hex("short"));
+        assert!(!is_sha256_hex(r"..\..\..\..\evil.exe"));
+        assert!(!is_sha256_hex(&"g".repeat(64)));
+        assert!(!is_sha256_hex(""));
+    }
+
+    #[test]
+    fn frontend_log_messages_lose_line_breaks_and_stay_bounded() {
+        assert_eq!(sanitize_frontend_message("a\r\nb\nc"), "abc");
+        let long = "x".repeat(3_000);
+        let clipped = sanitize_frontend_message(&long);
+        assert!(clipped.starts_with(&"x".repeat(2_048)));
+        assert!(clipped.ends_with("…[truncated]"));
+        assert!(sanitize_frontend_message("plain").chars().count() < 2_048);
     }
 }

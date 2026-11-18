@@ -95,9 +95,7 @@ function render(payload: PreviewPayload) {
       }).catch((err) => console.error("Failed to open image externally:", err));
     });
     const b64 = payload.image_preview_base64 || "";
-    img.src = b64.startsWith("data:")
-      ? b64
-      : `data:image/png;base64,${b64}`;
+    img.src = `data:image/png;base64,${b64}`;
     contentEl.appendChild(img);
   } else {
     const ta = document.createElement("textarea");
