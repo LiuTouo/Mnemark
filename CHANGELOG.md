@@ -4,6 +4,27 @@
 
 格式參考 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)，版本號遵循[語意化版本](https://semver.org/lang/zh-TW/)。
 
+## [0.8.26] - 2026-11-18
+
+### Added
+
+- 搜尋／篩選無結果的空狀態提供一鍵清除動作
+
+### Changed
+
+- 設定頁「行為」卡拆為行為／隱私／系統，術語改白話標籤與提示，全域小字 11px→12px
+- 關於頁更新流程改為單一情境動作，不再輪播按鈕
+
+### Fixed
+
+- 無內容的剪貼項目複製改回報錯誤，不再以空字串清空剪貼簿仍回報成功
+- 暫存匯出預覽驗證 clip id 為 SHA-256 並清理殘留檔案
+- 手改設定檔的無效快捷鍵不再被略過驗證；安裝器拒用使用者可寫的舊解除安裝登錄值
+- release workflow 以環境變數傳遞 tag，防 pwsh 範本注入
+- 其他強化：debounce 下限 10ms、排除清單支援完整路徑、釘選／刪除檢查影響列數、貼上目標 HWND 不重複使用
+- 設定關閉路徑（Esc、取消、X）一律經未存變更守衛：首次警示、再次捨棄
+- 開啟「減少動態效果」時抽屜以 0.01ms 動畫收尾，面板不再卡在歷史清單下方
+
 ## [0.8.25] - 2026-11-17
 
 ### Added
@@ -745,6 +766,7 @@
 
 - 初始版本：剪貼簿監聽（文字／圖片／檔案路徑）、SHA-256 內容去重、容量限制與淘汰、釘選（上限 10 則、永不淘汰）、即時搜尋、Raycast 風格浮動面板（`Ctrl+Shift+V`）、貼上模擬、刪除復原、系統匣常駐、排除清單、深淺色主題跟隨系統、免安裝可攜（設定存於 exe 旁）
 
+[0.8.26]: https://github.com/LiuTouo/Mnemark/compare/v0.8.25...v0.8.26
 [0.8.25]: https://github.com/LiuTouo/Mnemark/compare/v0.8.24...v0.8.25
 [0.8.24]: https://github.com/LiuTouo/Mnemark/compare/v0.8.23...v0.8.24
 [0.8.23]: https://github.com/LiuTouo/Mnemark/compare/v0.8.22...v0.8.23
